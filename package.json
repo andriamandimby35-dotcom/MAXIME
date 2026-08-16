@@ -1,0 +1,36 @@
+{
+  "name": "sebastien-btp-pro",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "check:env": "node scripts/check-env.mjs",
+    "verify": "npm run verify:static && npm run lint && npm run build",
+    "verify:static": "node scripts/verify-static.mjs"
+  },
+  "dependencies": {
+    "@supabase/ssr": "0.12.3",
+    "@supabase/supabase-js": "2.110.8",
+    "next": "16.2.12",
+    "openai": "^7.4.0",
+    "pdf-parse": "^1.1.4",
+    "pdfjs-dist": "^6.2.108",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-markdown": "^10.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.2.0",
+    "@types/react": "19.1.9",
+    "@types/react-dom": "19.1.7",
+    "eslint": "9.32.0",
+    "eslint-config-next": "16.2.12",
+    "typescript": "5.9.2"
+  }
+}

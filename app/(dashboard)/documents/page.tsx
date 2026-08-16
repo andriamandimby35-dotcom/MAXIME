@@ -1,0 +1,2 @@
+import {getContext} from "@/lib/organization";import {DocumentManager} from "./document-manager";
+export default async function Page(){const {supabase,user,organizationId}=await getContext();const {data}=organizationId?await supabase.from('documents').select('*').eq('organization_id',organizationId).order('created_at',{ascending:false}):{data:[]};return <DocumentManager organizationId={organizationId} userId={user?.id??null} initialRows={data??[]}/>}

@@ -1,0 +1,14 @@
+"use client";
+import { useMemo, useState } from "react";
+import { createClient } from "@/lib/supabase/client";
+import { formatAr, formatDate } from "@/components/money";
+
+type Field={name:string;label:string;type?:string;required?:boolean;options?:{value:string;label:string}[]};
+type Props={title:string;description:string;table:string;organizationId:string|null;userId?:string|null;fields:Field[];initialRows:any[];columns:{key:string;label:string;format?:"money"|"date"}[];defaults?:Record<string,any>};
+
+export function EntityManager({title,description,table,organizationId,userId,fields,initialRows,columns,defaults={}}:Props){
+ const [rows,setRows]=useState(initialRows),[open,setOpen]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState("");
+ const supabase=useMemo(()=>createClient(),[]);
+ async function submit(e:React.FormEvent<HTMLFormElement>){e.preventDefault();if(!organizationId)return;setBusy(true);setError("");const f=new FormData(e.currentTarget);const payload:any={organization_id:organizationId,...defaults};for(const field of fields){let v=f.get(field.name);if(field.type==='number')v=String(Number(v||0));payload[field.name]=v===''?null:v;}if(userId&&['tenders','estimates','expenses','daily_reports'].includes(table))payload.created_by=userId;const {data,error}=await supabase.from(table).insert(payload).select().single();if(error){setError(error.message);setBusy(false);return;}setRows([data,...rows]);setOpen(false);setBusy(false);e.currentTarget.reset();}
+ return <div className="stack"><div className="pageHead"><div><h1>{title}</h1><p>{description}</p></div><button className="button" onClick={()=>setOpen(true)}>+ Ajouter</button></div>{!organizationId&&<div className="notice danger">Aucune entreprise associée au compte.</div>}<section className="panel tablePanel"><table><thead><tr>{columns.map(c=><th key={c.key}>{c.label}</th>)}</tr></thead><tbody>{rows.length===0?<tr><td colSpan={columns.length} className="empty">Aucune donnée.</td></tr>:rows.map((r:any)=><tr key={r.id}>{columns.map(c=><td key={c.key}>{c.format==='money'?formatAr(r[c.key]):c.format==='date'?formatDate(r[c.key]):String(r[c.key]??'—')}</td>)}</tr>)}</tbody></table></section>{open&&<div className="modalBackdrop"><form className="modal" onSubmit={submit}><div className="panelHead"><h2>Nouvel élément</h2><button type="button" className="ghost" onClick={()=>setOpen(false)}>Fermer</button></div><div className="formGrid">{fields.map(field=><label key={field.name}>{field.label}{field.options?<select name={field.name} required={field.required}>{field.options.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}</select>:<input name={field.name} type={field.type||'text'} required={field.required}/>}</label>)}</div>{error&&<div className="notice danger">{error}</div>}<button className="button" disabled={busy}>{busy?'Enregistrement…':'Enregistrer'}</button></form></div>}</div>;
+}

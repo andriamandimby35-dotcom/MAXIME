@@ -1,0 +1,266 @@
+"use client";
+
+import { useState } from "react";
+import { createClient } from "@/lib/supabase/client";
+import { useRouter } from "next/navigation";
+
+export default function LoginPage() {
+
+  const router = useRouter();
+
+  const [signup, setSignup] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+
+
+  async function submit(e: React.FormEvent<HTMLFormElement>) {
+
+    e.preventDefault();
+
+    console.log("BOUTON LOGIN CLIQUE");
+
+    setLoading(true);
+    setError("");
+
+    const form = new FormData(e.currentTarget);
+
+    const email = String(form.get("email"));
+    const password = String(form.get("password"));
+
+    const supabase = createClient();
+    console.log("SUPABASE CLIENT OK");
+
+const test = await supabase.auth.getSession();
+
+console.log("SESSION AVANT LOGIN :", test);
+
+
+    let result;
+
+
+    if (signup) {
+
+      const full_name = String(form.get("full_name") || "");
+      const company_name = String(form.get("company_name") || "");
+
+
+      result = await supabase.auth.signUp({
+
+        email,
+        password,
+
+        options: {
+          data: {
+            full_name,
+            company_name
+          }
+        }
+
+      });
+
+
+    } else {
+
+
+      result = await supabase.auth.signInWithPassword({
+
+        email,
+        password
+
+      });
+
+
+    }
+
+
+
+    console.log("RESULTAT SUPABASE :", result);
+
+
+
+    if (result.error) {
+
+      console.log("ERREUR SUPABASE :", result.error);
+
+      alert(result.error.message);
+
+      setError(result.error.message);
+
+      setLoading(false);
+
+      return;
+
+    }
+
+
+
+    console.log("CONNEXION OK");
+
+
+    router.push("/dashboard");
+
+    router.refresh();
+
+
+  }
+
+
+
+  return (
+
+    <main className="auth">
+
+
+      <form 
+        className="authCard"
+        onSubmit={submit}
+      >
+
+
+        <div className="logo">
+          SB
+        </div>
+
+
+        <h1>
+          Sébastien BTP
+        </h1>
+
+
+        <p>
+          Application de gestion BTP de <strong>May&Lanah</strong>.
+        </p>
+
+
+
+        {signup && (
+
+          <input
+            name="full_name"
+            placeholder="Nom complet"
+            required
+          />
+
+        )}
+
+
+
+        {signup && (
+
+          <input
+            name="company_name"
+            placeholder="Nom entreprise"
+            required
+          />
+
+        )}
+
+
+
+        <input
+
+          name="email"
+
+          type="email"
+
+          placeholder="E-mail"
+
+          required
+
+          defaultValue="andriamandimby@icloud.com"
+
+        />
+
+
+
+        <input
+
+          name="password"
+
+          type="password"
+
+          placeholder="Mot de passe"
+
+          required
+
+        />
+
+
+
+        <small>
+
+          Pour votre sécurité, n’utilisez pas le mot de passe partagé dans la conversation.
+
+        </small>
+
+
+
+        {error && (
+
+          <div className="error">
+
+            {error}
+
+          </div>
+
+        )}
+
+
+
+        <button
+
+          type="submit"
+
+          disabled={loading}
+
+        >
+
+          {loading 
+
+          ? "Connexion..." 
+
+          : signup 
+
+          ? "Créer mon entreprise" 
+
+          : "Se connecter"}
+
+        </button>
+
+
+
+        <button
+
+          type="button"
+
+          className="ghost"
+
+          onClick={() => {
+
+            setSignup(!signup);
+
+            setError("");
+
+          }}
+
+        >
+
+          {signup 
+
+          ? "J'ai déjà un compte" 
+
+          : "Créer mon entreprise"}
+
+        </button>
+
+
+
+      </form>
+
+
+    </main>
+
+  );
+
+}
