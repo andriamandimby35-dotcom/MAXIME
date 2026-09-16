@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { deleteOfflinePhoto, loadOfflinePhoto, saveOfflinePhoto } from "@/lib/offline-photos";
 
 type Project = { id: string; project_code?: string | null; name: string; location?: string | null; budget_amount?: number | string | null; progress_percent?: number | string | null; status?: string | null; planned_end_date?: string | null; source_tender_id?: string | null; source_estimate_id?: string | null };
 type PriceItem = { id: string; project_id: string; position?: string | null; designation: string; unit?: string | null; quantity?: number | string | null; unit_price?: number | string | null; total?: number | string | null; is_internal?: boolean };
@@ -15,7 +16,36 @@ type SitePhoto = { id: string; project_id: string; report_id?: string | null; ta
 type AiSuggestion = { id: string; project_id: string; suggestion_type: string; title: string; content: string; confidence?: number | string | null; status: string; user_response?: string | null; created_by?: string | null; created_at: string };
 type NoteReadEntry = { user_id: string; read_at: string };
 type RecordNote = { id: string; project_id: string; entity_type: string; entity_id: string; severity: "info" | "review" | "urgent" | string; title: string; content: string; created_at: string; created_by?: string | null; read_by?: NoteReadEntry[] | null; reply_content?: string | null; reply_severity?: "urgent" | "review" | "confirmation" | string | null; replied_by?: string | null; replied_at?: string | null; reply_read_by?: NoteReadEntry[] | null };
-type PendingSync = { id: string; label: string; action: "insert" | "update"; table: string; rowId?: string; payload: Record<string, unknown>; createdAt: string };
+type PendingSync = { id: string; label: string; action: "insert" | "update" | "report" | "purchase"; table: string; rowId?: string; payload: Record<string, unknown>; createdAt: string };
+// Rapport journalier mis de côté hors connexion : les infos du rapport, les
+// mises à jour de planning/stock à rejouer, et les identifiants des photos
+// gardées sur l'appareil (voir lib/offline-photos.ts) le temps de les envoyer.
+type QueuedReportPayload = {
+  reportInput: {
+    p_project_id: string;
+    p_report_date: string;
+    p_weather: string | null;
+    p_workers_present: number;
+    p_completed_work: string | null;
+    p_next_day_plan: string | null;
+    p_issues: string | null;
+    p_consumptions: Array<{ material_id: string; quantity: number }>;
+  };
+  taskUpdates: Array<{ task_id: string; progress_percent: number; status: string; checklist?: ChecklistItem[] }>;
+  materialUpdates: Array<{ material_id: string; quantity: number }>;
+  photoIds: string[];
+};
+// Validation d'un achat (photo de la facture/du matériau) mise de côté hors
+// connexion : la photo est gardée sur l'appareil (voir lib/offline-photos.ts),
+// le reste rejoue exactement la même validation qu'en ligne dès le retour du réseau.
+type QueuedPurchasePayload = {
+  orderId: string;
+  purchasedQuantity: number;
+  unitPrice: number;
+  photoId: string;
+  transportMode: string | null;
+  transportPrice: number | null;
+};
 type ProjectAccessRole = "admin" | "works_manager" | "site_manager" | "viewer";
 type Assignment = { id: string; user_id: string; role: string; active: boolean; permissions?: Record<string, boolean> | null; parent_assignment_id?: string | null; created_at?: string; email?: string | null; displayName?: string | null; access_password?: string | null };
 type Invitation = { id: string; email: string; role: string; status: string; permissions?: Record<string, boolean> | null; parent_assignment_id?: string | null; invited_by?: string | null; accepted_at?: string | null; created_at?: string };
@@ -34,7 +64,6 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   const supabase = useMemo(() => createClient(), []);
   const today = new Date().toISOString().slice(0, 10);
   const [projects, setProjects] = useState(initialProjects);
-  const [priceItems] = useState(initialPriceItems);
   const [tasks, setTasks] = useState(initialTasks);
   const [reports, setReports] = useState(initialReports);
   const [materials, setMaterials] = useState(initialMaterials);
@@ -80,6 +109,10 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   const [transportPriceDraft, setTransportPriceDraft] = useState("");
   const [selectedTransportPrice, setSelectedTransportPrice] = useState<number | null>(null);
   const [viewingAchats, setViewingAchats] = useState(false);
+  const [addingMiscExpense, setAddingMiscExpense] = useState(false);
+  const [miscExpenseDraft, setMiscExpenseDraft] = useState({ recipient: "", amount: "", note: "" });
+  const [confirmingMiscExpense, setConfirmingMiscExpense] = useState(false);
+  const [miscExpenseStatus, setMiscExpenseStatus] = useState<{ kind: "info" | "success" | "error"; text: string } | null>(null);
   const [newLibraryMaterial, setNewLibraryMaterial] = useState({ designation: "", unite: "U", fournisseur: "", ville: "", prix: "" });
   const [newLibraryStatus, setNewLibraryStatus] = useState<{ kind: "info" | "success" | "error"; text: string } | null>(null);
   const [editingLibraryMaterial, setEditingLibraryMaterial] = useState<PriceLibraryOption | null>(null);
@@ -125,7 +158,6 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   const WEATHER_OPTIONS = ["Ensoleillé", "Nuageux", "Pluvieux", "Orageux", "Brumeux"];
   const project = projects.find((item) => item.id === selectedId) ?? null;
   const projectTasks = tasks.filter((item) => item.project_id === selectedId);
-  const projectPriceItems = priceItems.filter((item) => item.project_id === selectedId);
   const projectReports = reports.filter((item) => item.project_id === selectedId).sort((a, b) => b.report_date.localeCompare(a.report_date));
   const projectMaterials = materials.filter((item) => item.project_id === selectedId);
   const projectReportMaterialUsages = reportMaterialUsages.filter((item) => item.project_id === selectedId);
@@ -458,7 +490,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   }
 
   async function markNotesRead() {
-    if (!userId || !online || !unreadNotes.length) return;
+    if (!userId || !unreadNotes.length) return;
     const readAt = new Date().toISOString();
     const targets = unreadNotes;
     const buildUpdates = (note: RecordNote) => {
@@ -468,6 +500,16 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
       return updates;
     };
     setRecordNotes((rows) => rows.map((row) => { const target = targets.find((item) => item.id === row.id); return target ? { ...row, ...buildUpdates(target) } : row; }));
+    if (!online) {
+      // Plusieurs remarques à la fois : on ajoute toutes les entrées en un
+      // seul coup (au lieu d'appeler queueForSync en boucle) pour ne pas en
+      // perdre en route à cause des mises à jour d'état groupées par React.
+      const entries: PendingSync[] = targets.map((note) => ({ id: crypto.randomUUID(), label: "Lecture de remarque", action: "update", table: "project_record_notes", rowId: note.id, payload: buildUpdates(note), createdAt: new Date().toISOString() }));
+      const next = [...pendingSync, ...entries];
+      localStorage.setItem("btp-project-pending-sync", JSON.stringify(next));
+      setPendingSync(next);
+      return;
+    }
     await Promise.all(targets.map((note) => supabase.from("project_record_notes").update(buildUpdates(note)).eq("id", note.id)));
   }
 
@@ -547,6 +589,68 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     setMessage("Analyse IA signalée à l’équipe : visible dans « Remarques et notifications ».");
   }
 
+  // Rejoue un rapport journalier mis de côté hors connexion : relance le même
+  // calcul de stock côté serveur, applique les mêmes mises à jour de planning,
+  // puis envoie les photos gardées sur l'appareil. Si des photos échouent
+  // encore (reconnexion coupée en cours de route), l'entrée est conservée
+  // avec seulement les photos restantes, pour réessayer plus tard sans
+  // recréer le rapport une deuxième fois.
+  async function syncQueuedReport(entry: PendingSync): Promise<{ ok: boolean; entry?: PendingSync }> {
+    const queued = entry.payload as unknown as QueuedReportPayload;
+    const { data: reportId, error } = await supabase.rpc("record_project_daily_report_consumption", queued.reportInput);
+    if (error || !reportId) return { ok: false, entry };
+
+    await Promise.all(queued.taskUpdates.map((item) =>
+      supabase.from("project_tasks").update({ progress_percent: item.progress_percent, status: item.status, ...(item.checklist ? { checklist: item.checklist } : {}) }).eq("id", item.task_id)
+    ));
+    await Promise.all(queued.materialUpdates.map((item) =>
+      supabase.from("project_materials").update({ required_tomorrow: item.quantity }).eq("id", item.material_id)
+    ));
+
+    const projectId = queued.reportInput.p_project_id;
+    const failedPhotoIds: string[] = [];
+    for (const photoId of queued.photoIds) {
+      const stored = await loadOfflinePhoto(photoId);
+      if (!stored) continue; // déjà envoyée lors d'une tentative précédente
+      const path = `${organizationId}/${projectId}/site-photos/${crypto.randomUUID()}-${stored.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
+      const { error: uploadError } = await supabase.storage.from("btp-documents").upload(path, stored.blob, { upsert: false, contentType: stored.type });
+      if (uploadError) { failedPhotoIds.push(photoId); continue; }
+      const { data: photoRow } = await supabase.from("project_photos").insert({ organization_id: organizationId, project_id: projectId, storage_path: path, report_id: reportId, photo_type: "progress", created_by: userId }).select().single();
+      if (photoRow) { setPhotos((rows) => [photoRow as SitePhoto, ...rows]); await deleteOfflinePhoto(photoId); }
+      else failedPhotoIds.push(photoId);
+    }
+
+    const [reportResult, materialsResult, movementsResult, tasksResult] = await Promise.all([
+      supabase.from("project_daily_reports").select("*").eq("id", reportId).single(),
+      supabase.from("project_materials").select("*").eq("project_id", projectId),
+      supabase.from("project_stock_movements").select("*").eq("project_id", projectId).order("created_at", { ascending: false }),
+      supabase.from("project_tasks").select("*").eq("project_id", projectId).order("dao_sequence", { ascending: true }),
+    ]);
+    // On retire l'ancienne ligne locale ("local-...") par date plutôt que par
+    // id, pour ne pas toucher un autre rapport hors ligne pas encore synchronisé.
+    if (reportResult.data) { const synced = reportResult.data as Report; setReports((rows) => [synced, ...rows.filter((item) => item.report_date !== synced.report_date)]); }
+    if (materialsResult.data) setMaterials((rows) => [...rows.filter((item) => item.project_id !== projectId), ...(materialsResult.data as Material[])]);
+    if (movementsResult.data) setStockMovements((rows) => [...rows.filter((item) => item.project_id !== projectId), ...(movementsResult.data as StockMovement[])]);
+    if (tasksResult.data) setTasks((rows) => [...rows.filter((item) => item.project_id !== projectId), ...(tasksResult.data as Task[])]);
+
+    if (failedPhotoIds.length) return { ok: false, entry: { ...entry, payload: { ...queued, photoIds: failedPhotoIds } as unknown as Record<string, unknown> } };
+    return { ok: true };
+  }
+
+  // Rejoue une validation d'achat mise de côté hors connexion, avec sa photo
+  // reprise sur l'appareil (voir performPurchaseValidation, utilisée aussi
+  // pour la validation en ligne, afin de garder un seul calcul de stock).
+  async function syncQueuedPurchase(entry: PendingSync): Promise<{ ok: boolean; entry?: PendingSync }> {
+    const queued = entry.payload as unknown as QueuedPurchasePayload;
+    const order = materialOrders.find((item) => item.id === queued.orderId);
+    const stored = await loadOfflinePhoto(queued.photoId);
+    if (!order || !stored) return { ok: false, entry };
+    const result = await performPurchaseValidation(order, { purchasedQuantity: queued.purchasedQuantity, unitPrice: queued.unitPrice, photo: stored, transportMode: queued.transportMode, transportPrice: queued.transportPrice });
+    if (!result.ok) return { ok: false, entry };
+    await deleteOfflinePhoto(queued.photoId);
+    return { ok: true };
+  }
+
   async function synchronizePending() {
     // navigator.onLine plutôt que l'état React "online" : cette fonction peut
     // être appelée juste après l'événement "online", avant que le nouveau
@@ -555,6 +659,16 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     setBusy(true); setMessage("Synchronisation des saisies locales…");
     const remaining: PendingSync[] = [];
     for (const entry of pendingSync) {
+      if (entry.action === "report") {
+        const result = await syncQueuedReport(entry);
+        if (!result.ok && result.entry) remaining.push(result.entry);
+        continue;
+      }
+      if (entry.action === "purchase") {
+        const result = await syncQueuedPurchase(entry);
+        if (!result.ok && result.entry) remaining.push(result.entry);
+        continue;
+      }
       const request = entry.action === "insert"
         ? supabase.from(entry.table).insert(entry.payload)
         : supabase.from(entry.table).update(entry.payload).eq("id", entry.rowId || "");
@@ -593,6 +707,122 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     const { error } = await supabase.from("projects").update(changes).eq("id", project.id);
     if (error) setMessage(`Avancement non enregistré : ${error.message}`);
     else setMessage(progress_percent >= 100 ? "Chantier terminé : les accès conducteur et chef sont désactivés." : "Avancement du chantier enregistré.");
+  }
+
+  async function submitMiscExpense() {
+    const amount = number(miscExpenseDraft.amount);
+    if (!miscExpenseDraft.recipient.trim() || amount <= 0) {
+      setMiscExpenseStatus({ kind: "error", text: "Indiquez le nom du bénéficiaire et un montant supérieur à zéro." });
+      return;
+    }
+    await insert("project_material_orders", {
+      material_name: "Autre",
+      material_key: "autre",
+      unit: "U",
+      quantity: 1,
+      unit_price: amount,
+      status: "paid",
+      expense_kind: "other",
+      recipient_name: miscExpenseDraft.recipient.trim(),
+      notes: miscExpenseDraft.note.trim() || null,
+      requested_by: userId,
+      validated_by: userId,
+      paid_at: new Date().toISOString(),
+    }, (row) => setMaterialOrders((rows) => [row as MaterialOrder, ...rows]));
+    setConfirmingMiscExpense(false);
+    setAddingMiscExpense(false);
+    setMiscExpenseDraft({ recipient: "", amount: "", note: "" });
+    setMiscExpenseStatus({ kind: "success", text: "Dépense imprévue enregistrée dans le compte dépense générale." });
+  }
+
+  // Suppressions réservées à l'administrateur : chaque fonction annule aussi
+  // proprement que possible l'effet sur le stock avant de retirer la saisie,
+  // pour ne jamais laisser un chiffre de stock faux derrière une suppression.
+  async function adminDeletePhoto(photo: SitePhoto) {
+    if (!isAdmin) return;
+    if (!online) { setMessage("Connectez-vous pour supprimer une photo."); return; }
+    if (!window.confirm("Supprimer définitivement cette photo ?")) return;
+    setBusy(true);
+    try {
+      await supabase.storage.from("btp-documents").remove([photo.storage_path]).catch(() => null);
+      const { error } = await supabase.from("project_photos").delete().eq("id", photo.id);
+      if (error) { setMessage(`Photo non supprimée : ${error.message}`); return; }
+      setPhotos((rows) => rows.filter((row) => row.id !== photo.id));
+      setViewingPhotoUrl(null);
+      setViewingPhotoRecord(null);
+      setMessage("Photo supprimée.");
+    } finally { setBusy(false); }
+  }
+
+  async function adminDeleteReport(report: Report) {
+    if (!isAdmin || !selectedId) return;
+    if (!online) { setMessage("Connectez-vous pour supprimer un rapport."); return; }
+    if (!window.confirm(`Supprimer définitivement le rapport du ${date.format(new Date(report.report_date))} ? Le stock consommé ce jour-là sera restitué automatiquement.`)) return;
+    setBusy(true);
+    try {
+      const { error } = await supabase.rpc("admin_delete_daily_report", { p_report_id: report.id });
+      if (error) { setMessage(`Rapport non supprimé : ${error.message}`); return; }
+      setReports((rows) => rows.filter((row) => row.id !== report.id));
+      setViewingReportDetail(null);
+      const [materialsResult, movementsResult, usagesResult, photosResult] = await Promise.all([
+        supabase.from("project_materials").select("*").eq("project_id", selectedId),
+        supabase.from("project_stock_movements").select("*").eq("project_id", selectedId).order("created_at", { ascending: false }),
+        supabase.from("project_report_material_usages").select("*").eq("project_id", selectedId),
+        supabase.from("project_photos").select("*").eq("project_id", selectedId).order("captured_at", { ascending: false }),
+      ]);
+      if (materialsResult.data) setMaterials((rows) => [...rows.filter((item) => item.project_id !== selectedId), ...(materialsResult.data as Material[])]);
+      if (movementsResult.data) setStockMovements((rows) => [...rows.filter((item) => item.project_id !== selectedId), ...(movementsResult.data as StockMovement[])]);
+      if (usagesResult.data) setReportMaterialUsages((rows) => [...rows.filter((item) => item.project_id !== selectedId), ...(usagesResult.data as ReportMaterialUsage[])]);
+      if (photosResult.data) setPhotos((rows) => [...rows.filter((item) => item.project_id !== selectedId), ...(photosResult.data as SitePhoto[])]);
+      setMessage("Rapport supprimé : stock et photos mis à jour.");
+    } finally { setBusy(false); }
+  }
+
+  async function adminDeleteMovement(movement: StockMovement) {
+    if (!isAdmin) return;
+    if (!online) { setMessage("Connectez-vous pour supprimer un mouvement de stock."); return; }
+    if (!window.confirm("Supprimer définitivement ce mouvement de stock ? La quantité correspondante sera restituée au matériau.")) return;
+    setBusy(true);
+    try {
+      const { error } = await supabase.rpc("admin_delete_stock_movement", { p_movement_id: movement.id });
+      if (error) { setMessage(`Mouvement non supprimé : ${error.message}`); return; }
+      setStockMovements((rows) => rows.filter((row) => row.id !== movement.id));
+      if (movement.material_id) {
+        const { data } = await supabase.from("project_materials").select("*").eq("id", movement.material_id).maybeSingle();
+        if (data) setMaterials((rows) => rows.map((row) => row.id === data.id ? (data as Material) : row));
+      }
+      setMessage("Mouvement supprimé, stock mis à jour.");
+    } finally { setBusy(false); }
+  }
+
+  async function adminDeleteMaterialOrder(order: MaterialOrder) {
+    if (!isAdmin) return;
+    if (!online) { setMessage("Connectez-vous pour supprimer un achat."); return; }
+    if (!window.confirm(`Supprimer définitivement cet achat (${order.material_name}) ? Le stock déjà ajouté par cet achat sera retiré.`)) return;
+    setBusy(true);
+    try {
+      const { error } = await supabase.rpc("admin_delete_material_order", { p_order_id: order.id });
+      if (error) { setMessage(`Achat non supprimé : ${error.message}`); return; }
+      setMaterialOrders((rows) => rows.filter((row) => row.id !== order.id));
+      if (order.material_id) {
+        const { data } = await supabase.from("project_materials").select("*").eq("id", order.material_id).maybeSingle();
+        if (data) setMaterials((rows) => rows.map((row) => row.id === data.id ? (data as Material) : row));
+      }
+      setMessage("Achat supprimé, stock mis à jour.");
+    } finally { setBusy(false); }
+  }
+
+  async function adminDeleteStaffMember(member: StaffMember) {
+    if (!isAdmin) return;
+    if (!online) { setMessage("Connectez-vous pour retirer un membre de l’équipe."); return; }
+    if (!window.confirm(`Retirer définitivement ${member.full_name} de l’équipe déclarée ?`)) return;
+    setBusy(true);
+    try {
+      const { error } = await supabase.from("project_staff_members").delete().eq("id", member.id);
+      if (error) { setMessage(`Membre non retiré : ${error.message}`); return; }
+      setStaffMembers((rows) => rows.filter((row) => row.id !== member.id));
+      setMessage("Membre retiré de l’équipe.");
+    } finally { setBusy(false); }
   }
 
   async function updateTask(id: string, values: Partial<Task>) {
@@ -769,7 +999,6 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
 
   async function submitDailyReport(): Promise<boolean> {
     if (!canRecordAttendance || !organizationId || !selectedId) { setReportSubmitStatus({ kind: "error", text: "Le rapport journalier est en lecture seule pour votre accès." }); return false; }
-    if (!online) { setReportSubmitStatus({ kind: "error", text: "Reconnectez-vous pour envoyer le rapport, les photos et la déduction de stock sans risque." }); return false; }
     const payload = {
       report_date: reportDraft.date || today,
       weather: reportDraft.weather || null,
@@ -779,6 +1008,59 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
       issues: reportDraft.issues || null,
     };
     if (payload.report_date !== today) { setReportSubmitStatus({ kind: "error", text: "Seul le rapport du jour est modifiable. Les jours précédentes restent consultables." }); return false; }
+    // Hors connexion : le rapport, le planning, le stock prévu et les photos
+    // sont gardés sur l'appareil (les photos via IndexedDB, voir
+    // lib/offline-photos.ts) puis envoyés automatiquement dès le retour du
+    // réseau, exactement comme les autres saisies de ce chantier.
+    if (!online) {
+      setReportSubmitting(true);
+      setReportSubmitStatus({ kind: "info", text: "Enregistrement hors ligne…" });
+      try {
+        const photoIds: string[] = [];
+        for (const photo of reportPhotoDraft) {
+          const photoId = crypto.randomUUID();
+          await saveOfflinePhoto(photoId, photo.file);
+          photoIds.push(photoId);
+        }
+        const queued: QueuedReportPayload = {
+          reportInput: {
+            p_project_id: selectedId,
+            p_report_date: payload.report_date,
+            p_weather: payload.weather,
+            p_workers_present: payload.workers_present,
+            p_completed_work: payload.completed_work,
+            p_next_day_plan: payload.next_day_plan,
+            p_issues: payload.issues,
+            p_consumptions: reportConsumptionDraft,
+          },
+          taskUpdates: reportSelectedTasks,
+          materialUpdates: reportTomorrowMaterials,
+          photoIds,
+        };
+        queueForSync(`Rapport du ${date.format(new Date(payload.report_date))}`, "report", "project_daily_reports", queued as unknown as Record<string, unknown>);
+        const localReport = { id: `local-${crypto.randomUUID()}`, project_id: selectedId, report_date: payload.report_date, weather: payload.weather, workers_present: payload.workers_present, completed_work: payload.completed_work, next_day_plan: payload.next_day_plan, issues: payload.issues, created_by: userId ?? null, created_at: new Date().toISOString() } as Report;
+        setReports((rows) => [localReport, ...rows.filter((row) => row.report_date !== payload.report_date)]);
+        // Affiche tout de suite l'avancement et les besoins de demain saisis :
+        // le stock (déduction des matériaux consommés) sera lui recalculé côté
+        // serveur à l'envoi, pour rester fiable.
+        setTasks((rows) => rows.map((row) => {
+          const staged = reportSelectedTasks.find((item) => item.task_id === row.id);
+          return staged ? { ...row, progress_percent: staged.progress_percent, status: staged.status, ...(staged.checklist ? { checklist: staged.checklist } : {}) } : row;
+        }));
+        setMaterials((rows) => rows.map((row) => {
+          const staged = reportTomorrowMaterials.find((item) => item.material_id === row.id);
+          return staged ? { ...row, required_tomorrow: staged.quantity } : row;
+        }));
+        setReportSubmitting(false);
+        resetReportDraft();
+        setReportSubmitStatus({ kind: "success", text: `Rapport conservé sur cet appareil${photoIds.length ? ` avec ${photoIds.length} photo(s)` : ""} : il sera envoyé et le stock mis à jour automatiquement dès la reconnexion.` });
+        return true;
+      } catch {
+        setReportSubmitting(false);
+        setReportSubmitStatus({ kind: "error", text: "Impossible d'enregistrer le rapport hors ligne sur cet appareil (mémoire de stockage pleine ?)." });
+        return false;
+      }
+    }
     setReportSubmitting(true);
     setReportSubmitStatus({ kind: "info", text: "Enregistrement du rapport en cours…" });
     const { data: reportId, error } = await supabase.rpc("record_project_daily_report_consumption", {
@@ -977,9 +1259,89 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     setMessage(`Demande rejetée : ${order.material_name}.`);
   }
 
+  // Cœur de la validation d'un achat (photo, dépense, stock, transport) :
+  // utilisé à la fois en ligne (tout de suite) et hors ligne (rejoué plus
+  // tard avec la photo gardée sur l'appareil), pour ne jamais avoir deux
+  // versions différentes de ce calcul sensible (stock, dépenses).
+  async function performPurchaseValidation(order: MaterialOrder, input: { purchasedQuantity: number; unitPrice: number; photo: { blob: Blob; name: string; type: string }; transportMode: string | null; transportPrice: number | null }): Promise<{ ok: boolean; message: string }> {
+    if (!organizationId || !selectedId) return { ok: false, message: "Chantier introuvable." };
+    // La liste affichée peut être périmée (onglet resté ouvert, ou longue
+    // absence de réseau) : on revérifie l'état réel de la commande avant de
+    // créer quoi que ce soit, pour éviter de dupliquer un achat déjà traité
+    // ailleurs.
+    const { data: freshOrder } = await supabase.from("project_material_orders").select("*").eq("id", order.id).maybeSingle();
+    if (!freshOrder || (freshOrder.status !== "approved" && freshOrder.status !== "covered_by_stock")) {
+      setMaterialOrders((rows) => rows.filter((row) => row.id !== order.id));
+      return { ok: false, message: "Cette demande a déjà été traitée par quelqu’un d’autre. La liste va se rafraîchir." };
+    }
+    const currentOrder = freshOrder as MaterialOrder;
+    const safeName = input.photo.name.replace(/[^a-zA-Z0-9._-]/g, "-");
+    const path = `${organizationId}/${selectedId}/purchase-archives/${currentOrder.id}-${Date.now()}-${safeName}`;
+    const { error: uploadError } = await supabase.storage.from("btp-documents").upload(path, input.photo.blob, { upsert: false, contentType: input.photo.type || "image/jpeg" });
+    if (uploadError) return { ok: false, message: `Photo non envoyée : ${uploadError.message}` };
+    const caption = `Achat — ${currentOrder.material_name} · ${input.purchasedQuantity} ${currentOrder.unit} · ${input.unitPrice.toLocaleString("fr-FR")} Ar`;
+    const { data: photo, error: photoError } = await supabase.from("project_photos").insert({ organization_id: organizationId, project_id: selectedId, storage_path: path, caption, photo_type: "delivery", created_by: userId }).select().single();
+    if (photoError) return { ok: false, message: `Archive photo non enregistrée : ${photoError.message}` };
+    const values = { status: "paid", paid_at: new Date().toISOString(), validated_by: userId || null, purchased_quantity: input.purchasedQuantity, unit_price: input.unitPrice, purchase_photo_path: path, purchase_photo_caption: caption };
+    // .select() + vérification de la ligne retournée : une mise à jour bloquée
+    // par une politique RLS ne remonte aucune erreur (0 ligne modifiée, succès
+    // silencieux), ce qui donnait l'impression que l'achat était validé alors
+    // que rien n'était réellement enregistré.
+    const { data: updatedOrder, error } = await supabase.from("project_material_orders").update(values).eq("id", currentOrder.id).select().maybeSingle();
+    if (error || !updatedOrder) return { ok: false, message: `Achat non validé : ${error?.message || "vous n'êtes pas autorisé à modifier cette demande."}` };
+    setMaterialOrders((rows) => rows.map((row) => row.id === currentOrder.id ? { ...row, ...values } : row));
+    setPhotos((rows) => [photo as SitePhoto, ...rows]);
+    let transportWarning = "";
+    if (input.transportMode) {
+      const { data: transportOrder, error: transportError } = await supabase.from("project_material_orders").insert({
+        organization_id: organizationId, project_id: selectedId, material_name: "Transport", material_key: "transport", unit: "U",
+        quantity: 1, unit_price: input.transportPrice || 0, status: "paid", expense_kind: "transport", transport_mode: input.transportMode,
+        paid_at: new Date().toISOString(), requested_by: userId, validated_by: userId,
+        // Le transport n'a pas sa propre photo — il réutilise celle de l'achat
+        // du matériau (même field déjà présent) ; la base exige une photo sur
+        // toute ligne "paid" (contrainte project_material_orders_paid_requires_photo).
+        purchase_photo_path: path, purchase_photo_caption: caption,
+      }).select().single();
+      if (transportOrder) setMaterialOrders((rows) => [transportOrder as MaterialOrder, ...rows]);
+      else if (transportError) transportWarning = ` Transport non enregistré : ${transportError.message}.`;
+    }
+    // Le matériau n'entre dans le suivi de stock qu'ici, au premier achat
+    // réel — jamais dès la simple demande.
+    let stockMaterialId = currentOrder.material_id;
+    if (!stockMaterialId) {
+      const key = currentOrder.material_key || materialKey(currentOrder.material_name);
+      // On relit la liste en base (et non le state React, potentiellement
+      // périmé si un autre poste a acheté ce même matériau entre-temps)
+      // pour éviter de créer un doublon du même matériau.
+      const { data: freshMaterials } = await supabase.from("project_materials").select("id,designation").eq("project_id", selectedId);
+      const existing = (freshMaterials || []).find((item) => materialKey(item.designation) === key);
+      if (existing) {
+        stockMaterialId = existing.id;
+      } else {
+        const { data: newMaterial, error: newMaterialError } = await supabase.from("project_materials").insert({ organization_id: organizationId, project_id: selectedId, designation: currentOrder.material_name, unit: currentOrder.unit, planned_quantity: 0, on_site_quantity: 0, required_tomorrow: 0, required_week: 0, minimum_stock: 0, created_by: userId }).select().single();
+        if (!newMaterialError && newMaterial) { stockMaterialId = newMaterial.id; setMaterials((rows) => [...rows, newMaterial as Material]); }
+        else if (newMaterialError) return { ok: false, message: `Achat validé mais stock non initialisé : ${newMaterialError.message}` };
+      }
+      if (stockMaterialId) await supabase.from("project_material_orders").update({ material_id: stockMaterialId }).eq("id", currentOrder.id);
+    }
+    if (stockMaterialId) {
+      // On relit toujours la quantité en base (pas le state React, qui peut
+      // dater d'avant une longue coupure réseau) pour rester exact.
+      const { data: currentMaterial } = await supabase.from("project_materials").select("on_site_quantity").eq("id", stockMaterialId).maybeSingle();
+      const nextStock = number(currentMaterial?.on_site_quantity) + input.purchasedQuantity;
+      const { data: updatedMaterial, error: stockError } = await supabase.from("project_materials").update({ on_site_quantity: nextStock }).eq("id", stockMaterialId).select().maybeSingle();
+      if (stockError || !updatedMaterial) return { ok: false, message: `Achat validé mais stock non mis à jour : ${stockError?.message || "vous n'êtes pas autorisé à modifier ce matériau."}` };
+      setMaterials((rows) => rows.map((item) => item.id === stockMaterialId ? { ...item, on_site_quantity: nextStock } : item));
+      const { data: movementRow, error: movementError } = await supabase.from("project_stock_movements").insert({ organization_id: organizationId, project_id: selectedId, material_id: stockMaterialId, movement_type: "delivery", quantity: input.purchasedQuantity, notes: `Achat validé — ${currentOrder.material_name}`, created_by: userId, source_order_id: currentOrder.id }).select().single();
+      if (movementRow) setStockMovements((rows) => [movementRow as StockMovement, ...rows]);
+      else if (movementError) return { ok: false, message: `Achat validé mais mouvement de stock non enregistré : ${movementError.message}` };
+    }
+    return { ok: true, message: `Achat validé, photo archivée et dépense comptabilisée.${transportWarning}` };
+  }
+
   async function uploadPurchaseEvidence(event: FormEvent<HTMLFormElement>, order: MaterialOrder): Promise<boolean> {
     event.preventDefault();
-    if (!canUploadPurchaseEvidence || !organizationId || !selectedId || !online) { setPurchaseStatus({ kind: "error", text: "La validation d’achat avec photo nécessite une connexion et l’autorisation Photos." }); return false; }
+    if (!canUploadPurchaseEvidence || !organizationId || !selectedId) { setPurchaseStatus({ kind: "error", text: "La validation d’achat nécessite l’autorisation Photos." }); return false; }
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     const file = form.get("purchase_photo");
@@ -987,87 +1349,34 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     const unitPrice = number(form.get("unit_price"));
     if (!(file instanceof File) || !file.size) { setPurchaseStatus({ kind: "error", text: "Ajoutez la photo du matériau avant de valider l’achat." }); return false; }
     if (purchasedQuantity <= 0) { setPurchaseStatus({ kind: "error", text: "Indiquez une quantité achetée supérieure à zéro." }); return false; }
+    // Hors connexion : la photo est gardée sur l'appareil (IndexedDB) et
+    // l'achat est mis en attente, exactement comme le rapport journalier —
+    // il sera validé pour de vrai (stock inclus) dès la reconnexion.
+    if (!online) {
+      setBusy(true);
+      try {
+        const photoId = crypto.randomUUID();
+        await saveOfflinePhoto(photoId, file);
+        const queued: QueuedPurchasePayload = { orderId: order.id, purchasedQuantity, unitPrice, photoId, transportMode: selectedTransportMode, transportPrice: selectedTransportPrice };
+        queueForSync(`Validation d’achat — ${order.material_name}`, "purchase", "project_material_orders", queued as unknown as Record<string, unknown>);
+        setMaterialOrders((rows) => rows.map((row) => row.id === order.id ? { ...row, status: "paid", paid_at: new Date().toISOString(), validated_by: userId || null, purchased_quantity: purchasedQuantity, unit_price: unitPrice } : row));
+        setSelectedTransportMode(null); setSelectedTransportPrice(null); setTransportPriceDraft("");
+        setPurchaseStatus({ kind: "success", text: "Achat enregistré hors ligne avec sa photo : il sera validé et le stock mis à jour automatiquement dès la reconnexion." });
+        formElement.reset();
+        return true;
+      } catch {
+        setPurchaseStatus({ kind: "error", text: "Impossible d’enregistrer l’achat hors ligne sur cet appareil (mémoire de stockage pleine ?)." });
+        return false;
+      } finally { setBusy(false); }
+    }
     setBusy(true);
     setPurchaseStatus({ kind: "info", text: "Vérification de la demande…" });
     try {
-      // La liste affichée peut être périmée (onglet resté ouvert) : on
-      // revérifie l'état réel de la commande avant de créer quoi que ce
-      // soit, pour éviter de dupliquer un achat déjà traité ailleurs.
-      const { data: freshOrder } = await supabase.from("project_material_orders").select("*").eq("id", order.id).maybeSingle();
-      if (!freshOrder || (freshOrder.status !== "approved" && freshOrder.status !== "covered_by_stock")) {
-        setPurchaseStatus({ kind: "error", text: "Cette demande a déjà été traitée par quelqu’un d’autre. La liste va se rafraîchir." });
-        setMaterialOrders((rows) => rows.filter((row) => row.id !== order.id));
-        return false;
-      }
-      order = freshOrder as MaterialOrder;
       setPurchaseStatus({ kind: "info", text: "Envoi de la photo et validation…" });
-      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "-");
-      const path = `${organizationId}/${selectedId}/purchase-archives/${order.id}-${Date.now()}-${safeName}`;
-      const { error: uploadError } = await supabase.storage.from("btp-documents").upload(path, file, { upsert: false, contentType: file.type || "image/jpeg" });
-      if (uploadError) { setPurchaseStatus({ kind: "error", text: `Photo non envoyée : ${uploadError.message}` }); return false; }
-      const caption = `Achat — ${order.material_name} · ${purchasedQuantity} ${order.unit} · ${unitPrice.toLocaleString("fr-FR")} Ar`;
-      const { data: photo, error: photoError } = await supabase.from("project_photos").insert({ organization_id: organizationId, project_id: selectedId, storage_path: path, caption, photo_type: "delivery", created_by: userId }).select().single();
-      if (photoError) { setPurchaseStatus({ kind: "error", text: `Archive photo non enregistrée : ${photoError.message}` }); return false; }
-      const values = { status: "paid", paid_at: new Date().toISOString(), validated_by: userId || null, purchased_quantity: purchasedQuantity, unit_price: unitPrice, purchase_photo_path: path, purchase_photo_caption: caption };
-      // .select() + vérification de la ligne retournée : une mise à jour bloquée
-      // par une politique RLS ne remonte aucune erreur (0 ligne modifiée, succès
-      // silencieux), ce qui donnait l'impression que l'achat était validé alors
-      // que rien n'était réellement enregistré.
-      const { data: updatedOrder, error } = await supabase.from("project_material_orders").update(values).eq("id", order.id).select().maybeSingle();
-      if (error || !updatedOrder) { setPurchaseStatus({ kind: "error", text: `Achat non validé : ${error?.message || "vous n'êtes pas autorisé à modifier cette demande."}` }); return false; }
-      setMaterialOrders((rows) => rows.map((row) => row.id === order.id ? { ...row, ...values } : row));
-      setPhotos((rows) => [photo as SitePhoto, ...rows]);
-      let transportWarning = "";
-      if (selectedTransportMode) {
-        const { data: transportOrder, error: transportError } = await supabase.from("project_material_orders").insert({
-          organization_id: organizationId, project_id: selectedId, material_name: "Transport", material_key: "transport", unit: "U",
-          quantity: 1, unit_price: selectedTransportPrice || 0, status: "paid", expense_kind: "transport", transport_mode: selectedTransportMode,
-          paid_at: new Date().toISOString(), requested_by: userId, validated_by: userId,
-          // Le transport n'a pas sa propre photo — il réutilise celle de l'achat
-          // du matériau (même field déjà présent) ; la base exige une photo sur
-          // toute ligne "paid" (contrainte project_material_orders_paid_requires_photo).
-          purchase_photo_path: path, purchase_photo_caption: caption,
-        }).select().single();
-        if (transportOrder) setMaterialOrders((rows) => [transportOrder as MaterialOrder, ...rows]);
-        else if (transportError) transportWarning = ` Transport non enregistré : ${transportError.message}.`;
-        setSelectedTransportMode(null);
-        setSelectedTransportPrice(null);
-        setTransportPriceDraft("");
-      }
-      // Le matériau n'entre dans le suivi de stock qu'ici, au premier achat
-      // réel — jamais dès la simple demande.
-      let stockMaterialId = order.material_id;
-      if (!stockMaterialId) {
-        const key = order.material_key || materialKey(order.material_name);
-        // On relit la liste en base (et non le state React, potentiellement
-        // périmé si un autre poste a acheté ce même matériau entre-temps)
-        // pour éviter de créer un doublon du même matériau.
-        const { data: freshMaterials } = await supabase.from("project_materials").select("id,designation").eq("project_id", selectedId);
-        const existing = (freshMaterials || []).find((item) => materialKey(item.designation) === key);
-        if (existing) {
-          stockMaterialId = existing.id;
-        } else {
-          const { data: newMaterial, error: newMaterialError } = await supabase.from("project_materials").insert({ organization_id: organizationId, project_id: selectedId, designation: order.material_name, unit: order.unit, planned_quantity: 0, on_site_quantity: 0, required_tomorrow: 0, required_week: 0, minimum_stock: 0, created_by: userId }).select().single();
-          if (!newMaterialError && newMaterial) { stockMaterialId = newMaterial.id; setMaterials((rows) => [...rows, newMaterial as Material]); }
-          else if (newMaterialError) { setPurchaseStatus({ kind: "error", text: `Achat validé mais stock non initialisé : ${newMaterialError.message}` }); return false; }
-        }
-        if (stockMaterialId) await supabase.from("project_material_orders").update({ material_id: stockMaterialId }).eq("id", order.id);
-      }
-      if (stockMaterialId) {
-        const material = materials.find((item) => item.id === stockMaterialId);
-        const nextStock = number(material?.on_site_quantity) + purchasedQuantity;
-        const { data: updatedMaterial, error: stockError } = await supabase.from("project_materials").update({ on_site_quantity: nextStock }).eq("id", stockMaterialId).select().maybeSingle();
-        if (stockError || !updatedMaterial) { setPurchaseStatus({ kind: "error", text: `Achat validé mais stock non mis à jour : ${stockError?.message || "vous n'êtes pas autorisé à modifier ce matériau."}` }); return false; }
-        setMaterials((rows) => rows.map((item) => item.id === stockMaterialId ? { ...item, on_site_quantity: nextStock } : item));
-        {
-          const { data: movementRow, error: movementError } = await supabase.from("project_stock_movements").insert({ organization_id: organizationId, project_id: selectedId, material_id: stockMaterialId, movement_type: "delivery", quantity: purchasedQuantity, notes: `Achat validé — ${order.material_name}`, created_by: userId }).select().single();
-          if (movementRow) setStockMovements((rows) => [movementRow as StockMovement, ...rows]);
-          else if (movementError) { setPurchaseStatus({ kind: "error", text: `Achat validé mais mouvement de stock non enregistré : ${movementError.message}` }); return false; }
-        }
-      }
-      setPurchaseStatus({ kind: transportWarning ? "error" : "success", text: `Achat validé, photo archivée et dépense comptabilisée.${transportWarning}` });
-      formElement.reset();
-      return true;
+      const result = await performPurchaseValidation(order, { purchasedQuantity, unitPrice, photo: { blob: file, name: file.name, type: file.type }, transportMode: selectedTransportMode, transportPrice: selectedTransportPrice });
+      setPurchaseStatus({ kind: result.ok ? "success" : "error", text: result.message });
+      if (result.ok) { setSelectedTransportMode(null); setSelectedTransportPrice(null); setTransportPriceDraft(""); formElement.reset(); }
+      return result.ok;
     } finally { setBusy(false); }
   }
 
@@ -1338,7 +1647,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
           </form> : <div className="projectTeamRoster">
             {isAdmin && <article><h3 style={{cursor:"pointer"}} onClick={() => setExpandedRoster((current) => ({ ...current, conductors: !current.conductors }))}>{expandedRoster.conductors ? "▾" : "▸"} Conducteurs</h3><p>{activeConductors.length} actif(s) · {pendingConductors.length} en attente</p>{expandedRoster.conductors && <>{activeConductors.map((item) => <div className="projectTeamMember" key={item.id}><strong style={isAdmin ? {cursor:"pointer",textDecoration:"underline"} : undefined} onClick={() => isAdmin && setViewingAssignment(item)}>Compte conducteur · {item.displayName || item.email || item.user_id.slice(0, 8)}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span className="active">Actif</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ assignmentId: item.id }, "cet accès conducteur")}>Retirer</button>}</div></div>)}{pendingConductors.map((item) => <div className="projectTeamMember" key={item.id}><strong>{item.email}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span className="pending">En attente</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-emerald-700 bg-white px-2 py-1 text-xs font-bold text-emerald-800 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => openInvitationEdit(item)}>Modifier</button>}{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ invitationId: item.id }, "cette demande d’accès")}>Supprimer</button>}</div></div>)}{activeConductors.length + pendingConductors.length === 0 && <small>Aucun conducteur créé.</small>}</>}</article>}
             <article><h3 style={{cursor:"pointer"}} onClick={() => setExpandedRoster((current) => ({ ...current, siteManagers: !current.siteManagers }))}>{expandedRoster.siteManagers ? "▾" : "▸"} Chefs de chantier</h3><p>{activeSiteManagers.length} actif(s) · {pendingSiteManagers.length} en attente</p>{expandedRoster.siteManagers && <>{activeSiteManagers.map((item) => <div className="projectTeamMember" key={item.id}><strong style={isAdmin ? {cursor:"pointer",textDecoration:"underline"} : undefined} onClick={() => isAdmin && setViewingAssignment(item)}>Compte chef de chantier · {item.displayName || item.email || item.user_id.slice(0, 8)}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span className="active">Actif</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ assignmentId: item.id }, "cet accès chef de chantier")}>Retirer</button>}</div></div>)}{pendingSiteManagers.map((item) => <div className="projectTeamMember" key={item.id}><strong>{item.email}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span className="pending">En attente</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-emerald-700 bg-white px-2 py-1 text-xs font-bold text-emerald-800 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => openInvitationEdit(item)}>Modifier</button>}{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ invitationId: item.id }, "cette demande d’accès")}>Supprimer</button>}</div></div>)}{activeSiteManagers.length + pendingSiteManagers.length === 0 && <small>Le conducteur créera les chefs de chantier qui lui sont rattachés.</small>}</>}</article>
-            <article><h3>Équipe déclarée</h3><p>{projectStaff.length} personne(s) active(s)</p>{projectStaff.length ? projectStaff.map((member) => <div className="projectTeamMember" key={member.id}><strong>{member.full_name}</strong><span>{member.role_name || "Équipe"}</span></div>) : <small>Les membres seront affichés dès leur ajout dans le rapport journalier.</small>}</article>
+            <article><h3>Équipe déclarée</h3><p>{projectStaff.length} personne(s) active(s)</p>{projectStaff.length ? projectStaff.map((member) => <div className="projectTeamMember" key={member.id}><strong>{member.full_name}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span>{member.role_name || "Équipe"}</span>{isAdmin && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void adminDeleteStaffMember(member)}>Retirer</button>}</div></div>) : <small>Les membres seront affichés dès leur ajout dans le rapport journalier.</small>}</article>
           </div>}
           </>}
         </section>}
@@ -1433,7 +1742,10 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             <h3 className="mt-3 font-bold">Photos</h3>
             {(() => { const reportPhotos = projectPhotos.filter((photo) => photo.report_id === viewingReportDetail.id); return reportPhotos.length ? <div className="projectPhotoThumbGrid">{reportPhotos.map((photo) => <button type="button" key={photo.id} className="projectPhotoThumbButton" onClick={() => void openPhoto(photo)}>{photoThumbnails[photo.id] ? <img src={photoThumbnails[photo.id]} alt="" /> : <span className="projectPhotoThumbLoading">…</span>}<small>{photoThumbLabel(photo)}</small></button>)}</div> : <p className="projectEmptyText">Aucune photo liée à ce rapport.</p>; })()}
           </div>
-          <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingReportDetail(null)}>Fermer</button>
+          <div className="flex flex-wrap items-center justify-end gap-2" style={{ flex: "0 0 auto" }}>
+            {isAdmin && <button type="button" className="rounded-lg border border-red-700 bg-white px-3 py-2 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void adminDeleteReport(viewingReportDetail)}>Supprimer ce rapport</button>}
+            <button type="button" className="ghostButton mt-5" onClick={() => setViewingReportDetail(null)}>Fermer</button>
+          </div>
         </div></div>}
         {viewingPhotoUrl !== null && <div className="modalBackdrop" onClick={() => { setViewingPhotoUrl(null); setViewingPhotoRecord(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(640px,100%)" }}>
           <h2 className="font-bold text-xl mb-4">Photo</h2>
@@ -1444,6 +1756,10 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
           </div>}
           {isAdmin && viewingReportDetail && <button type="button" className="secondary mt-3" disabled={!online || aiAnalysisStatus?.kind === "info"} onClick={() => void analyzeReportPhotos(viewingReportDetail)}>{aiAnalysisStatus?.kind === "info" ? "Analyse en cours…" : "Analyser les photos (IA)"}</button>}
           {isAdmin && aiAnalysisStatus && <p className={`projectAccessStatus ${aiAnalysisStatus.kind}`} role="status" aria-live="polite">{aiAnalysisStatus.text}</p>}
+          {/* "Historique des achats" fabrique une photo à la volée (juste pour l'affichage,
+              elle n'existe pas dans project_photos) : on ne propose la suppression que
+              pour une vraie photo enregistrée, sinon la suppression n'aurait aucun effet. */}
+          {isAdmin && viewingPhotoRecord && photos.some((item) => item.id === viewingPhotoRecord.id) && <button type="button" className="rounded-lg border border-red-700 bg-white px-3 py-2 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 mt-3" disabled={busy} onClick={() => void adminDeletePhoto(viewingPhotoRecord)}>Supprimer cette photo</button>}
           <button type="button" className="ghostButton mt-5" onClick={() => { setViewingPhotoUrl(null); setViewingPhotoRecord(null); }}>Fermer</button>
         </div></div>}
         {aiAnalysisResult && viewingReportDetail && <div className="modalBackdrop" onClick={() => setAiAnalysisResult(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
@@ -1662,7 +1978,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             <div className="projectStockSummaryList" style={{ maxHeight: "none" }}>{projectMaterials.length ? projectMaterials.map((material) => <div key={material.id}><span className="chipName">{material.designation}</span><span className="chipQty">{number(material.on_site_quantity)}</span></div>) : <p className="projectEmptyText">Aucun matériau suivi pour l’instant : le stock apparaît ici dès le premier achat validé.</p>}</div>
             {canManageStock && <form onSubmit={(event) => void recordStockMovement(event)} className="projectMovementForm"><select name="material_id" required defaultValue=""><option value="" disabled>Matériau concerné</option>{projectMaterials.map((material) => <option key={material.id} value={material.id}>{material.designation}</option>)}</select><select name="movement_type" defaultValue="delivery"><option value="delivery">Réception</option><option value="consumption">Consommation</option><option value="return">Retour</option><option value="adjustment">Ajustement inventaire</option></select><input name="quantity" type="number" min="0.001" step="any" placeholder="Quantité" required /><input name="movement_date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /><input name="notes" placeholder="Bon, fournisseur ou note" /><button disabled={busy}>Enregistrer</button></form>}
             <h3 className="mt-4 font-bold">Historique complet</h3>
-            <div className="projectMovementList" style={{ maxHeight: "none" }}>{projectAllStockMovements.length ? projectAllStockMovements.map((movement) => { const material = materials.find((item) => item.id === movement.material_id); return <div key={movement.id}><strong>{movement.movement_type === "delivery" ? "Réception" : movement.movement_type === "consumption" ? "Consommation" : movement.movement_type === "return" ? "Retour" : "Ajustement"}</strong><span>{number(movement.quantity)} {material?.unit || ""} · {material?.designation || "Matériau"}</span><small>{dateTime.format(new Date(movement.created_at || movement.movement_date))}{movement.notes ? ` · ${movement.notes}` : ""}</small></div>; }) : <p className="projectEmptyText">Aucun mouvement enregistré.</p>}</div>
+            <div className="projectMovementList" style={{ maxHeight: "none" }}>{projectAllStockMovements.length ? projectAllStockMovements.map((movement) => { const material = materials.find((item) => item.id === movement.material_id); return <div key={movement.id} className="flex flex-wrap items-center justify-between gap-2"><div><strong>{movement.movement_type === "delivery" ? "Réception" : movement.movement_type === "consumption" ? "Consommation" : movement.movement_type === "return" ? "Retour" : movement.movement_type === "loss" ? "Perte" : "Ajustement"}</strong><span>{number(movement.quantity)} {material?.unit || ""} · {material?.designation || "Matériau"}</span><small>{dateTime.format(new Date(movement.created_at || movement.movement_date))}{movement.notes ? ` · ${movement.notes}` : ""}</small></div>{isAdmin && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void adminDeleteMovement(movement)}>Supprimer</button>}</div>; }) : <p className="projectEmptyText">Aucun mouvement enregistré.</p>}</div>
           </div>
           <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingStockDetail(false)}>Fermer</button>
         </div></div>}
@@ -1742,6 +2058,28 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
           <div className="projectNoteList">{validatedOrdersToPurchase.length ? validatedOrdersToPurchase.map((order) => <article key={order.id} className="projectTeamMember" style={{ cursor: "pointer" }} onClick={() => setViewingOrder(order)}><strong>{order.material_name}</strong><span>{number(order.quantity)} {order.unit} · {(number(order.quantity) * number(order.unit_price)).toLocaleString("fr-FR")} Ar</span></article>) : <p className="projectEmptyText">Aucun matériau en attente d’achat.</p>}</div>
           <button type="button" className="secondary projectHistoryButton" onClick={() => setViewingAchats(true)}>Voir l’historique</button>
         </section>}
+        {canOperate && <section className="projectSiteCard projectMiscExpenseCard">
+          <div className="projectCardHead"><div><p className="projectEyebrow">IMPRÉVU</p><h2>Dépenses imprévues</h2></div></div>
+          <p className="projectHint">Cadeaux ou toute dépense hors matériau/salaire. Envoyée directement au compte dépense générale après confirmation.</p>
+          {addingMiscExpense ? <>
+            <div className="projectMaterialForm">
+              <input placeholder="Nom du bénéficiaire ou organisme" value={miscExpenseDraft.recipient} onChange={(event) => setMiscExpenseDraft((draft) => ({ ...draft, recipient: event.target.value }))} />
+              <input type="number" min="0" step="any" placeholder="Montant (Ar)" value={miscExpenseDraft.amount} onChange={(event) => setMiscExpenseDraft((draft) => ({ ...draft, amount: event.target.value }))} />
+              <input placeholder="Note (facultatif)" value={miscExpenseDraft.note} onChange={(event) => setMiscExpenseDraft((draft) => ({ ...draft, note: event.target.value }))} />
+              <button type="button" disabled={busy} onClick={() => setConfirmingMiscExpense(true)}>Valider</button>
+            </div>
+            <button type="button" className="ghostButton mt-2" onClick={() => { setAddingMiscExpense(false); setMiscExpenseStatus(null); }}>Annuler</button>
+          </> : <button type="button" onClick={() => setAddingMiscExpense(true)}>+ Ajouter une dépense imprévue</button>}
+          {miscExpenseStatus && <p className={`projectAccessStatus ${miscExpenseStatus.kind}`} role="status" aria-live="polite">{miscExpenseStatus.text}</p>}
+        </section>}
+        {confirmingMiscExpense && <div className="modalBackdrop" onClick={() => setConfirmingMiscExpense(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
+          <h2 className="font-bold text-xl mb-4">Confirmer la dépense</h2>
+          <p className="projectHint">{miscExpenseDraft.recipient} — {number(miscExpenseDraft.amount).toLocaleString("fr-FR")} Ar. Envoyée directement au compte dépense générale, aucune validation supplémentaire.</p>
+          <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
+            <button type="button" disabled={busy} onClick={() => void submitMiscExpense()}>Confirmer</button>
+            <button type="button" className="ghostButton" onClick={() => setConfirmingMiscExpense(false)}>Annuler</button>
+          </div>
+        </div></div>}
         {viewingOrder && <div className="modalBackdrop" onClick={() => { setViewingOrder(null); setSelectedTransportMode(null); setSelectedTransportPrice(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
           <h2 className="font-bold text-xl mb-4">{viewingOrder.material_name}</h2>
           <p className="projectHint">{number(viewingOrder.quantity)} {viewingOrder.unit} · {(number(viewingOrder.quantity) * number(viewingOrder.unit_price)).toLocaleString("fr-FR")} Ar · demandé par {readerName(viewingOrder.requested_by || "")}</p>
@@ -1750,7 +2088,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             <input name="unit_price" type="number" min="0" step="any" required defaultValue={number(viewingOrder.unit_price)} placeholder="Prix payé (Ar)" />
             <label className="projectPhotoButton">📷 Photo de l’achat<input name="purchase_photo" type="file" accept="image/*" capture="environment" style={{ display: "none" }} /></label>
             <button type="button" className="secondary" onClick={(event) => { event.preventDefault(); setTransportChoiceOpen(true); }}>🚚 Transport{selectedTransportMode ? ` — ${TRANSPORT_MODE_LABELS[selectedTransportMode]}${selectedTransportPrice ? ` (${selectedTransportPrice.toLocaleString("fr-FR")} Ar)` : ""}` : ""}</button>
-            <button disabled={busy || !canUploadPurchaseEvidence || !online}>Valider l’achat</button>
+            <button disabled={busy || !canUploadPurchaseEvidence}>Valider l’achat</button>
           </form>}
           {purchaseStatus && <p className={`projectAccessStatus ${purchaseStatus.kind}`} role="status" aria-live="polite">{purchaseStatus.text}</p>}
           <button type="button" className="ghostButton mt-3" onClick={() => { setViewingOrder(null); setPurchaseStatus(null); setSelectedTransportMode(null); setSelectedTransportPrice(null); }}>Fermer</button>
@@ -1771,11 +2109,10 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
         {viewingAchats && <div className="modalBackdrop" onClick={() => setViewingAchats(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
             <h2 className="font-bold text-xl mb-4">Historique des achats</h2>
             <div className="projectNoteList projectNoteListScroll" style={{ flex: "1 1 auto", minHeight: 0 }}>
-              {paidOrdersHistory.length ? paidOrdersHistory.map((order) => <div className="projectTeamMember" key={order.id}><strong>{order.material_name}</strong><span>Demande : {order.submitted_at ? dateTime.format(new Date(order.submitted_at)) : "—"} · Validation : {order.approved_at ? dateTime.format(new Date(order.approved_at)) : "—"} · Achat : {order.paid_at ? dateTime.format(new Date(order.paid_at)) : "—"}{order.purchase_photo_path && <button type="button" className="ghostButton" style={{ marginLeft: "8px" }} onClick={() => void openPhoto({ id: order.id, project_id: selectedId || "", storage_path: order.purchase_photo_path!, caption: order.purchase_photo_caption || null, photo_type: "delivery", captured_at: order.paid_at || order.approved_at || new Date().toISOString(), created_at: order.paid_at || order.approved_at || new Date().toISOString() } as SitePhoto)}>Photo</button>}</span></div>) : <p className="projectEmptyText">Aucun achat payé pour l’instant.</p>}
+              {paidOrdersHistory.length ? paidOrdersHistory.map((order) => <div className="projectTeamMember" key={order.id}><strong>{order.material_name}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span>Demande : {order.submitted_at ? dateTime.format(new Date(order.submitted_at)) : "—"} · Validation : {order.approved_at ? dateTime.format(new Date(order.approved_at)) : "—"} · Achat : {order.paid_at ? dateTime.format(new Date(order.paid_at)) : "—"}{order.purchase_photo_path && <button type="button" className="ghostButton" style={{ marginLeft: "8px" }} onClick={() => void openPhoto({ id: order.id, project_id: selectedId || "", storage_path: order.purchase_photo_path!, caption: order.purchase_photo_caption || null, photo_type: "delivery", captured_at: order.paid_at || order.approved_at || new Date().toISOString(), created_at: order.paid_at || order.approved_at || new Date().toISOString() } as SitePhoto)}>Photo</button>}</span>{isAdmin && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void adminDeleteMaterialOrder(order)}>Supprimer</button>}</div></div>) : <p className="projectEmptyText">Aucun achat payé pour l’instant.</p>}
             </div>
             <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingAchats(false)}>Fermer</button>
         </div></div>}
-        <section className="projectSiteCard projectPriceSchedule"><div className="projectCardHead"><div><p className="projectEyebrow">BORDEREAU</p><h2>Bordereau de prix</h2></div><span>{projectPriceItems.length} poste(s)</span></div>{projectPriceItems.length ? <div className="projectNoteList">{projectPriceItems.map((item) => <div className="projectTeamMember" key={item.id}><strong>{item.position ? `${item.position}. ` : ""}{item.designation}</strong><span>{item.quantity != null ? number(item.quantity).toLocaleString("fr-FR") : "—"} {item.unit || ""} × {item.unit_price != null ? `${number(item.unit_price).toLocaleString("fr-FR")} Ar` : "—"} = {item.total != null ? `${number(item.total).toLocaleString("fr-FR")} Ar` : "—"}</span></div>)}</div> : <p className="projectEmptyText">Le bordereau de prix sera affiché ici dès que ce chantier est créé ou mis à jour depuis un devis.</p>}</section>
       </main>
     </>}
   </div>;

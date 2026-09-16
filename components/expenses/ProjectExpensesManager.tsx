@@ -48,7 +48,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   laborRates: LaborRate[];
 }) {
   const supabase = useState(() => createClient())[0];
-  const canManage = accessRole === "admin" || accessRole === "works_manager";
+  const canManage = accessRole === "admin";
   const [staffMembers, setStaffMembers] = useState(initialStaffMembers);
   const [attendance, setAttendance] = useState(initialAttendance);
   const [materialOrders, setMaterialOrders] = useState(initialMaterialOrders);
@@ -323,7 +323,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     {message && <div className="notice">{message.text}</div>}
 
     <div className="projectSiteGrid">
-      <section className="projectSiteCard">
+      {canManage && <section className="projectSiteCard">
         <div className="projectCardHead"><div><p className="projectEyebrow">SALAIRE</p><h2>Salaire employés</h2></div><span>{money(salaryTotal)}</span></div>
         <p className="projectHint">Calculé automatiquement depuis le devis interne (taux par fonction) et la présence déclarée. Lecture seule — rien n’est modifiable ici.</p>
         <div className="projectStockSummaryList">{salaryRows.length ? salaryRows.map((row) => <div key={row.staff.id}>
@@ -335,26 +335,26 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
           <button type="button" disabled={!payableRows.length || busy} onClick={() => setViewingPaySummary(true)}>Payer</button>
         </div>}
         <button type="button" className="secondary projectHistoryButton" onClick={() => setViewingSalaryHistory(true)}>Voir l’historique</button>
-      </section>
+      </section>}
 
-      <section className="projectSiteCard">
+      {canManage && <section className="projectSiteCard">
         <div className="projectCardHead"><div><p className="projectEyebrow">À VALIDER</p><h2>Demandes en cours</h2></div><span>{pendingOrders.length}</span></div>
         <div className="projectStockSummaryList">{pendingOrders.length ? pendingOrders.map((order) => <div key={order.id}>
           <span className="chipName">{orderLabel(order)}</span><span className="chipQty">{number(order.quantity)} {order.unit || ""} · {money(orderTotal(order))}</span>
         </div>) : <p className="projectEmptyText">Aucune demande en cours.</p>}</div>
-      </section>
+      </section>}
 
-      <section className="projectSiteCard">
+      {canManage && <section className="projectSiteCard">
         <div className="projectCardHead"><div><p className="projectEyebrow">ACHATS PAYÉS</p><h2>Dépenses effectuées</h2></div><span>{money(paidOrders.reduce((sum, order) => sum + orderTotal(order), 0))}</span></div>
         <div className="projectStockSummaryList">{paidOrders.length ? paidOrders.map((order) => <div key={order.id}>
           <span className="chipName">{orderReason(order)} — {orderLabel(order)}</span><span className="chipQty">{number(order.quantity)} {order.unit || ""} · {money(orderTotal(order))}</span>
         </div>) : <p className="projectEmptyText">Aucun achat payé.</p>}</div>
-      </section>
+      </section>}
 
-      <section className="projectSiteCard">
+      {canManage && <section className="projectSiteCard">
         <div className="projectCardHead"><div><p className="projectEyebrow">IMPRÉVU</p><h2>Dépenses imprévues</h2></div></div>
-        <p className="projectHint">Cadeaux, pots-de-vin ou toute dépense hors matériau/salaire. Envoyée directement au compte dépense générale après confirmation.</p>
-        {canManage && (addingMisc ? <>
+        <p className="projectHint">Cadeaux ou toute dépense hors matériau/salaire. Envoyée directement au compte dépense générale après confirmation.</p>
+        {addingMisc ? <>
           <div className="projectMaterialForm">
             <input placeholder="Nom du bénéficiaire ou organisme" value={miscDraft.recipient} onChange={(event) => setMiscDraft((draft) => ({ ...draft, recipient: event.target.value }))} />
             <input type="number" min="0" step="any" placeholder="Montant (Ar)" value={miscDraft.amount} onChange={(event) => setMiscDraft((draft) => ({ ...draft, amount: event.target.value }))} />
@@ -362,8 +362,8 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
             <button type="button" disabled={busy} onClick={() => setConfirmingMisc(true)}>Valider</button>
           </div>
           <button type="button" className="ghostButton mt-2" onClick={() => setAddingMisc(false)}>Annuler</button>
-        </> : <button type="button" onClick={() => setAddingMisc(true)}>+ Ajouter une dépense imprévue</button>)}
-      </section>
+        </> : <button type="button" onClick={() => setAddingMisc(true)}>+ Ajouter une dépense imprévue</button>}
+      </section>}
 
       <section className="projectSiteCard">
         <div className="projectCardHead"><div><p className="projectEyebrow">MATÉRIAUX</p><h2>Dépense matériaux</h2></div></div>

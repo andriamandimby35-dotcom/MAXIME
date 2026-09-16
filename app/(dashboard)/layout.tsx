@@ -30,6 +30,19 @@ export default async function DashboardLayout({
     .maybeSingle();
   const isAdmin = Boolean(member?.active && ["owner", "admin"].includes(member.role));
 
+  // Le conducteur de travaux a, en plus de "Mes chantiers", un accès en
+  // lecture seule aux dépenses (et à la dépense matériaux) de ses chantiers.
+  const { data: worksManagerAssignments } = isAdmin
+    ? { data: [] }
+    : await supabase
+        .from("project_assignments")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("role", "works_manager")
+        .eq("active", true)
+        .limit(1);
+  const isWorksManager = !isAdmin && Boolean(worksManagerAssignments?.length);
+
 
 
   return (
@@ -110,9 +123,17 @@ export default async function DashboardLayout({
             Bibliothèque de prix
           </Link>
 
-          </> : <Link href="/projects">
+          </> : <>
+
+          <Link href="/projects">
             Mes chantiers
+          </Link>
+
+          {isWorksManager && <Link href="/expenses">
+            Dépenses (lecture seule)
           </Link>}
+
+          </>}
 
 
         </nav>
