@@ -3,7 +3,10 @@ import { createServerClient } from "@/lib/supabase/server";
 
 // Un DAO peut contenir de nombreuses pages et des tableaux visuels détaillés.
 // La route ne doit pas être interrompue pendant cette lecture complète.
-export const maxDuration = 900;
+// 300 secondes est la limite maximale autorisée par Vercel sur l'offre
+// gratuite (Hobby) : une valeur plus haute (comme 900) fait échouer tout le
+// déploiement, pas seulement cette fonction.
+export const maxDuration = 300;
 
 const daoSchema = {
   type: "object",
