@@ -50,6 +50,30 @@
   padding: 25px;
 }
 
+/* Téléphone en mode portrait (écran étroit) : la barre latérale fixe de
+   230px ne laissait presque plus de place au contenu principal (par
+   exemple 160px sur un écran de 390px), ce qui donnait l'impression que
+   seul le menu de gauche s'affichait. On empile le menu au-dessus du
+   contenu au lieu de les mettre côte à côte, sans rien changer à
+   l'affichage normal (ordinateur ou téléphone en paysage). */
+@media (max-width: 760px) {
+  .dashboardLayout {
+    display: block;
+  }
+  .dashboardLayout .sidebar {
+    position: static;
+    width: 100%;
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid #e5e7eb;
+  }
+  .dashboardLayout .mainContent {
+    margin-left: 0;
+    width: 100%;
+    padding: 16px;
+  }
+}
+
 
 
 .brand {
