@@ -56,6 +56,10 @@ const periode =
 searchParams.get("periode");
 
 
+const priceId =
+searchParams.get("priceId");
+
+
 
 // requête historique
 
@@ -63,7 +67,7 @@ let query = supabase
 .from("price_history")
 .select(`
 *,
-price_library(
+price_library!price_history_price_id_fkey(
 designation,
 categorie,
 unite
@@ -79,6 +83,19 @@ organizationId
 ascending:false
 }
 );
+
+
+
+// filtre matériau précis
+
+if(priceId){
+
+query=query.eq(
+"price_id",
+priceId
+);
+
+}
 
 
 

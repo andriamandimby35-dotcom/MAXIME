@@ -1,41 +1,94 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { createClient } from "@/lib/supabase/client";
 
-export default function OfficialPdfButton({ estimateId }: { estimateId: string }) {
+export default function OfficialPdfButton({ estimateId, mode = "external" }: { estimateId: string; mode?: "external" | "internal" }) {
   const [working, setWorking] = useState<"preview" | "save" | null>(null);
   const [previewReady, setPreviewReady] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState("");
   const [message, setMessage] = useState("");
 
-  useEffect(() => () => {
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-  }, [previewUrl]);
+  async function authenticatedHeaders(): Promise<Record<string, string>> {
+    const { data: { session } } = await createClient().auth.getSession();
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (session?.access_token) {
+      headers.Authorization = `Bearer ${session.access_token}`;
+      headers["X-Supabase-Access-Token"] = session.access_token;
+    }
+    return headers;
+  }
+
+  function openPreviewWindow() {
+    const preview = window.open("about:blank", "_blank");
+    if (!preview) {
+      setMessage("Le navigateur a bloqué la fenêtre PDF. Autorisez les fenêtres surgissantes puis réessayez.");
+      return null;
+    }
+    preview.document.title = "Préparation du PDF…";
+    preview.document.body.innerHTML = "<p style='font-family:system-ui;padding:24px'>Préparation du PDF…</p>";
+    return preview;
+  }
+
+  function showPdf(preview: Window, pdfBase64: string) {
+    const bytes = Uint8Array.from(atob(pdfBase64), (character) => character.charCodeAt(0));
+    const objectUrl = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+    preview.location.replace(objectUrl);
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60 * 60 * 1000);
+  }
+
+  async function requestPdf(save: boolean, preview: Window) {
+    const headers = await authenticatedHeaders();
+    headers["X-PDF-Client-Fetch"] = "1";
+    const response = await fetch(`/api/estimates/${estimateId}/official-pdf`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ save, mode }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.pdfBase64) throw new Error(result.error || "Le PDF n’a pas pu être préparé.");
+    showPdf(preview, result.pdfBase64);
+  }
 
   async function previewPdf() {
     if (working) return;
     setWorking("preview");
-    setPreviewReady(false);
-    setMessage("Création de l’aperçu fidèle au DAO…");
+    setMessage("Création de l’aperçu PDF…");
     try {
       const response = await fetch(`/api/estimates/${estimateId}/official-pdf`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ save: false }),
+        headers: await authenticatedHeaders(),
+        body: JSON.stringify({ save: false, mode }),
       });
-      if (!response.ok) {
-        const result = await response.json().catch(() => ({}));
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.previewUrl) {
         throw new Error(result.error || "Prévisualisation impossible.");
       }
-      const blob = await response.blob();
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
-      const nextUrl = URL.createObjectURL(blob);
-      setPreviewUrl(nextUrl);
       setPreviewReady(true);
-      setMessage("Aperçu créé. Vérifiez-le, puis revenez modifier le devis ou confirmez son enregistrement.");
-      window.open(nextUrl, "_blank", "noopener,noreferrer");
+      setMessage("Aperçu prêt. Cliquez sur « Ouvrir l’aperçu PDF » pour l’afficher dans le lecteur PDF du navigateur.");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Prévisualisation impossible.");
+      const errorMessage = error instanceof Error ? error.message : "Prévisualisation impossible.";
+      setMessage(errorMessage);
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function openPreviewPdf() {
+    if (!previewReady) {
+      setMessage("Préparez d’abord l’aperçu PDF.");
+      return;
+    }
+    const preview = openPreviewWindow();
+    if (!preview) return;
+    setWorking("preview");
+    try {
+      await requestPdf(false, preview);
+      setMessage("Aperçu ouvert dans le lecteur PDF du navigateur.");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Ouverture du PDF impossible.";
+      preview.document.title = "PDF indisponible";
+      preview.document.body.innerHTML = `<p style="font-family:system-ui;padding:24px">${detail.replace(/[<>&]/g, "")}</p>`;
+      setMessage(detail);
     } finally {
       setWorking(null);
     }
@@ -44,7 +97,7 @@ export default function OfficialPdfButton({ estimateId }: { estimateId: string }
   async function savePdf() {
     if (working || !previewReady) return;
     const confirmed = window.confirm(
-      "Enregistrer ce PDF officiel ? L’ancien PDF officiel enregistré pour ce devis sera remplacé.",
+      `Enregistrer ce ${mode === "internal" ? "PDF interne" : "PDF de soumission"} ? L’ancienne version sera remplacée.`,
     );
     if (!confirmed) {
       setMessage("Enregistrement annulé. Vous pouvez encore modifier le devis.");
@@ -53,16 +106,11 @@ export default function OfficialPdfButton({ estimateId }: { estimateId: string }
     setWorking("save");
     setMessage("Enregistrement privé du PDF officiel…");
     try {
-      const response = await fetch(`/api/estimates/${estimateId}/official-pdf`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ save: true }),
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok || !result.downloadUrl) throw new Error(result.error || "Enregistrement impossible.");
+      const preview = openPreviewWindow();
+      if (!preview) return;
+      await requestPdf(true, preview);
       setPreviewReady(false);
-      setMessage("PDF officiel enregistré. Il remplace l’ancienne version de ce devis.");
-      window.open(result.downloadUrl, "_blank", "noopener,noreferrer");
+      setMessage("PDF enregistré. Il remplace l’ancienne version de ce type de devis.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Enregistrement impossible.");
     } finally {
@@ -85,7 +133,20 @@ export default function OfficialPdfButton({ estimateId }: { estimateId: string }
           cursor: working ? "wait" : "pointer", fontWeight: 700,
         }}
       >
-        {working === "preview" ? "Création de l’aperçu…" : previewReady ? "Actualiser l’aperçu PDF" : "Prévisualiser le PDF officiel DAO"}
+        {working === "preview" ? "Création de l’aperçu…" : previewReady ? "Actualiser l’aperçu PDF" : mode === "internal" ? "Prévisualiser le devis interne" : "Prévisualiser le PDF de soumission"}
+      </button>
+      <button
+        type="button"
+        onClick={() => void openPreviewPdf()}
+        disabled={!previewReady || Boolean(working)}
+        style={{
+          border: "1px solid #0f766e", borderRadius: 6, padding: "9px 14px",
+          background: previewReady && !working ? "#0f766e" : "#ccfbf1",
+          color: previewReady && !working ? "white" : "#115e59",
+          cursor: previewReady && !working ? "pointer" : "not-allowed", fontWeight: 700,
+        }}
+      >
+        Ouvrir l’aperçu PDF
       </button>
       {previewReady && (
         <button
@@ -104,9 +165,13 @@ export default function OfficialPdfButton({ estimateId }: { estimateId: string }
         </button>
       )}
       {working && (
-        <div style={{ width: 220, height: 7, overflow: "hidden", borderRadius: 99, background: "#d1d5db" }}>
-          <div style={{ width: "65%", height: "100%", borderRadius: 99, background: "#16a34a", animation: "pdfProgress 1.1s ease-in-out infinite alternate" }} />
-          <style>{`@keyframes pdfProgress { from { transform: translateX(-55%); } to { transform: translateX(80%); } }`}</style>
+        <div
+          className="appProgress appProgressCompact isIndeterminate"
+          role="progressbar"
+          aria-label="Préparation du PDF en cours"
+          aria-valuetext="Préparation en cours"
+        >
+          <span />
         </div>
       )}
       {message && <small role="status" style={{ flexBasis: "100%", color: hasError ? "#b91c1c" : "#166534", maxWidth: 720 }}>{message}</small>}

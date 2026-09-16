@@ -44,6 +44,17 @@ export async function POST(request: Request) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
 
+  const { data: member } = await supabase
+    .from("organization_members")
+    .select("organization_id")
+    .eq("user_id", user.id)
+    .limit(1)
+    .maybeSingle();
+
+  if (!member?.organization_id) {
+    return NextResponse.json({ error: "Organisation introuvable." }, { status: 403 });
+  }
+
   const body = await request.json().catch(() => null) as {
     tenderId?: string;
     companyName?: string;
@@ -61,6 +72,7 @@ export async function POST(request: Request) {
     .from("tenders")
     .select("id,reference,title,contracting_authority,location,submission_deadline,summary,requirements,missing_documents")
     .eq("id", tenderId)
+    .eq("organization_id", member.organization_id)
     .single();
 
   if (error || !tender) return NextResponse.json({ error: "Appel d’offres introuvable." }, { status: 404 });

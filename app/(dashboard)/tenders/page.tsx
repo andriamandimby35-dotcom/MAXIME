@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getContext } from "@/lib/organization";
 import DeleteTenderButton from "@/components/tenders/DeleteTenderButton";
+import { RealtimeRefresh } from "@/components/realtime-refresh";
 
 function statusLabel(status?: string | null) {
   const labels: Record<string, string> = {
@@ -17,7 +18,7 @@ function statusLabel(status?: string | null) {
 
 export default async function TendersPage() {
 
-  const { supabase } = await getContext();
+  const { supabase, organizationId } = await getContext();
 
 
   const { data: tenders, error } = await supabase
@@ -34,7 +35,7 @@ export default async function TendersPage() {
     return (
       <main className="p-8">
         <h1 className="text-2xl font-bold">
-          Erreur chargement appels d'offres
+          Erreur chargement appels d&apos;offres
         </h1>
       </main>
     );
@@ -44,6 +45,8 @@ export default async function TendersPage() {
   return (
 
     <main className="p-8">
+
+      {organizationId && <RealtimeRefresh channelName="tenders-list" tables={["tenders"]} filter={`organization_id=eq.${organizationId}`} />}
 
       <div className="flex justify-between items-center mb-8">
 
@@ -60,15 +63,9 @@ export default async function TendersPage() {
 
         <Link
           href="/tenders/new"
-          className="
-          bg-green-800
-          text-white
-          px-5
-          py-3
-          rounded-lg
-          "
+          className="tenderButton tenderButtonPrimary tenderAddButton"
         >
-          + Ajouter
+          + Ajouter un appel d’offres
         </Link>
 
       </div>
@@ -126,23 +123,19 @@ export default async function TendersPage() {
           <tbody>
 
 
-            {tenders?.map((tender) => (
+            {tenders?.map((tender) => {
+              const hasAnalysis = Boolean(tender.ai_analysis);
+              return (
 
-              <tr
-                key={tender.id}
-                className="border-t hover:bg-gray-50"
-              >
+              <tr key={tender.id} className="tenderSelectRow">
 
 
                 <td className="p-4">
 
 
                   <Link
-                    href={`/tenders/${tender.id}`}
-                    className="
-                    text-green-800
-                    hover:underline
-                    "
+                    href={`/tenders/${tender.id}/analyze`}
+                    className="tenderSelectLink"
                   >
 
                     {tender.reference}
@@ -194,20 +187,35 @@ export default async function TendersPage() {
                   <span className="
                   text-gray-700
                   ">
-                    {statusLabel(tender.status)}
+                    {hasAnalysis ? "Analysé" : "À analyser"}
                   </span>
 
                 </td>
 
-                <td className="p-4">
+                <td className="p-4 tenderRowActions">
+                  {tender.document_url ? (
+                    <a
+                      href={`/pdf-viewer?url=${encodeURIComponent(tender.document_url)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="tenderButton"
+                    >
+                      Ouvrir le DAO
+                    </a>
+                  ) : (
+                    <button type="button" disabled className="tenderButton submissionPdfDisabled">
+                      DAO indisponible
+                    </button>
+                  )}
+                  <Link href={`/tenders/${tender.id}/analyze`} className="tenderAnalyzeLink">{hasAnalysis ? "Ré-analyser" : "Analyser"}</Link>
                   <DeleteTenderButton tenderId={tender.id} tenderName={tender.title || tender.reference} />
                 </td>
 
 
 
               </tr>
-
-            ))}
+              );
+            })}
 
 
 
@@ -220,7 +228,7 @@ export default async function TendersPage() {
                   className="p-8 text-center text-gray-500"
                 >
 
-                  Aucun appel d'offre
+                  Aucun appel d&apos;offre
 
                 </td>
 

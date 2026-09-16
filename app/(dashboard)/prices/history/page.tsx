@@ -1,5 +1,7 @@
 import { getContext } from "@/lib/organization";
 import { formatAr } from "@/lib/format-number";
+import Link from "next/link";
+import { RealtimeRefresh } from "@/components/realtime-refresh";
 
 
 
@@ -41,7 +43,7 @@ pourcentage_variation,
 type_variation,
 date_modification,
 
-price_library(
+price_library!price_history_price_id_fkey(
 designation,
 categorie,
 unite
@@ -65,6 +67,10 @@ ascending:false
 return (
 
 <div className="p-6">
+
+<RealtimeRefresh channelName="price-history" tables={["price_history"]} filter={`organization_id=eq.${organizationId}`} />
+
+<Link href="/prices" className="tenderBackLink">← Retour à la bibliothèque de prix</Link>
 
 
 <h1 className="text-2xl font-bold">

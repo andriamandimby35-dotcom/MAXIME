@@ -1,9 +1,12 @@
 import { createServerClient as createSupabaseServerClient } from "@supabase/ssr";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 
 export async function createServerClient() {
 
   const cookieStore = await cookies();
+  const requestHeaders = await headers();
+  const authorization = requestHeaders.get("authorization")
+    || (requestHeaders.get("x-supabase-access-token") ? `Bearer ${requestHeaders.get("x-supabase-access-token")}` : "");
 
   return createSupabaseServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -25,6 +28,9 @@ export async function createServerClient() {
           }
         },
       },
+      // Le lecteur PDF peut transmettre le jeton de la session navigateur.
+      // Cela complète les cookies pour les ouvertures dans un nouvel onglet.
+      global: authorization.startsWith("Bearer ") ? { headers: { Authorization: authorization } } : undefined,
     }
   );
 

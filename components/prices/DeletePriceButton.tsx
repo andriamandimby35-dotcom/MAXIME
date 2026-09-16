@@ -52,8 +52,8 @@ window.location.reload();
 return (
 
 <button
-onClick={deletePrice}
-className="bg-red-600 text-white px-3 py-1 rounded"
+onClick={(e)=>{e.stopPropagation();void deletePrice();}}
+className="dangerButton"
 >
 Supprimer
 </button>

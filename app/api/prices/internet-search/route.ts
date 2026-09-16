@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
+import { canonicalMaterialKey, canonicalUnit, materialFamily } from "@/lib/material-normalization";
 
 type SearchRequest = {
   action?: "search" | "save_manual_composite" | "resolve_component_prices";
@@ -130,30 +131,11 @@ function positiveNumber(value: unknown) {
 }
 
 function normalizeMaterialName(value: string) {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLocaleLowerCase("fr-FR")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .replace(/\s+/g, " ");
+  return canonicalMaterialKey(value);
 }
 
 function displayMaterialName(value: string) {
   return normalizeMaterialName(value).toLocaleUpperCase("fr-FR");
-}
-
-function materialFamily(value: string) {
-  const normalized = normalizeMaterialName(value);
-  if (normalized.includes("ciment")) return "ciment";
-  if (normalized.includes("sable")) return "sable";
-  if (normalized.includes("gravillon") || normalized.includes("gravier")) return "granulat_gravier";
-  if (normalized.includes("parpaing") || normalized.includes("bloc creux") || normalized.includes("agglo")) return "parpaing";
-  if (normalized.includes("planche")) return "planche";
-  if (normalized.includes("tasseau") || normalized.includes("chevron") || normalized.includes("raidisseur")) return "bois_raidissement";
-  if (normalized.includes("pointe") || normalized.includes("clou")) return "pointes";
-  if (normalized.includes("huile") && normalized.includes("coffrage")) return "huile_decoffrage";
-  return normalized;
 }
 
 function savedPriceForRequestedUnit(price: Record<string, unknown>, requestedUnit: string) {
@@ -162,8 +144,8 @@ function savedPriceForRequestedUnit(price: Record<string, unknown>, requestedUni
     ?? positiveNumber(price.prix_actuel)
     ?? positiveNumber(price.prix_ia);
   if (!retained) return null;
-  const savedUnit = normalizeMaterialName(String(price.unite ?? ""));
-  const targetUnit = normalizeMaterialName(requestedUnit);
+  const savedUnit = canonicalUnit(String(price.unite ?? ""));
+  const targetUnit = canonicalUnit(requestedUnit);
   if (savedUnit === targetUnit) return retained;
   if (materialFamily(String(price.designation ?? "")) === "ciment") {
     if ((savedUnit.includes("sac") || savedUnit.includes("bag")) && targetUnit === "kg") return retained / 50;
@@ -180,7 +162,7 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => null) as SearchRequest | null;
   const designation = body?.designation?.trim();
   const categorie = body?.categorie?.trim() || "Matériaux BTP";
-  const unite = body?.unite?.trim();
+  const unite = canonicalUnit(body?.unite?.trim() ?? "");
   const worksiteName = body?.worksiteName?.trim() || "Chantier non nommé";
   const worksiteLocation = body?.worksiteLocation?.trim();
   const daoQuantity = Number(body?.daoQuantity) || 0;
@@ -202,41 +184,203 @@ export async function POST(request: Request) {
   if (!member) return NextResponse.json({ error: "Organisation introuvable." }, { status: 403 });
 
   const organizationId = member.organization_id;
-  const designationKey = normalizeMaterialName(designation);
+  const designationKey = canonicalMaterialKey(designation);
   const canonicalDesignation = displayMaterialName(designation);
   const { data: organizationPrices } = await supabase
     .from("price_library")
     .select("*")
     .eq("organization_id", organizationId);
+  // Le catalogue partagé est un cache commun : les devis et les ajustements
+  // propres à l'entreprise restent prioritaires et privés.
+  const { data: sharedPriceRows } = await supabase
+    .from("shared_material_prices")
+    .select("*")
+    .eq("designation_key", designationKey)
+    .order("prix_unitaire", { ascending: true })
+    .order("updated_at", { ascending: false });
+  const sharedPrice = sharedPriceRows?.find((price) => canonicalUnit(String(price.unite ?? "")) === unite) ?? null;
+  // Le nom du DAO ne correspond pas toujours au nom réel/commercial déjà
+  // enregistré (ex: "CIMENT CEM I 42.5..." côté DAO vs "Ciment Orimbato" en
+  // bibliothèque) : si aucune désignation identique n'est trouvée, on retombe
+  // sur la même famille de matériau pour réutiliser le prix déjà connu au
+  // lieu de relancer inutilement une recherche.
+  const requestedFamily = materialFamily(designation);
   const existingPrice = organizationPrices?.find(
     (price) => normalizeMaterialName(String(price.designation)) === designationKey
-      && normalizeMaterialName(String(price.unite ?? "")) === normalizeMaterialName(unite),
+      && canonicalUnit(String(price.unite ?? "")) === unite,
+  ) ?? organizationPrices?.find(
+    (price) => materialFamily(String(price.designation)) === requestedFamily
+      && canonicalUnit(String(price.unite ?? "")) === unite,
   ) ?? null;
+
+  async function cacheSharedPrice(price: number, source: { label: string; url?: string; supplier?: string; city?: string; region?: string; confidence?: number }) {
+    const { data: organization } = await supabase.from("organizations").select("name").eq("id", organizationId).maybeSingle();
+    const now = new Date().toISOString();
+    const common = {
+      designation_key: designationKey,
+      designation: canonicalDesignation,
+      categorie,
+      unite,
+      prix_unitaire: price,
+      provenance_label: source.label,
+      provenance_url: source.url || null,
+      supplier_name: source.supplier || null,
+      supplier_city: source.city || null,
+      supplier_region: source.region || null,
+      confidence: source.confidence ?? null,
+      contributor_organization_id: organizationId,
+      contributor_organization_name: organization?.name ?? null,
+      last_checked_at: now,
+      updated_at: now,
+    };
+    const { data: existingRows } = await supabase.from("shared_material_prices")
+      .select("id,prix_unitaire,unite")
+      .eq("designation_key", designationKey)
+      .order("prix_unitaire", { ascending: true });
+    const existing = existingRows?.find((item) => canonicalUnit(String(item.unite ?? "")) === unite) ?? null;
+    const { data: material, error } = existing?.id
+      ? await supabase.from("shared_material_prices").update(Number(existing.prix_unitaire) > price ? common : { last_checked_at: now, updated_at: now }).eq("id", existing.id).select("id").single()
+      : await supabase.from("shared_material_prices").insert({ ...common, created_by: user!.id }).select("id").single();
+    if (error || !material) { console.warn("Shared material price cache unavailable", error?.message); return; }
+    const { error: observationError } = await supabase.from("shared_material_price_observations").insert({
+      material_id: material.id, prix_unitaire: price, provenance_type: "internet_ia", provenance_label: source.label,
+      provenance_url: source.url || null, contributor_organization_id: organizationId, contributor_organization_name: organization?.name ?? null,
+      supplier_name: source.supplier || null, supplier_city: source.city || null, supplier_region: source.region || null,
+      confidence: source.confidence ?? null, observed_at: now, created_by: user!.id,
+    });
+    if (observationError) console.warn("Shared material observation unavailable", observationError.message);
+  }
 
   if (body?.action === "resolve_component_prices") {
     const components = body.manualComponents ?? [];
-    const resolved = components.map((component) => {
+    const resolved = await Promise.all(components.map(async (component) => {
       const family = materialFamily(component.designation);
-      const savedPrice = organizationPrices?.find((price) =>
+      const enterprisePrice = organizationPrices?.find((price) =>
         materialFamily(String(price.designation)) === family
         && savedPriceForRequestedUnit(price, component.unit) !== null,
       );
-      const savedUnitPrice = savedPrice ? savedPriceForRequestedUnit(savedPrice, component.unit) : null;
+      const { data: sharedComponents } = await supabase.from("shared_material_prices")
+        .select("designation,unite,prix_unitaire,provenance_label,contributor_organization_name,supplier_name")
+        .eq("designation_key", normalizeMaterialName(component.designation))
+        .eq("unite", component.unit)
+        .order("prix_unitaire", { ascending: true }).limit(1);
+      let sharedComponent = sharedComponents?.[0] ?? null;
+      // Une même matière peut être saisie sous une désignation plus précise
+      // (ex. « ciment 350 kg » au lieu de « ciment »). On réutilise alors
+      // le prix familial plutôt que de redemander inutilement une saisie.
+      if (!sharedComponent) {
+        const { data: familyComponents } = await supabase.from("shared_material_prices")
+          .select("designation,unite,prix_unitaire,provenance_label,contributor_organization_name,supplier_name")
+          .order("prix_unitaire", { ascending: true }).limit(200);
+        sharedComponent = familyComponents?.find((price) =>
+          materialFamily(String(price.designation)) === family
+          && canonicalUnit(String(price.unite ?? "")) === canonicalUnit(component.unit),
+        ) ?? null;
+      }
+      const enterpriseUnitPrice = enterprisePrice ? savedPriceForRequestedUnit(enterprisePrice, component.unit) : null;
+      const sharedUnitPrice = positiveNumber(sharedComponent?.prix_unitaire);
+      const useEnterprise = enterpriseUnitPrice !== null;
       return {
         ...component,
-        saved_unit_price: savedUnitPrice,
-        saved_designation: savedPrice ? String(savedPrice.designation ?? "") : "",
-        saved_supplier: savedPrice ? String(savedPrice.fournisseur ?? "Prix enregistré") : "",
-        saved_source: savedPrice ? String(savedPrice.prix_source ?? savedPrice.reference_source ?? "historique interne") : "",
+        saved_unit_price: useEnterprise ? enterpriseUnitPrice : sharedUnitPrice,
+        saved_designation: useEnterprise ? String(enterprisePrice?.designation ?? "") : String(sharedComponent?.designation ?? ""),
+        saved_supplier: useEnterprise ? String(enterprisePrice?.fournisseur ?? "Prix enregistré") : String(sharedComponent?.supplier_name ?? "Prix partagé"),
+        saved_source: useEnterprise ? String(enterprisePrice?.prix_source ?? enterprisePrice?.reference_source ?? "historique interne") : `${sharedComponent?.provenance_label ?? "Prix partagé"}${sharedComponent?.contributor_organization_name ? ` — ${sharedComponent.contributor_organization_name}` : ""}`,
+        shared_lower_price: enterpriseUnitPrice && sharedUnitPrice && sharedUnitPrice < enterpriseUnitPrice ? sharedUnitPrice : null,
+        shared_provenance: sharedComponent?.provenance_label ?? "",
+        shared_contributor_organization: sharedComponent?.contributor_organization_name ?? "",
       };
-    });
+    }));
     return NextResponse.json({ components: resolved });
+  }
+
+  // Matériau vendu par pièce/barre/plaque entière (ex: bois carré en barres
+  // de 4 m, tôle en feuilles de 6 m²) : le DAO compte en unité de mesure (ml,
+  // m2, kg...) mais le fournisseur ne vend jamais une fraction de pièce.
+  // quantite_par_unite_achat est toujours exprimée dans CETTE unité DAO (une
+  // longueur si unite=ml, une surface si unite=m2, etc.) — le calcul est donc
+  // le même quel que soit le type d'unité. On calcule le nombre de pièces
+  // entières réellement à acheter (arrondi au supérieur) pour cette quantité
+  // DAO, puis on ramène ça à un prix par unité DAO — multiplié par la
+  // quantité dans EstimateBuilder, ça reconstitue exactement le coût d'achat
+  // réel, pas une simple moyenne linéaire.
+  const purchaseUnitQty = positiveNumber(existingPrice?.quantite_par_unite_achat);
+  const purchaseUnitPrice = positiveNumber(existingPrice?.prix_unite_achat);
+  if (existingPrice && purchaseUnitQty && purchaseUnitPrice && daoQuantity > 0) {
+    const piecesNeeded = Math.ceil(daoQuantity / purchaseUnitQty);
+    const totalCost = piecesNeeded * purchaseUnitPrice;
+    const effectiveUnitPrice = totalCost / daoQuantity;
+    return NextResponse.json({
+      found: true,
+      price_id: existingPrice.id,
+      selected_price: effectiveUnitPrice,
+      proposed_lower_price: null,
+      requires_validation: false,
+      supplier: existingPrice.fournisseur || "Prix enregistré",
+      supplier_distance_km: null,
+      estimated_unit_weight_t: null,
+      weight_basis: `Vendu par ${existingPrice.unite_achat || "pièce"} de ${purchaseUnitQty} ${unite} à ${purchaseUnitPrice.toLocaleString("fr-FR")} Ar : ${piecesNeeded} pièce(s) nécessaire(s) pour ${daoQuantity} ${unite}.`,
+      interpreted_designation: existingPrice.designation,
+      equivalent_options: [], recommended_equivalent: "",
+      equivalence_note: `${piecesNeeded} × ${existingPrice.unite_achat || "pièce"} (${purchaseUnitQty} ${unite}) à ${purchaseUnitPrice.toLocaleString("fr-FR")} Ar = ${totalCost.toLocaleString("fr-FR")} Ar au total, soit ${effectiveUnitPrice.toLocaleString("fr-FR")} Ar/${unite} pour cette quantité.`,
+      requires_technical_validation: false, manual_price_inputs: [], composite_calculated_automatically: false, offers_found: 0,
+      purchase_unit: true,
+    });
+  }
+
+  const sharedLowestPrice = positiveNumber(sharedPrice?.prix_unitaire);
+  const organizationManualPrice = positiveNumber(existingPrice?.prix_entreprise);
+  if (organizationManualPrice && sharedLowestPrice && sharedLowestPrice < organizationManualPrice) {
+    return NextResponse.json({
+      found: true,
+      price_id: existingPrice?.id ?? null,
+      selected_price: organizationManualPrice,
+      proposed_lower_price: sharedLowestPrice,
+      requires_validation: true,
+      supplier: sharedPrice?.supplier_name || "Prix partagé",
+      supplier_distance_km: null,
+      estimated_unit_weight_t: null,
+      weight_basis: "Prix partagé le moins cher.",
+      interpreted_designation: sharedPrice?.designation || canonicalDesignation,
+      equivalent_options: [], recommended_equivalent: "",
+      equivalence_note: `Prix partagé moins cher : ${sharedPrice?.provenance_label}${sharedPrice?.contributor_organization_name ? ` — ${sharedPrice.contributor_organization_name}` : ""}. Votre prix reste appliqué jusqu’à validation.`,
+      requires_technical_validation: false, manual_price_inputs: [], composite_calculated_automatically: false, offers_found: sharedPriceRows?.length ?? 0,
+      shared_price: true, price_provenance: sharedPrice?.provenance_label, contributor_organization: sharedPrice?.contributor_organization_name,
+    });
+  }
+
+  // Un prix déjà vérifié par une autre entreprise évite une nouvelle recherche
+  // Internet. La provenance est retournée au devis pour rester transparente.
+  if (!existingPrice && sharedPrice && body?.action !== "save_manual_composite") {
+    const price = positiveNumber(sharedPrice.prix_unitaire);
+    if (price) return NextResponse.json({
+      found: true,
+      price_id: null,
+      selected_price: price,
+      proposed_lower_price: null,
+      requires_validation: false,
+      supplier: sharedPrice.supplier_name || "Prix partagé",
+      supplier_distance_km: null,
+      estimated_unit_weight_t: null,
+      weight_basis: "Prix récupéré du catalogue partagé.",
+      interpreted_designation: sharedPrice.designation,
+      equivalent_options: [],
+      recommended_equivalent: "",
+      equivalence_note: `Meilleur prix partagé parmi ${sharedPriceRows?.length ?? 1} provenance(s) : ${sharedPrice.provenance_label}${sharedPrice.contributor_organization_name ? ` — saisi/confirmé par ${sharedPrice.contributor_organization_name}` : ""}.`,
+      requires_technical_validation: false,
+      manual_price_inputs: [],
+      composite_calculated_automatically: false,
+      offers_found: 0,
+      shared_price: true,
+      price_provenance: sharedPrice.provenance_label,
+      contributor_organization: sharedPrice.contributor_organization_name,
+    });
   }
 
   if (body?.action === "save_manual_composite") {
     const compositePrice = positiveNumber(body.manualCompositePrice);
     const components = (body.manualComponents ?? []).filter(
-      (item) => item.designation?.trim() && item.unit?.trim() && Number(item.local_unit_price) >= 0,
+      (item) => item.designation?.trim() && item.unit?.trim() && Number(item.local_unit_price) > 0,
     );
     if (!compositePrice || components.length === 0) {
       return NextResponse.json({ error: "Prix composé ou composants invalides." }, { status: 400 });
@@ -376,6 +520,13 @@ export async function POST(request: Request) {
         "N'invente ni fournisseur, ni adresse, ni prix, ni URL.",
         "Interprète la désignation technique et propose jusqu'à 5 équivalents réellement compatibles disponibles à Madagascar.",
         "Ne modifie jamais la désignation officielle du DAO; les équivalents servent uniquement au calcul et à l'approvisionnement internes.",
+        "interpreted_designation doit toujours être le nom réel, simple et commercial du matériau tel qu'on le trouve à Madagascar — jamais le nom technique, le code ou le jargon du DAO. C'est ce nom qui sera enregistré dans la bibliothèque de prix interne ; le nom officiel du DAO reste inchangé partout ailleurs (devis compris), cette interprétation ne sert qu'à retrouver et nommer le bon prix.",
+        "Toute mention d'eau, y compris «eau de gâchage», doit être interprétée comme «Eau». Si le DAO propose un choix entre eau et adjuvant, retiens «Eau» (option la moins chère) sauf si un adjuvant est explicitement exigé sans alternative, auquel cas retiens «Adjuvant».",
+        "À Madagascar, le sable utilisé pour le béton, le mortier, la chape, la maçonnerie de parpaings ou tout autre usage courant est le même sable normal (lavé) : toute variante («sable pour mortier», «sable de mortier», «sable de chape», «sable de maçonnerie», «sable lavé», etc.) doit être interprétée simplement comme «Sable», jamais avec sa variante technique, pour éviter les doublons dans la bibliothèque.",
+        "Pour un ciment désigné seulement par sa classe de résistance, utilise ce tableau de référence vérifié des marques vendues à Madagascar (prix indicatif au sac de 50 kg) : Lova CEM II 22.5 ≈36 000 Ar ; Lafatra CEM II 32.5 ≈36 450 Ar ; Kinga CEM II 42.5 ≈39 000 Ar ; Orimbato 42.5 ≈42 950 Ar ; Lucky CEM I 42.5 ≈37 000 Ar. Choisis la marque dont la classe correspond à celle demandée par le DAO. Si plusieurs marques correspondent à la même classe (ex: Kinga, Orimbato et Lucky pour du 42.5) et que le DAO ne précise pas de marque, choisis la moins chère. N'utilise une recherche web que si aucune marque de ce tableau ne correspond à la classe demandée, et n'invente jamais une marque non vendue à Madagascar.",
+        "Pour un fer à béton torsadé désigné seulement par son diamètre, interpreted_designation doit être la marque réellement vendue à Madagascar (par exemple Fer Turcky, Fer Indien) suivie du diamètre. Si le DAO ne précise pas de marque, choisis la moins chère.",
+        "Pour un béton désigné par un code de résistance ou d'ouvrage (par exemple Q350, «béton armé Q350»), interprète-le comme un dosage réel : interpreted_designation doit être «Béton à <dosage> kg/m3», jamais le code technique.",
+        "De façon générale, interpreted_designation doit rester un nom simple, sans doublon ni jargon technique, facilement recherchable sur Internet à Madagascar ; ne recopie jamais littéralement une désignation ou un code technique du DAO.",
         "Pour acier, béton, électricité, structure ou sécurité, requires_technical_validation doit être true si le choix exige les plans ou le BET.",
         "Si l'article est un ouvrage composé sans prix direct, recherche ses composants dans le même passage et calcule un prix composé justifié.",
         "Pour un béton Q350 ou dosé à 350 kg/m³, recherche notamment ciment, sable, gravillon, eau/adjuvant et préparation; détaille la composition dans equivalence_note.",
@@ -623,6 +774,11 @@ export async function POST(request: Request) {
   }
 
   const bestOffer = offers[0];
+  // Le nom stocké dans la bibliothèque doit être le nom réel/commercial trouvé
+  // à Madagascar (ex: "Ciment Orimbato", "Eau", "Béton à 350"), jamais le
+  // jargon ou le code technique du DAO ; le devis garde toujours son propre
+  // libellé DAO, indépendant de cette bibliothèque.
+  const libraryDesignation = parsed.interpreted_designation?.trim() || canonicalDesignation;
   const automaticallyCalculatedComposite = manualPriceInputs.length > 1
     && manualPriceInputs.every((item) => item.quantity_per_work_unit > 0 && positiveNumber(item.found_unit_price))
     ? manualPriceInputs.reduce(
@@ -631,6 +787,14 @@ export async function POST(request: Request) {
       )
     : null;
   const calculatedInternetPrice = automaticallyCalculatedComposite ?? Number(bestOffer.landed_price);
+  await cacheSharedPrice(calculatedInternetPrice, {
+    label: bestOffer.source_url,
+    url: bestOffer.source_url,
+    supplier: bestOffer.supplier_name,
+    city: bestOffer.supplier_city,
+    region: bestOffer.supplier_region,
+    confidence: bestOffer.confidence,
+  });
   const manualPrice = positiveNumber(existingPrice?.prix_entreprise);
   const currentPrice = manualPrice ?? positiveNumber(existingPrice?.prix_retenu) ?? positiveNumber(existingPrice?.prix_actuel);
   const isCheaper = Boolean(currentPrice && calculatedInternetPrice < currentPrice);
@@ -647,7 +811,7 @@ export async function POST(request: Request) {
       .from("price_library")
       .insert({
         organization_id: organizationId,
-        designation: canonicalDesignation,
+        designation: libraryDesignation,
         categorie,
         unite,
         prix_ia: calculatedInternetPrice,
@@ -723,6 +887,7 @@ export async function POST(request: Request) {
   const selectedHistoryId = historyRows.find((row) => row.decision !== "alternative")?.id ?? null;
   const updatePayload = requiresValidation
     ? {
+        designation: libraryDesignation,
         pending_lower_price: calculatedInternetPrice,
         pending_history_id: selectedHistoryId,
         requires_validation: true,
@@ -730,6 +895,7 @@ export async function POST(request: Request) {
       }
     : keptExistingPrice
       ? {
+          designation: libraryDesignation,
           prix_retenu: selectedPrice,
           requires_validation: false,
           pending_lower_price: null,
@@ -737,6 +903,7 @@ export async function POST(request: Request) {
           last_checked_at: new Date().toISOString(),
         }
       : {
+        designation: libraryDesignation,
         prix_ia: calculatedInternetPrice,
         prix_retenu: selectedPrice,
         prix_source: bestOffer.source_url,

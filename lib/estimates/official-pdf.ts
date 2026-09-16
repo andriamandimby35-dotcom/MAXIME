@@ -12,6 +12,14 @@ export type OfficialPdfInput = {
   estimateDate: string;
   rows: OfficialPdfRow[];
   grandTotal: number;
+  recapGroups?: Array<{ reference?: string; title: string; entries: Array<{ reference?: string; title: string; total: number }> }>;
+  bdqeLayout?: {
+    annotations?: string[];
+    detail_table?: { title?: string; columns?: string[]; total_label?: string; source_reference?: string };
+    recap_tables?: Array<{ reference?: string; title?: string; columns?: string[]; row_titles?: string[]; total_label?: string }>;
+  };
+  includeExternalRecap?: boolean;
+  internalFinancialSummary?: Array<{ title: string; total: number }>;
 };
 
 const PAGE_WIDTH = 841.89;
@@ -32,8 +40,18 @@ function cleanText(value: unknown) {
   return String(value ?? "").replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
 }
 
+function repairMojibake(value: string) {
+  let repaired = value;
+  for (let pass = 0; pass < 2 && /[ÃÂâ]/.test(repaired); pass += 1) {
+    const candidate = Buffer.from(repaired, "latin1").toString("utf8");
+    if (candidate === repaired || candidate.includes("\uFFFD")) break;
+    repaired = candidate;
+  }
+  return repaired;
+}
+
 function pdfText(value: string) {
-  return cleanText(value)
+  return repairMojibake(cleanText(value)).normalize("NFC")
     .replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)")
     .replace(/[–—]/g, "-").replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
     .replace(/œ/g, "oe").replace(/Œ/g, "OE")
@@ -90,7 +108,8 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
   const drawTableHeader = () => {
     const height = 22;
     page.fills.push({ x: LEFT, y: y - height + 5, width: TABLE_WIDTH, height, gray: 0.9 });
-    const labels = ["N°", "DÉSIGNATION", "UNITÉ", "QUANTITÉ", "PRIX UNITAIRE", "TOTAL"];
+    const extractedLabels = input.bdqeLayout?.detail_table?.columns ?? [];
+    const labels = extractedLabels.length === 6 ? extractedLabels : ["N°", "DÉSIGNATION", "UNITÉ", "QUANTITÉ", "PRIX UNITAIRE", "TOTAL"];
     let x = LEFT;
     labels.forEach((label, index) => { addText(label, x + 4, y - 9, 7.2, true); x += COLUMN_WIDTHS[index]; });
     y -= height;
@@ -106,10 +125,64 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
     addText(`Date : ${input.estimateDate}`, LEFT + 520, PAGE_HEIGHT - TOP - 44, 8);
     y = PAGE_HEIGHT - TOP - 58;
     page.lines.push({ x1: LEFT, y1: y, x2: PAGE_WIDTH - RIGHT, y2: y, width: 1 }); y -= 22;
+    const detailTitle = cleanText(input.bdqeLayout?.detail_table?.title);
+    if (detailTitle) { addText(detailTitle.toLocaleUpperCase("fr-FR"), LEFT, y, 9, true); y -= 15; }
     drawTableHeader();
   };
   const ensureSpace = (height: number) => { if (y - height < BOTTOM + 18) newPage(); };
   const horizontalLine = (baseline: number, width = 0.35) => page.lines.push({ x1: LEFT, y1: baseline, x2: PAGE_WIDTH - RIGHT, y2: baseline, width });
+  const drawCell = (x: number, top: number, width: number, height: number, value: string, bold = false, align: "left" | "center" | "right" = "left") => {
+    page.lines.push({ x1: x, y1: top, x2: x + width, y2: top, width: 0.55 });
+    page.lines.push({ x1: x, y1: top - height, x2: x + width, y2: top - height, width: 0.55 });
+    page.lines.push({ x1: x, y1: top, x2: x, y2: top - height, width: 0.55 });
+    page.lines.push({ x1: x + width, y1: top, x2: x + width, y2: top - height, width: 0.55 });
+    const size = 8.2;
+    const rendered = cleanText(value);
+    const estimatedWidth = rendered.length * size * 0.48;
+    const textX = align === "center" ? x + Math.max(4, (width - estimatedWidth) / 2) : align === "right" ? x + Math.max(4, width - estimatedWidth - 4) : x + 5;
+    addText(rendered, textX, top - Math.min(12, height - 5), size, bold);
+  };
+  const recapPage = (title: string, entries: Array<{ reference?: string; title: string; total: number }>, withSignature = false, showTotal = true, reference = "") => {
+    page = { draw: [], lines: [], fills: [] }; pages.push(page); y = PAGE_HEIGHT - TOP;
+    addText(input.companyName, LEFT, y, 14, true);
+    addText("BDQE - RÉCAPITULATION", PAGE_WIDTH - RIGHT - 190, y, 12, true);
+    y -= 38;
+    const template = (input.bdqeLayout?.recap_tables ?? []).find((item) => cleanText(item.reference) === cleanText(reference) || cleanText(item.title).toLocaleLowerCase("fr-FR") === cleanText(title).replace(/^récapitulation\s+/i, "").toLocaleLowerCase("fr-FR"));
+    const labels = template?.columns?.length === 3 ? template.columns : ["REF", "DÉSIGNATION", "MONTANT (Ar)"];
+    const refWidth = 58; const titleWidth = 490; const amountWidth = TABLE_WIDTH - refWidth - titleWidth;
+    const headingHeight = 24;
+    drawCell(LEFT, y, TABLE_WIDTH, headingHeight, title.toLocaleUpperCase("fr-FR"), true, "center");
+    y -= headingHeight;
+    drawCell(LEFT, y, refWidth, 20, labels[0] || "REF", true, "center");
+    drawCell(LEFT + refWidth, y, titleWidth, 20, labels[1] || "DÉSIGNATION", true, "center");
+    drawCell(LEFT + refWidth + titleWidth, y, amountWidth, 20, labels[2] || "MONTANT (Ar)", true, "center");
+    y -= 20;
+    for (const entry of entries) {
+      if (y < BOTTOM + 90) {
+        page = { draw: [], lines: [], fills: [] }; pages.push(page); y = PAGE_HEIGHT - TOP;
+        drawCell(LEFT, y, TABLE_WIDTH, headingHeight, title.toLocaleUpperCase("fr-FR"), true, "center"); y -= headingHeight;
+        drawCell(LEFT, y, refWidth, 20, labels[0] || "REF", true, "center"); drawCell(LEFT + refWidth, y, titleWidth, 20, labels[1] || "DÉSIGNATION", true, "center"); drawCell(LEFT + refWidth + titleWidth, y, amountWidth, 20, labels[2] || "MONTANT (Ar)", true, "center"); y -= 20;
+      }
+      drawCell(LEFT, y, refWidth, 22, entry.reference || "", false, "center");
+      drawCell(LEFT + refWidth, y, titleWidth, 22, entry.title);
+      drawCell(LEFT + refWidth + titleWidth, y, amountWidth, 22, money(entry.total), false, "right");
+      y -= 22;
+    }
+    if (showTotal) {
+      const total = entries.reduce((sum, entry) => sum + entry.total, 0);
+      drawCell(LEFT, y, refWidth + titleWidth, 24, (template?.total_label || `TOTAL ${title}`).toLocaleUpperCase("fr-FR"), true, "right");
+      drawCell(LEFT + refWidth + titleWidth, y, amountWidth, 24, money(total), true, "right");
+      y -= 38;
+    } else y -= 16;
+    if (withSignature) {
+      addText("Arrêté le présent bordereau détail quantitatif et estimatif à la somme de :", LEFT, y, 9); y -= 14;
+      addText("................................................................................................................................", LEFT, y, 9); y -= 16;
+      addText("Fait à, ........................................ le ........................................", LEFT, y, 9); y -= 28;
+      addText("Le Soumissionnaire", LEFT, y, 10, true); y -= 44;
+      const annotations = input.bdqeLayout?.annotations?.filter(Boolean) ?? [];
+      annotations.slice(0, 3).forEach((annotation) => { addText(annotation, LEFT, y, 8); y -= 11; });
+    }
+  };
 
   newPage();
   for (const row of input.rows) {
@@ -139,6 +212,21 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
   addText("TOTAL GÉNÉRAL DU DEVIS", LEFT + COLUMN_WIDTHS[0] + 5, y - 12, 10, true);
   addText(money(input.grandTotal), LEFT + TABLE_WIDTH - COLUMN_WIDTHS[5] + 4, y - 12, 10, true);
   horizontalLine(y - 23, 1);
+
+  // Les rubriques de récapitulation viennent du DAO et sont séparées du
+  // détail du bordereau. Elles figurent dans les deux devis ; la page globale
+  // avec signature ne figure que dans la version externe à soumettre.
+  for (const group of input.recapGroups ?? []) {
+    const extractedTitle = (input.bdqeLayout?.recap_tables ?? []).find((item) => cleanText(item.reference) === cleanText(group.reference))?.title;
+    recapPage(extractedTitle || `Récapitulation ${group.title}`, group.entries, false, true, group.reference || "");
+  }
+  if ((input.internalFinancialSummary?.length ?? 0) > 0) {
+    recapPage("Synthèse financière interne", input.internalFinancialSummary!.map((entry) => ({ title: entry.title, total: entry.total })), false, false);
+  }
+  if (input.includeExternalRecap && (input.recapGroups?.length ?? 0) > 0) {
+    const generalTitle = (input.bdqeLayout?.recap_tables ?? []).find((item) => /récapitulation générale|recapitulation generale/i.test(cleanText(item.title)))?.title || "Récapitulation générale";
+    recapPage(generalTitle, (input.recapGroups ?? []).map((group, index) => ({ reference: group.reference || String.fromCharCode(65 + index), title: group.title, total: group.entries.reduce((sum, entry) => sum + entry.total, 0) })), true);
+  }
 
   const objects: string[] = ["<< /Type /Catalog /Pages 2 0 R >>"];
   const pageObjectNumbers = pages.map((_, index) => 5 + index * 2);

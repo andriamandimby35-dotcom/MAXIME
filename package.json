@@ -19,11 +19,14 @@
     "@supabase/supabase-js": "2.110.8",
     "next": "16.2.12",
     "openai": "^7.4.0",
+    "pdf-lib": "^1.17.1",
     "pdf-parse": "^1.1.4",
     "pdfjs-dist": "^6.2.108",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "react-markdown": "^10.1.0"
+    "react-markdown": "^10.1.0",
+    "sharp": "^0.35.3",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "24.2.0",

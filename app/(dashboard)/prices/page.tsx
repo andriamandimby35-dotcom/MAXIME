@@ -1,7 +1,7 @@
 import { getContext } from "@/lib/organization";
 import PriceForm from "@/components/prices/PriceForm";
-import PriceCard from "@/components/prices/PriceCard";
-import Link from "next/link";
+import PriceSearch from "@/components/prices/PriceSearch";
+import { RealtimeRefresh } from "@/components/realtime-refresh";
 
 
 
@@ -26,7 +26,6 @@ export default async function PricesPage(){
     ascending:false
   }
 );
-  
 
 
 console.log(
@@ -38,87 +37,28 @@ console.log(
 
   return (
 
-<div className="p-6">
+<div>
 
+<RealtimeRefresh channelName="prices-library" tables={["price_library"]} filter={`organization_id=eq.${organizationId}`} />
 
-<h1 className="text-2xl font-bold">
-Bibliothèque des prix IA
-</h1>
-
-
-<p className="mt-2 text-gray-500">
-Gestion des prix entreprise, IA et historiques
-</p>
-
-
-<div className="mt-4 flex gap-3">
-
-<Link
-href="/prices/new"
-className="addPriceButton">
-+ Ajouter un prix
-</Link>
-
-
-<Link
-href="/prices/history"
-className="historyButton"
->
-📊 Historique des prix
-</Link>
-
+<div className="pageHead">
+<div>
+<h1>Bibliothèque des prix IA</h1>
+<p>Gestion des prix entreprise, IA et historiques</p>
+</div>
 </div>
 
-<div
-style={{
-display:"grid",
-gridTemplateColumns:"360px 1fr",
-gap:"40px",
-alignItems:"start",
-marginTop:"25px"
-}}
->
+<div style={{marginTop:"20px"}}>
 
-
-<div className="col-span-1">
+<div style={{maxWidth:"640px"}}>
 
 <PriceForm />
 
 </div>
 
+<div style={{marginTop:"30px"}}>
 
-
-<div
-style={{
-display:"flex",
-flexDirection:"column",
-gap:"20px"
-}}
->
-
-{prices && prices.length > 0 ? (
-
-prices.map((price)=>(
-
-
-<PriceCard
-key={price.id}
-price={price}
-/>
-
-
-))
-
-):(
-
-
-<p>
-Aucun prix enregistré
-</p>
-
-
-)}
-
+<PriceSearch prices={prices ?? []} />
 
 </div>
 

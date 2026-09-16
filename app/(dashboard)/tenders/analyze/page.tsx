@@ -1,19 +1,22 @@
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
+import { getContext } from "@/lib/organization";
 import { AnalyzerForm } from "./analyzer-form";
 
 export default async function AnalyzeTenderPage() {
-  const supabase = await createClient();
-  const { data: tenders } = await supabase
-    .from("tenders")
-    .select("id,reference,title")
-    .order("created_at", { ascending: false });
+  const { supabase, organizationId } = await getContext();
+  const { data: tenders } = organizationId
+    ? await supabase
+      .from("tenders")
+      .select("id,reference,title")
+      .eq("organization_id", organizationId)
+      .order("created_at", { ascending: false })
+    : { data: [] };
 
   return (
     <section>
       <div className="pageHead">
         <div>
-          <Link className="backLink" href="/tenders">← Retour aux appels d’offres</Link>
+          <Link className="tenderBackLink" href="/tenders">← Retour aux appels d’offres</Link>
           <h1>Analyse IA d’un DAO</h1>
           <p>Transformez un dossier volumineux en checklist opérationnelle.</p>
         </div>

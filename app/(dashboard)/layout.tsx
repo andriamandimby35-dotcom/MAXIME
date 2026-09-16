@@ -23,6 +23,13 @@ export default async function DashboardLayout({
     redirect("/login");
   }
 
+  const { data: member } = await supabase
+    .from("organization_members")
+    .select("role, active")
+    .eq("user_id", user.id)
+    .maybeSingle();
+  const isAdmin = Boolean(member?.active && ["owner", "admin"].includes(member.role));
+
 
 
   return (
@@ -57,50 +64,55 @@ export default async function DashboardLayout({
 
         <nav>
 
+          {isAdmin ? <>
 
           <Link href="/dashboard">
             Tableau de bord
           </Link>
 
-
-          <Link href="/tenders">
-            Appels d’offres
-          </Link>
-
-
-          <Link href="/estimates">
-            Devis
-          </Link>
-
+          <span className="sidebarGroupLabel">Chantiers</span>
 
           <Link href="/projects">
             Chantiers
           </Link>
 
-
-          <Link href="/billing">
-            Situations & paiements
+          <Link href="/expenses">
+            Dépenses
           </Link>
-
-
-          <Link href="/clients">
-            Clients
-          </Link>
-
 
           <Link href="/suppliers">
             Fournisseurs
           </Link>
 
+          <Link href="/prices">
+            Bibliothèque de prix
+          </Link>
+
+          <span className="sidebarGroupLabel">Appels d’offres</span>
+
+          <Link href="/tenders">
+            Appels d’offres
+          </Link>
+
+          <Link href="/submissions">
+            Dossiers de soumission
+          </Link>
+
+          <Link href="/estimates">
+            Devis
+          </Link>
+
+          <Link href="/billing">
+            Situations & paiements
+          </Link>
 
           <Link href="/prices">
             Bibliothèque de prix
           </Link>
 
-
-          <Link href="/documents">
-            Documents
-          </Link>
+          </> : <Link href="/projects">
+            Mes chantiers
+          </Link>}
 
 
         </nav>

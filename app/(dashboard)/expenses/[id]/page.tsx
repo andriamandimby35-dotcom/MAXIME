@@ -1,0 +1,59 @@
+import { notFound } from "next/navigation";
+import { getContext } from "@/lib/organization";
+import { ProjectExpensesManager } from "@/components/expenses/ProjectExpensesManager";
+
+type Params = { id: string };
+
+export default async function ProjectExpensesPage({ params }: { params: Promise<Params> }) {
+  const { id } = await params;
+  const { supabase, organizationId, user, memberRole } = await getContext();
+  if (!organizationId || !user) notFound();
+
+  const { data: project } = await supabase.from("projects").select("id, name, project_code, source_tender_id, organization_id").eq("id", id).eq("organization_id", organizationId).maybeSingle();
+  if (!project) notFound();
+
+  const isAdmin = memberRole === "admin" || memberRole === "owner";
+  let accessRole: "admin" | "works_manager" | "site_manager" | "viewer" = "viewer";
+  if (isAdmin) {
+    accessRole = "admin";
+  } else {
+    const { data: assignment } = await supabase.from("project_assignments").select("role").eq("project_id", id).eq("user_id", user.id).eq("active", true).maybeSingle();
+    if (!assignment) notFound();
+    accessRole = assignment.role as typeof accessRole;
+  }
+
+  const [
+    { data: staffMembers },
+    { data: attendance },
+    { data: materialOrders },
+    { data: salaryPayments },
+    estimateLinesResult,
+  ] = await Promise.all([
+    supabase.from("project_staff_members").select("*").eq("project_id", id).eq("active", true).order("full_name"),
+    supabase.from("project_daily_attendance").select("*").eq("project_id", id).order("report_date", { ascending: false }),
+    supabase.from("project_material_orders").select("*").eq("project_id", id).order("created_at", { ascending: false }),
+    supabase.from("project_salary_payments").select("*, project_salary_payment_lines(*)").eq("project_id", id).is("deleted_at", null).order("paid_at", { ascending: false }),
+    project.source_tender_id
+      ? (async () => {
+          const { data: estimate } = await supabase.from("estimates").select("id").eq("source_tender_id", project.source_tender_id).maybeSingle();
+          if (!estimate) return { data: [] };
+          return supabase.from("estimate_lines").select("id, data").eq("estimate_id", estimate.id);
+        })()
+      : Promise.resolve({ data: [] }),
+  ]);
+
+  const laborRates = ((estimateLinesResult as { data: Array<{ id: string; data: Record<string, unknown> }> | null }).data ?? [])
+    .filter((line) => line.data?.__internalOnly === true && line.data?.__recommendationKind === "labor")
+    .map((line) => ({ designation: String(line.data["Désignation"] ?? ""), unitPrice: line.data["Prix unitaire"] }));
+
+  return <ProjectExpensesManager
+    project={project}
+    accessRole={accessRole}
+    userId={user.id}
+    staffMembers={staffMembers ?? []}
+    attendance={attendance ?? []}
+    materialOrders={materialOrders ?? []}
+    salaryPayments={(salaryPayments as any) ?? []}
+    laborRates={laborRates}
+  />;
+}

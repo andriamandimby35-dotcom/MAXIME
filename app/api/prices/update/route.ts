@@ -16,7 +16,10 @@ const body = await req.json();
 const {
 id,
 designation,
-prix
+prix,
+unite_achat,
+quantite_par_unite_achat,
+prix_unite_achat
 }=body;
 
 
@@ -81,7 +84,7 @@ throw new Error(
 
 const {data:oldPrice,error:oldPriceError}=await supabase
 .from("price_library")
-.select("prix_actuel")
+.select("prix_actuel,prix_retenu,prix_ia")
 .eq("id",id)
 .eq("organization_id",organizationId)
 .single();
@@ -97,7 +100,7 @@ throw oldPriceError;
 
 // calcul variation
 
-const ancienPrix = Number(oldPrice.prix_actuel);
+const ancienPrix = Number(oldPrice.prix_retenu) || Number(oldPrice.prix_actuel) || Number(oldPrice.prix_ia) || 0;
 
 const nouveauPrix = Number(prix);
 
@@ -114,6 +117,10 @@ Number(((difference / ancienPrix) * 100).toFixed(2))
 
 
 const typeVariation =
+ancienPrix <= 0
+?
+"nouveau"
+:
 difference > 0
 ?
 "augmentation"
@@ -138,6 +145,14 @@ prix_actuel:nouveauPrix,
 
 prix_entreprise:nouveauPrix,
 
+prix_retenu:nouveauPrix,
+
+unite_achat: unite_achat || null,
+
+quantite_par_unite_achat: quantite_par_unite_achat ? Number(quantite_par_unite_achat) : null,
+
+prix_unite_achat: prix_unite_achat ? Number(prix_unite_achat) : null,
+
 updated_at:new Date()
 
 })
@@ -155,6 +170,10 @@ throw error;
 
 
 // sauvegarde historique
+// Un enregistrement sans changement réel de prix ne doit pas polluer
+// l'historique avec des lignes identiques répétées.
+
+if(nouveauPrix !== ancienPrix){
 
 const {error:historyError}=await supabase
 .from("price_history")
@@ -186,6 +205,8 @@ historyError
 );
 
 throw historyError;
+
+}
 
 }
 

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
+import { toLoginEmail } from "@/lib/auth-identifier";
 
 export default function LoginPage() {
 
@@ -25,7 +26,11 @@ export default function LoginPage() {
 
     const form = new FormData(e.currentTarget);
 
-    const email = String(form.get("email"));
+    const rawIdentifier = String(form.get("email"));
+    // Un conducteur ou chef de chantier peut se connecter avec un simple nom
+    // (attribué par l'administrateur) plutôt qu'une vraie adresse e-mail ;
+    // signup reste réservé à une vraie adresse pour le compte entreprise.
+    const email = signup ? rawIdentifier : toLoginEmail(rawIdentifier);
     const password = String(form.get("password"));
 
     const supabase = createClient();
@@ -162,13 +167,13 @@ console.log("SESSION AVANT LOGIN :", test);
 
           name="email"
 
-          type="email"
+          type={signup ? "email" : "text"}
 
-          placeholder="E-mail"
+          placeholder={signup ? "E-mail" : "Identifiant (nom ou e-mail)"}
 
           required
 
-          defaultValue="andriamandimby@icloud.com"
+          defaultValue={signup ? "andriamandimby@icloud.com" : undefined}
 
         />
 

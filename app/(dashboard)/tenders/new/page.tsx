@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 
 export default function NewTenderPage() {
@@ -320,14 +321,16 @@ export default function NewTenderPage() {
 
     <main className="p-8">
 
+      <Link href="/tenders" className="tenderBackLink">← Retour aux appels d’offres</Link>
+
 
       <h1 className="text-4xl font-bold mb-3">
-        Nouvel appel d'offre
+        Nouvel appel d&apos;offre
       </h1>
 
 
       <p className="mb-8 text-gray-600">
-        Création d'un nouveau dossier DAO
+        Création d&apos;un nouveau dossier DAO
       </p>
 
 

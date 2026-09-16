@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
-import { BillingManager } from "./billing-manager";
+import { BillingProjectList } from "./billing-project-list";
+import { RealtimeRefresh } from "@/components/realtime-refresh";
 
 export default async function BillingPage() {
   const supabase = await createClient();
@@ -17,7 +18,7 @@ export default async function BillingPage() {
     : { data: null };
 
   const organizationId = membership?.organization_id ?? null;
-  const [projectsResult, claimsResult, paymentsResult] = organizationId
+  const [projectsResult, paymentsResult] = organizationId
     ? await Promise.all([
         supabase
           .from("projects")
@@ -25,29 +26,28 @@ export default async function BillingPage() {
           .eq("organization_id", organizationId)
           .order("created_at", { ascending: false }),
         supabase
-          .from("progress_claims")
-          .select("id,project_id,claim_number,issue_date,status,gross_amount,retention_amount,tax_amount,net_amount,projects(name,project_code)")
-          .eq("organization_id", organizationId)
-          .order("issue_date", { ascending: false }),
-        supabase
           .from("payments")
-          .select("id,project_id,progress_claim_id,payment_date,amount,method,reference")
-          .eq("organization_id", organizationId)
-          .order("payment_date", { ascending: false }),
+          .select("project_id,amount")
+          .eq("organization_id", organizationId),
       ])
-    : [{ data: [] }, { data: [] }, { data: [] }];
+    : [{ data: [] }, { data: [] }];
 
-  return (
-    <BillingManager
-      organizationId={organizationId}
-      projects={projectsResult.data ?? []}
-      initialClaims={(claimsResult.data ?? []).map((claim) => ({
-  ...claim,
-  projects: Array.isArray(claim.projects)
-    ? claim.projects[0] ?? null
-    : claim.projects,
-}))}
-      initialPayments={paymentsResult.data ?? []}
-    />
-  );
+  const receivedByProject = new Map<string, number>();
+  for (const payment of paymentsResult.data ?? []) {
+    const key = String(payment.project_id);
+    receivedByProject.set(key, (receivedByProject.get(key) ?? 0) + Number(payment.amount || 0));
+  }
+
+  const projects = (projectsResult.data ?? []).map((project) => ({
+    ...project,
+    received: receivedByProject.get(project.id) ?? 0,
+  }));
+
+  return <>
+    {organizationId && <RealtimeRefresh channelName="billing-list" tables={[
+      { table: "projects", filter: `organization_id=eq.${organizationId}` },
+      { table: "payments", filter: `organization_id=eq.${organizationId}` },
+    ]} />}
+    <BillingProjectList projects={projects} />
+  </>;
 }

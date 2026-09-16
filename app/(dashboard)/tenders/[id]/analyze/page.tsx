@@ -15,7 +15,7 @@ export default function AnalyzeDAOPage() {
   const id = params.id as string;
 
 
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
 
 
@@ -24,6 +24,8 @@ export default function AnalyzeDAOPage() {
   const [analysis, setAnalysis] = useState<string>("");
 
   const [loading, setLoading] = useState(false);
+
+  const [analysisProgress, setAnalysisProgress] = useState(0);
 
   const [message, setMessage] = useState("");
 
@@ -175,7 +177,15 @@ export default function AnalyzeDAOPage() {
 
 
 
-  },[id]);
+  },[id, supabase]);
+
+  useEffect(() => {
+    if (!loading) return;
+    const timer = window.setInterval(() => {
+      setAnalysisProgress((current) => current >= 92 ? current : Math.min(92, current + Math.max(1, Math.ceil((92 - current) * 0.08))));
+    }, 950);
+    return () => window.clearInterval(timer);
+  }, [loading]);
 
 
 
@@ -186,6 +196,8 @@ export default function AnalyzeDAOPage() {
 
 
 async function analyzeDAO(){
+
+let analysisFinished = false;
 
 
 if(!tender?.document_url){
@@ -206,6 +218,8 @@ try{
 
 
 setLoading(true);
+
+setAnalysisProgress(5);
 
 
 setMessage(
@@ -299,8 +313,12 @@ null,
 
 
 setMessage(
-"Analyse terminée avec succès"
+"✅ Analyse terminée avec succès — 100 %"
 );
+
+analysisFinished = true;
+setAnalysisProgress(100);
+await new Promise((resolve) => window.setTimeout(resolve, 450));
 
 
 
@@ -326,6 +344,8 @@ finally{
 
 setLoading(false);
 
+if (!analysisFinished) setAnalysisProgress(0);
+
 
 }
 
@@ -342,11 +362,13 @@ setLoading(false);
 
 return (
 
-<main className="p-10">
+<main className="daoAnalysisPage p-10">
+
+<button className="tenderBackLink" onClick={() => router.push("/tenders")}>← Retour aux appels d’offres</button>
 
 
 
-<h1 className="text-3xl font-bold mb-8">
+<h1 className="daoAnalysisTitle text-3xl font-bold mb-8">
 
 🤖 Analyse IA du DAO
 
@@ -367,12 +389,7 @@ tender && (
 
 
 
-<section className="
-bg-white
-p-6
-rounded-xl
-shadow
-">
+<section className="daoAnalysisHero bg-white p-6 rounded-xl shadow">
 
 
 <h2 className="
@@ -387,6 +404,7 @@ mb-4
 
 
 
+<div className="daoAnalysisMetaGrid">
 
 <p>
 
@@ -453,6 +471,8 @@ Ar
 
 
 
+</div>
+
 <button
 
 onClick={analyzeDAO}
@@ -460,16 +480,7 @@ onClick={analyzeDAO}
 disabled={loading}
 
 
-className="
-mt-6
-bg-green-700
-text-white
-px-6
-py-3
-rounded-lg
-font-bold
-disabled:bg-gray-400
-"
+className="tenderButton tenderButtonPrimary mt-6 disabled:opacity-50"
 
 
 >
@@ -485,7 +496,7 @@ loading
 
 :
 
-"🤖 Analyser le DAO avec IA"
+parsedAnalysis ? "🤖 Ré-analyser le DAO avec IA" : "🤖 Analyser le DAO avec IA"
 
 }
 
@@ -518,12 +529,7 @@ font-semibold
 
 
 
-<section className="
-mt-8
-bg-gray-100
-p-6
-rounded-xl
-">
+<section className="daoAnalysisResult mt-8 bg-gray-100 p-6 rounded-xl">
 
 
 <h2 className="
@@ -539,16 +545,7 @@ mb-6
 {parsedAnalysis && tender && (
 <button
   onClick={() => router.push(`/estimates/new?tenderId=${tender.id}`)}
-  style={{
-    marginBottom: 20,
-    padding: "12px 20px",
-    border: "2px solid #1d4ed8",
-    borderRadius: 8,
-    background: "#1d4ed8",
-    color: "white",
-    fontWeight: 800,
-    cursor: "pointer",
-  }}
+  className="tenderButton tenderButtonPrimary mb-5"
 >
   📄 Générer le devis IA
 </button>
@@ -558,28 +555,15 @@ mb-6
 <aside
   role="status"
   aria-live="polite"
-  style={{
-    position: "fixed",
-    right: 20,
-    bottom: 20,
-    zIndex: 9999,
-    width: "min(420px, calc(100vw - 40px))",
-    padding: 18,
-    border: "2px solid #2563eb",
-    borderRadius: 12,
-    background: "#eff6ff",
-    color: "#172554",
-    boxShadow: "0 12px 30px rgba(0,0,0,0.25)",
-  }}
+  className="daoAnalysisProgress"
 >
   <strong>🤖 Analyse du PDF en cours</strong>
   <p style={{ marginTop: 8, fontSize: 14 }}>
     Lecture des pages, tableaux, catégories et suggestions internes. Ne fermez pas cette page.
   </p>
-  <progress
-    aria-label="Analyse du DAO en cours"
-    style={{ width: "100%", height: 18, marginTop: 14 }}
-  />
+  <div className="appProgress daoAnalysisProgressBar" role="progressbar" aria-label="Analyse du DAO en cours" aria-valuemin={0} aria-valuemax={100} aria-valuenow={analysisProgress} aria-valuetext={`${analysisProgress} %`}>
+    <span style={{ width: `${analysisProgress}%` }} />
+  </div>
 </aside>
 )}
 
@@ -599,11 +583,7 @@ parsedAnalysis ?
 
 
 
-<div className="
-bg-white
-p-5
-rounded-lg
-">
+<div className="daoAnalysisCard daoAnalysisSummary bg-white p-5 rounded-lg">
 
 <h3 className="
 text-xl
@@ -636,11 +616,7 @@ parsedAnalysis.resume
 
 
 
-<div className="
-bg-white
-p-5
-rounded-lg
-">
+<div className="daoAnalysisCard daoWorksCard bg-white p-5 rounded-lg">
 
 
 <h3 className="
@@ -664,36 +640,19 @@ displayedLots.map(
 lot.row_type === "section" ? (
   <div
     key={index}
-    style={{
-      marginTop: 20,
-      padding: "14px 12px",
-      border: "2px solid #111827",
-      background: "#d1d5db",
-      fontSize: 18,
-      fontWeight: 900,
-      textTransform: "uppercase",
-    }}
+      className="daoWorkSection"
   >
     {lot.designation}
   </div>
 ) : lot.row_type === "subtotal" || lot.row_type === "total" ? (
   <div
     key={index}
-    style={{
-      marginTop: lot.row_type === "total" ? 22 : 0,
-      padding: lot.row_type === "total" ? "16px 12px" : "12px",
-      border: lot.row_type === "total" ? "3px double #111827" : "1px solid #6b7280",
-      background: lot.row_type === "total" ? "#9ca3af" : "#f3f4f6",
-      fontSize: lot.row_type === "total" ? 19 : 16,
-      fontWeight: 900,
-      textTransform: "uppercase",
-      textAlign: "right",
-    }}
+      className={lot.row_type === "total" ? "daoWorkTotal" : "daoWorkSubtotal"}
   >
     {lot.designation}
   </div>
 ) : (
-  <div key={index} className="border-b py-3">
+  <div key={index} className="daoWorkItem border-b py-3">
     <p><strong>Désignation :</strong> {lot.designation}</p>
     <p><strong>Quantité :</strong> {lot.quantite ?? "À confirmer"} {lot.unite}</p>
   </div>
@@ -723,7 +682,7 @@ lot.row_type === "section" ? (
 
 {Array.isArray(parsedAnalysis.internal_cost_recommendations) &&
 parsedAnalysis.internal_cost_recommendations.length > 0 && (
-<div className="rounded-lg border-2 border-amber-400 bg-amber-50 p-5">
+<div className="daoAnalysisCard daoInternalSuggestions rounded-lg border-2 border-amber-400 bg-amber-50 p-5">
   <h3 className="text-xl font-bold">Suggestions internes hors DAO</h3>
   <p className="mt-2 text-sm">
     Ces éléments servent au calcul du coût réel du chantier et seront exclus du PDF de soumission.
@@ -744,11 +703,7 @@ parsedAnalysis.internal_cost_recommendations.length > 0 && (
 </div>
 )}
 
-<div className="
-bg-white
-p-5
-rounded-lg
-">
+<div className="daoAnalysisCard daoFinancialCard bg-white p-5 rounded-lg">
 
 
 <h3 className="
@@ -839,7 +794,7 @@ max-w-none
 
 <p>
 
-Le DAO n'a pas encore été analysé.
+Le DAO n&apos;a pas encore été analysé.
 
 </p>
 

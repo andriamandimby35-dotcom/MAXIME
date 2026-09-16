@@ -14,8 +14,13 @@ export async function getContext() {
       user: null,
       organization: null,
       organizationId: null,
+      memberRole: null,
     };
   }
+
+  // Les collaborateurs invités rejoignent leur chantier dès leur première
+  // connexion avec l'adresse e-mail invitée.
+  await supabase.rpc("accept_my_project_access_invitations");
 
   // Recherche de l'entreprise liée à l'utilisateur
   const {
@@ -25,6 +30,8 @@ export async function getContext() {
     .from("organization_members")
     .select(`
       organization_id,
+      role,
+      active,
       organizations (
         id,
         name,
@@ -45,6 +52,7 @@ export async function getContext() {
       user,
       organization: null,
       organizationId: null,
+      memberRole: null,
     };
   }
 
@@ -55,5 +63,6 @@ export async function getContext() {
   user,
   organization: member.organizations?.[0] ?? null,
   organizationId: member.organization_id,
+  memberRole: member.role ?? "admin",
 };
 }
