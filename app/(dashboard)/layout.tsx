@@ -32,11 +32,8 @@ export default async function DashboardLayout({
 
   // Le conducteur de travaux a, en plus de "Chantier", un accès en
   // lecture seule aux dépenses (et à la dépense matériaux) de ses chantiers.
-  // "Dépense" l'emmène toujours vers la liste (même si un seul chantier lui
-  // est affecté) : un lien direct vers un chantier précis pouvait tomber sur
-  // une page introuvable si l'affectation ne correspondait plus exactement
-  // (chantier clôturé, accès modifié…), ce qui donnait l'impression que le
-  // bouton ne faisait rien.
+  // S'il n'a qu'un seul chantier, "Dépense" l'y emmène directement ; sinon,
+  // il choisit d'abord lequel (comme "Chantier").
   const { data: worksManagerAssignments } = isAdmin
     ? { data: [] }
     : await supabase
@@ -46,7 +43,9 @@ export default async function DashboardLayout({
         .eq("role", "works_manager")
         .eq("active", true);
   const isWorksManager = !isAdmin && Boolean(worksManagerAssignments?.length);
-  const expensesHref = "/expenses";
+  const expensesHref = worksManagerAssignments && worksManagerAssignments.length === 1
+    ? `/expenses/${worksManagerAssignments[0].project_id}`
+    : "/expenses";
 
 
 
