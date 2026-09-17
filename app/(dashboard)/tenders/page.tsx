@@ -44,11 +44,11 @@ export default async function TendersPage() {
 
   return (
 
-    <main className="p-8">
+    <main className="tenderListPage p-8">
 
       {organizationId && <RealtimeRefresh channelName="tenders-list" tables={["tenders"]} filter={`organization_id=eq.${organizationId}`} />}
 
-      <div className="flex justify-between items-center mb-8">
+      <div className="tenderListHead flex justify-between items-center mb-8">
 
         <div>
           <h1 className="text-4xl font-bold">
@@ -72,11 +72,11 @@ export default async function TendersPage() {
 
 
 
-      <div className="overflow-hidden rounded-xl border">
+      <div className="tenderListCard overflow-hidden rounded-xl border">
 
         <table className="w-full">
 
-          <thead className="bg-gray-50">
+          <thead>
 
             <tr>
 
@@ -130,7 +130,7 @@ export default async function TendersPage() {
               <tr key={tender.id} className="tenderSelectRow">
 
 
-                <td className="p-4">
+                <td className="p-4" data-label="Référence">
 
 
                   <Link
@@ -145,19 +145,19 @@ export default async function TendersPage() {
 
                 </td>
 
-                <td className="p-4">
+                <td className="p-4" data-label="Marché">
                   {tender.title}
                 </td>
 
 
 
-                <td className="p-4">
+                <td className="p-4" data-label="Autorité">
                   {tender.description}
                 </td>
 
 
 
-                <td className="p-4">
+                <td className="p-4" data-label="Échéance">
 
                   {tender.deadline
                     ? new Date(
@@ -170,19 +170,19 @@ export default async function TendersPage() {
 
 
 
-                <td className="p-4">
+                <td className="p-4" data-label="Montant">
 
                   {Number(
                     tender.estimated_amount
                   ).toLocaleString("fr-FR")}
-                  
+
                   {" "}Ar
 
                 </td>
 
 
 
-                <td className="p-4">
+                <td className="p-4" data-label="Statut">
 
                   <span className="
                   text-gray-700
@@ -192,7 +192,7 @@ export default async function TendersPage() {
 
                 </td>
 
-                <td className="p-4 tenderRowActions">
+                <td className="p-4 tenderRowActions" data-label="Actions">
                   {tender.document_url ? (
                     <a
                       href={`/pdf-viewer?url=${encodeURIComponent(tender.document_url)}`}

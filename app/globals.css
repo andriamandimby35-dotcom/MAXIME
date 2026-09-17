@@ -54,27 +54,93 @@
   padding: 25px;
 }
 
-/* Téléphone en mode portrait (écran étroit) : la barre latérale fixe de
-   230px ne laissait presque plus de place au contenu principal (par
-   exemple 160px sur un écran de 390px), ce qui donnait l'impression que
-   seul le menu de gauche s'affichait. On empile le menu au-dessus du
-   contenu au lieu de les mettre côte à côte, sans rien changer à
-   l'affichage normal (ordinateur ou téléphone en paysage). */
+/* Bouton "☰ Menu", fond derrière le menu ouvert, et croix de fermeture :
+   invisibles sur ordinateur/tablette, activés uniquement sur téléphone
+   (media query ci-dessous). */
+.mobileNavToggle { display: none; }
+.mobileNavBackdrop { display: none; }
+.mobileNavClose { display: none; }
+
+/* Téléphone en mode portrait (écran étroit) : le menu de gauche est
+   maintenant caché par défaut, derrière un bouton "☰ Menu" fixé en haut de
+   l'écran. Un appui dessus ouvre le menu en plein écran, par-dessus la
+   page (comme une appli mobile) ; avant, le menu entier (avec la carte
+   entreprise) s'affichait au-dessus de chaque page et il fallait tout
+   faire défiler pour atteindre le contenu. Rien ne change sur ordinateur
+   ou téléphone en paysage. */
 @media (max-width: 760px) {
   .dashboardLayout {
     display: block;
   }
-  .dashboardLayout .sidebar {
-    position: static;
+
+  .mobileNavToggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 45;
     width: 100%;
-    height: auto;
-    border-right: none;
+    padding: 14px 16px;
+    border: 0;
     border-bottom: 1px solid #e5e7eb;
+    background: rgba(255,255,255,.92);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    color: #17251d;
+    font-weight: 800;
+    font-size: 1rem;
+    box-shadow: 0 2px 10px rgba(11,58,38,.06);
   }
+
+  .mobileNavBackdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    background: rgba(10,25,16,.48);
+  }
+
+  .dashboardLayout .sidebar {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    width: 85%;
+    max-width: 320px;
+    height: 100%;
+    border-right: 1px solid #e5e7eb;
+    border-bottom: none;
+    box-shadow: 0 20px 60px rgba(0,0,0,.25);
+    overflow-y: auto;
+  }
+  .dashboardLayout .sidebar.sidebarOpen {
+    display: flex;
+  }
+
+  .mobileNavClose {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    align-self: flex-end;
+    width: 34px;
+    height: 34px;
+    margin-bottom: 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: #fff;
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+
   .dashboardLayout .mainContent {
     margin-left: 0;
     width: 100%;
     padding: 16px;
+    padding-top: 72px;
   }
 
   /* Menu du conducteur (Chantier / Dépense) : sur téléphone en portrait
@@ -261,14 +327,42 @@
   width:120px;
 }
 
-.tenderSelectRow{border-top:1px solid var(--line);transition:background .18s ease,transform .18s ease,box-shadow .18s ease}.tenderSelectRow:hover{background:#f0f8f2;box-shadow:inset 4px 0 0 #245e41}.tenderSelectRow:active{transform:scale(.997);background:#e0f0e4}.tenderSelectLink{display:block;color:#153f2b;font-weight:800;text-decoration:none}.tenderAnalyzeLink,.tenderButton{display:inline-flex;align-items:center;justify-content:center;border:1px solid #b8c9bd;border-radius:10px;padding:9px 13px;background:#fff;color:#153f2b;font-weight:750;text-decoration:none;cursor:pointer;transition:transform .14s ease,box-shadow .14s ease,background .14s ease}.tenderAnalyzeLink:hover,.tenderButton:hover{background:#edf7ef;box-shadow:0 5px 12px rgba(22,70,44,.13);transform:translateY(-1px)}.tenderAnalyzeLink:active,.tenderButton:active{transform:translateY(1px);box-shadow:none}.tenderRowActions{display:flex;align-items:center;gap:9px}.tenderDetailPage{max-width:1050px;margin:0 auto;padding:42px 28px}.tenderDetailHead{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:26px}.tenderDetailHead h1{font-size:34px;margin:4px 0}.tenderDetailHead p{margin:0;color:var(--muted)}.tenderEyebrow{font-size:12px!important;letter-spacing:.1em;text-transform:uppercase;color:#245e41!important;font-weight:850}.tenderButtonPrimary{background:#153f2b;border-color:#153f2b;color:#fff;padding:12px 18px}.tenderButtonPrimary:hover{background:#245e41;color:#fff}.tenderAddButton{box-shadow:0 4px 0 #0b2c1d}.tenderAddButton:active{box-shadow:0 1px 0 #0b2c1d}.tenderInfoCard,.tenderDaoCard{background:#fff;border:1px solid var(--line);border-radius:16px;padding:22px;margin-top:16px}.tenderInfoCard h2,.tenderDaoCard h2{margin:0 0 14px;font-size:20px}.tenderInfoCard dl{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0}.tenderInfoCard dl div{background:#f5f8f5;border-radius:10px;padding:12px}.tenderInfoCard dt{font-size:11px;text-transform:uppercase;color:var(--muted);font-weight:800}.tenderInfoCard dd{margin:6px 0 0;font-weight:750}.tenderDescription{margin:16px 0 0;color:#425147}.tenderDaoCard{display:flex;align-items:center;justify-content:space-between;gap:20px}.tenderDaoCard p{margin:0;color:var(--muted)}@media(max-width:760px){.tenderDetailPage{padding:25px 15px}.tenderDetailHead,.tenderDaoCard{align-items:flex-start;flex-direction:column}.tenderInfoCard dl{grid-template-columns:1fr 1fr}.tenderRowActions{flex-direction:column;align-items:flex-start}}
+.tenderSelectRow{background:#fff;border-top:1px solid var(--line);transition:background .18s ease,transform .18s ease,box-shadow .18s ease}.tenderSelectRow:hover{background:#f0f8f2;box-shadow:inset 4px 0 0 #245e41}.tenderSelectRow:active{transform:scale(.997);background:#e0f0e4}.tenderSelectLink{display:block;color:#153f2b;font-weight:800;text-decoration:none}.tenderAnalyzeLink,.tenderButton{display:inline-flex;align-items:center;justify-content:center;border:1px solid #b8c9bd;border-radius:10px;padding:9px 13px;background:#fff;color:#153f2b;font-weight:750;text-decoration:none;cursor:pointer;transition:transform .14s ease,box-shadow .14s ease,background .14s ease}.tenderAnalyzeLink:hover,.tenderButton:hover{background:#edf7ef;box-shadow:0 5px 12px rgba(22,70,44,.13);transform:translateY(-1px)}.tenderAnalyzeLink:active,.tenderButton:active{transform:translateY(1px);box-shadow:none}.tenderRowActions{display:flex;align-items:center;gap:9px}.tenderDetailPage{max-width:1050px;margin:0 auto;padding:42px 28px}.tenderDetailHead{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:26px}.tenderDetailHead h1{font-size:34px;margin:4px 0}.tenderDetailHead p{margin:0;color:var(--muted)}.tenderEyebrow{font-size:12px!important;letter-spacing:.1em;text-transform:uppercase;color:#245e41!important;font-weight:850}.tenderButtonPrimary{background:#153f2b;border-color:#153f2b;color:#fff;padding:12px 18px}.tenderButtonPrimary:hover{background:#245e41;color:#fff}.tenderAddButton{box-shadow:0 4px 0 #0b2c1d}.tenderAddButton:active{box-shadow:0 1px 0 #0b2c1d}.tenderInfoCard,.tenderDaoCard{background:#fff;border:1px solid var(--line);border-radius:16px;padding:22px;margin-top:16px}.tenderInfoCard h2,.tenderDaoCard h2{margin:0 0 14px;font-size:20px}.tenderInfoCard dl{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0}.tenderInfoCard dl div{background:#f5f8f5;border-radius:10px;padding:12px}.tenderInfoCard dt{font-size:11px;text-transform:uppercase;color:var(--muted);font-weight:800}.tenderInfoCard dd{margin:6px 0 0;font-weight:750}.tenderDescription{margin:16px 0 0;color:#425147}.tenderDaoCard{display:flex;align-items:center;justify-content:space-between;gap:20px}.tenderDaoCard p{margin:0;color:var(--muted)}@media(max-width:760px){.tenderDetailPage{padding:25px 15px}.tenderDetailHead,.tenderDaoCard{align-items:flex-start;flex-direction:column}.tenderInfoCard dl{grid-template-columns:1fr 1fr}.tenderRowActions{flex-direction:column;align-items:flex-start}}
 
 button,.button,.historyButton,.addPriceButton,.ghost,.ghostButton{transition:transform .14s ease,box-shadow .14s ease,filter .14s ease}button:not(:disabled):hover,.button:hover,.historyButton:hover,.addPriceButton:hover,.ghost:hover,.ghostButton:hover{transform:translateY(-1px);box-shadow:0 5px 12px rgba(22,70,44,.16);filter:brightness(1.03)}button:not(:disabled):active,.button:active,.historyButton:active,.addPriceButton:active,.ghost:active,.ghostButton:active{transform:translateY(1px);box-shadow:none}
 .tenderBackLink{display:inline-flex;align-items:center;margin-bottom:18px;border:1px solid #b8c9bd;border-radius:10px;padding:8px 12px;background:#fff;color:#153f2b;font-size:14px;font-weight:750;text-decoration:none;cursor:pointer}.tenderBackLink:hover{background:#edf7ef;box-shadow:0 4px 10px rgba(22,70,44,.12)}
 .acknowledgeButton{background:#b91c1c!important;border-color:#991b1b!important;color:#fff!important}.acknowledgedButton{background:#15803d!important;border-color:#166534!important;color:#fff!important}
 
 /* Appels d'offres et dossiers de soumission */
-.tenderSelectRow{border-top:1px solid var(--line);transition:background .18s ease,transform .18s ease,box-shadow .18s ease}.tenderSelectRow:hover{background:#f0f8f2;box-shadow:inset 4px 0 0 #245e41}.tenderSelectRow:active{transform:scale(.997);background:#e0f0e4}.tenderSelectLink{display:block;color:#153f2b;font-weight:800;text-decoration:none}.tenderAnalyzeLink,.tenderButton{display:inline-flex;align-items:center;justify-content:center;border:1px solid #b8c9bd;border-radius:10px;padding:9px 13px;background:#fff;color:#153f2b;font-weight:750;text-decoration:none;cursor:pointer;transition:transform .14s ease,box-shadow .14s ease,background .14s ease}.tenderAnalyzeLink:hover,.tenderButton:hover{background:#edf7ef;box-shadow:0 5px 12px rgba(22,70,44,.13);transform:translateY(-1px)}.tenderAnalyzeLink:active,.tenderButton:active{transform:translateY(1px);box-shadow:none}.tenderRowActions{display:flex;align-items:center;gap:9px}.tenderDetailPage{max-width:1050px;margin:0 auto;padding:42px 28px}.tenderDetailHead{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:26px}.tenderDetailHead h1{font-size:34px;margin:4px 0}.tenderDetailHead p{margin:0;color:var(--muted)}.tenderEyebrow{font-size:12px!important;letter-spacing:.1em;text-transform:uppercase;color:#245e41!important;font-weight:850}.tenderButtonPrimary{background:#153f2b;border-color:#153f2b;color:#fff;padding:12px 18px}.tenderButtonPrimary:hover{background:#245e41;color:#fff}.tenderInfoCard,.tenderDaoCard{background:#fff;border:1px solid var(--line);border-radius:16px;padding:22px;margin-top:16px}.tenderInfoCard h2,.tenderDaoCard h2{margin:0 0 14px;font-size:20px}.tenderInfoCard dl{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0}.tenderInfoCard dl div{background:#f5f8f5;border-radius:10px;padding:12px}.tenderInfoCard dt{font-size:11px;text-transform:uppercase;color:var(--muted);font-weight:800}.tenderInfoCard dd{margin:6px 0 0;font-weight:750}.tenderDescription{margin:16px 0 0;color:#425147}.tenderDaoCard{display:flex;align-items:center;justify-content:space-between;gap:20px}.tenderDaoCard p{margin:0;color:var(--muted)}@media(max-width:760px){.tenderDetailPage{padding:25px 15px}.tenderDetailHead,.tenderDaoCard{align-items:flex-start;flex-direction:column}.tenderInfoCard dl{grid-template-columns:1fr 1fr}.tenderRowActions{flex-direction:column;align-items:flex-start}}
+.tenderSelectRow{background:#fff;border-top:1px solid var(--line);transition:background .18s ease,transform .18s ease,box-shadow .18s ease}.tenderSelectRow:hover{background:#f0f8f2;box-shadow:inset 4px 0 0 #245e41}.tenderSelectRow:active{transform:scale(.997);background:#e0f0e4}.tenderSelectLink{display:block;color:#153f2b;font-weight:800;text-decoration:none}.tenderAnalyzeLink,.tenderButton{display:inline-flex;align-items:center;justify-content:center;border:1px solid #b8c9bd;border-radius:10px;padding:9px 13px;background:#fff;color:#153f2b;font-weight:750;text-decoration:none;cursor:pointer;transition:transform .14s ease,box-shadow .14s ease,background .14s ease}.tenderAnalyzeLink:hover,.tenderButton:hover{background:#edf7ef;box-shadow:0 5px 12px rgba(22,70,44,.13);transform:translateY(-1px)}.tenderAnalyzeLink:active,.tenderButton:active{transform:translateY(1px);box-shadow:none}.tenderRowActions{display:flex;align-items:center;gap:9px}.tenderDetailPage{max-width:1050px;margin:0 auto;padding:42px 28px}.tenderDetailHead{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:26px}.tenderDetailHead h1{font-size:34px;margin:4px 0}.tenderDetailHead p{margin:0;color:var(--muted)}.tenderEyebrow{font-size:12px!important;letter-spacing:.1em;text-transform:uppercase;color:#245e41!important;font-weight:850}.tenderButtonPrimary{background:#153f2b;border-color:#153f2b;color:#fff;padding:12px 18px}.tenderButtonPrimary:hover{background:#245e41;color:#fff}.tenderInfoCard,.tenderDaoCard{background:#fff;border:1px solid var(--line);border-radius:16px;padding:22px;margin-top:16px}.tenderInfoCard h2,.tenderDaoCard h2{margin:0 0 14px;font-size:20px}.tenderInfoCard dl{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0}.tenderInfoCard dl div{background:#f5f8f5;border-radius:10px;padding:12px}.tenderInfoCard dt{font-size:11px;text-transform:uppercase;color:var(--muted);font-weight:800}.tenderInfoCard dd{margin:6px 0 0;font-weight:750}.tenderDescription{margin:16px 0 0;color:#425147}.tenderDaoCard{display:flex;align-items:center;justify-content:space-between;gap:20px}.tenderDaoCard p{margin:0;color:var(--muted)}@media(max-width:760px){.tenderDetailPage{padding:25px 15px}.tenderDetailHead,.tenderDaoCard{align-items:flex-start;flex-direction:column}.tenderInfoCard dl{grid-template-columns:1fr 1fr}.tenderRowActions{flex-direction:column;align-items:flex-start}}
+/* Liste des appels d'offres : cette page utilisait des classes de type
+   Tailwind (non installé dans ce projet, donc sans aucun effet), ce qui
+   laissait le tableau flotter directement sur la photo de fond, sans
+   carte blanche derrière — d'où l'effet "transparent", surtout gênant sur
+   téléphone. On lui donne une vraie carte, comme pour "Dossiers de
+   soumission" juste en dessous. */
+.tenderListCard{background:#fff;border:1px solid var(--line);border-radius:16px;overflow-x:auto;box-shadow:0 10px 24px rgba(11,58,38,.06)}
+.tenderListCard thead{background:linear-gradient(90deg,#f0f8f3,#f8fbf9);color:#496256}
+.tenderListCard th{font-size:.73rem;letter-spacing:.06em;text-transform:uppercase}
+@media(max-width:760px){
+  .tenderListPage{padding:20px 15px 36px!important}
+  .tenderListHead{align-items:flex-start!important;flex-direction:column;gap:14px}
+  /* Le tableau forçait une largeur de 760px minimum, donc il fallait faire
+     défiler horizontalement pour tout voir sur téléphone. On le transforme
+     ici en liste de cartes empilées (une par appel d'offres), avec le nom
+     du champ affiché au-dessus de chaque valeur, et toute la carte devient
+     cliquable pour l'ouvrir (comme les cartes chantier). */
+  .tenderListCard{overflow-x:visible}
+  .tenderListCard table,.tenderListCard tbody,.tenderListCard tr,.tenderListCard td{display:block;width:100%;min-width:0}
+  .tenderListCard thead{display:none}
+  .tenderListCard tbody tr.tenderSelectRow{position:relative;border-top:0;border-bottom:1px solid var(--line);padding:14px 16px}
+  .tenderListCard tbody tr.tenderSelectRow:last-child{border-bottom:0}
+  .tenderListCard td{padding:4px 0;border:0}
+  .tenderListCard td[data-label]::before{content:attr(data-label);display:block;color:var(--muted);font-size:.68rem;font-weight:800;text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px}
+  .tenderListCard .tenderSelectLink::after{content:"";position:absolute;inset:0}
+  .tenderListCard td.tenderRowActions{position:relative;z-index:1;display:flex;flex-wrap:wrap;gap:9px;margin-top:6px}
+}
+
 .submissionPage > p { max-width: 48rem; }
 .submissionTable { border-color: #d8e5dd; box-shadow: 0 12px 35px rgba(11, 58, 38, .08); }
 .submissionTable thead { background: linear-gradient(90deg, #f0f8f3, #f8fbf9); color: #496256; }
@@ -281,6 +375,21 @@ button,.button,.historyButton,.addPriceButton,.ghost,.ghostButton{transition:tra
 .submissionStatus.isValid { color: #086434; background: #d8f6e5; }
 .submissionStatus.isInvalid { color: #a51c28; background: #ffe2e5; }
 .submissionPdfDisabled { background: #4b5563 !important; color: white !important; cursor: not-allowed !important; opacity: .62; }
+@media(max-width:760px){
+  /* Même transformation "tableau -> cartes empilées, cliquables" que pour
+     Appels d'offres : le tableau forçait un défilement horizontal sur
+     téléphone, et seul le petit lien "Ouvrir" était cliquable. */
+  .submissionPage{padding:20px 15px 36px!important}
+  .submissionTable{overflow-x:visible}
+  .submissionTable table,.submissionTable tbody,.submissionTable tr,.submissionTable td{display:block;width:100%;min-width:0}
+  .submissionTable thead{display:none}
+  .submissionTable tbody tr.submissionRow{position:relative;border-top:0;border-bottom:1px solid var(--line);padding:14px 16px}
+  .submissionTable tbody tr.submissionRow:last-child{border-bottom:0}
+  .submissionTable td{padding:4px 0;border:0}
+  .submissionTable td[data-label]::before{content:attr(data-label);display:block;color:var(--muted);font-size:.68rem;font-weight:800;text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px}
+  .submissionOpenLink::after{content:"";position:absolute;inset:0}
+  .submissionTable td.submissionPdfCell{position:relative;z-index:1;margin-top:6px}
+}
 .submissionPdfReady { background: #e2f8eb !important; border-color: #18804c !important; color: #075b31 !important; }
 .submissionPdfReady:hover { background: #c7f0d8 !important; }
 .executionDetails { background: #f1faf4; border: 1px solid #b6d8c0; border-radius: 12px; padding: 14px; }
@@ -386,6 +495,19 @@ table tbody tr:hover { background: #f4fbf6; }
 .tablePanel { border-color: #d8e5dd; box-shadow: 0 10px 28px rgba(11, 58, 38, .06); }
 .tablePanel thead { background: linear-gradient(90deg, #f0f8f3, #f8fbf9); }
 .tablePanel th { color: #496256; font-size: .73rem; }
+@media(max-width:760px){
+  /* Même principe que pour Appels d'offres et Dossiers de soumission :
+     tous les tableaux génériques (Devis, Clients, Documents, historique
+     des prix partagés) forçaient un défilement horizontal sur téléphone.
+     On les transforme en cartes empilées, un champ par ligne avec son nom
+     au-dessus de la valeur. */
+  .tablePanel table,.tablePanel tbody,.tablePanel tr,.tablePanel td{display:block;width:100%;min-width:0}
+  .tablePanel thead{display:none}
+  .tablePanel tbody tr{border-top:0;border-bottom:1px solid var(--line);padding:14px 16px}
+  .tablePanel tbody tr:last-child{border-bottom:0}
+  .tablePanel td{padding:4px 0;border:0}
+  .tablePanel td[data-label]::before{content:attr(data-label);display:block;color:var(--muted);font-size:.68rem;font-weight:800;text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px}
+}
 .notice { border: 1px solid #c5e0ce; color: #195837; }
 .notice.danger { border-color: #f2bec4; color: #a51c28; }
 

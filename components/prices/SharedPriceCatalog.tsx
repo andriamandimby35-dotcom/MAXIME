@@ -90,13 +90,13 @@ export function SharedPriceCatalog({ prices }: { prices: SharedPrice[] }) {
                   const percentage = previous && previous > 0 ? ((Number(entry.prix_unitaire) - previous) / previous) * 100 : null;
                   return (
                     <tr key={entry.id}>
-                      <td>{new Date(entry.observed_at).toLocaleDateString("fr-FR")}</td>
-                      <td>{formatAr(Number(entry.prix_unitaire))}</td>
-                      <td className={percentage === null ? "" : percentage > 0 ? "variationUp" : percentage < 0 ? "variationDown" : ""}>
+                      <td data-label="Date">{new Date(entry.observed_at).toLocaleDateString("fr-FR")}</td>
+                      <td data-label="Prix">{formatAr(Number(entry.prix_unitaire))}</td>
+                      <td data-label="Évolution" className={percentage === null ? "" : percentage > 0 ? "variationUp" : percentage < 0 ? "variationDown" : ""}>
                         {percentage === null ? "Premier prix" : `${percentage > 0 ? "+" : ""}${percentage.toFixed(2)} %`}
                       </td>
-                      <td>{entry.provenance_label}{entry.supplier_name ? ` — ${entry.supplier_name}` : ""}</td>
-                      <td>{entry.contributor_organization_name || "—"}</td>
+                      <td data-label="Provenance">{entry.provenance_label}{entry.supplier_name ? ` — ${entry.supplier_name}` : ""}</td>
+                      <td data-label="Entreprise">{entry.contributor_organization_name || "—"}</td>
                     </tr>
                   );
                 })}
