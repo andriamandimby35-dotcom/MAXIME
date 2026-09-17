@@ -19,8 +19,6 @@ export default function LoginPage() {
 
     e.preventDefault();
 
-    console.log("BOUTON LOGIN CLIQUE");
-
     setLoading(true);
     setError("");
 
@@ -34,12 +32,6 @@ export default function LoginPage() {
     const password = String(form.get("password"));
 
     const supabase = createClient();
-    console.log("SUPABASE CLIENT OK");
-
-const test = await supabase.auth.getSession();
-
-console.log("SESSION AVANT LOGIN :", test);
-
 
     let result;
 
@@ -80,15 +72,7 @@ console.log("SESSION AVANT LOGIN :", test);
 
 
 
-    console.log("RESULTAT SUPABASE :", result);
-
-
-
     if (result.error) {
-
-      console.log("ERREUR SUPABASE :", result.error);
-
-      alert(result.error.message);
 
       setError(result.error.message);
 
@@ -98,9 +82,6 @@ console.log("SESSION AVANT LOGIN :", test);
 
     }
 
-
-
-    console.log("CONNEXION OK");
 
 
     router.push("/dashboard");
@@ -175,6 +156,14 @@ console.log("SESSION AVANT LOGIN :", test);
 
           defaultValue={signup ? "andriamandimby@icloud.com" : undefined}
 
+          autoCapitalize="none"
+
+          autoCorrect="off"
+
+          spellCheck={false}
+
+          autoComplete="username"
+
         />
 
 
@@ -188,6 +177,14 @@ console.log("SESSION AVANT LOGIN :", test);
           placeholder="Mot de passe"
 
           required
+
+          autoCapitalize="none"
+
+          autoCorrect="off"
+
+          spellCheck={false}
+
+          autoComplete="current-password"
 
         />
 

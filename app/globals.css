@@ -1,4 +1,4 @@
-:root{--bg:#f4f6f3;--card:#fff;--ink:#17251d;--muted:#6b776f;--line:#e2e8e3;--green:#153f2b;--green2:#245e41;--gold:#e7b449;--danger:#a33b3e}*{box-sizing:border-box}html,body{margin:0;min-height:100%;overflow-x:hidden;font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;background:linear-gradient(rgba(244,246,243,.5),rgba(244,246,243,.5)),url('/images/chantier-bg.jpg') center/cover fixed no-repeat,var(--bg);color:var(--ink)}
+:root{--bg:#f4f6f3;--card:#fff;--ink:#17251d;--muted:#6b776f;--line:#e2e8e3;--green:#153f2b;--green2:#245e41;--gold:#e7b449;--danger:#a33b3e}*{box-sizing:border-box}html,body{margin:0;min-height:100%;overflow-x:hidden;font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;background:linear-gradient(rgba(244,246,243,.16),rgba(244,246,243,.16)),url('/images/chantier-bg.jpg') center/cover fixed no-repeat,var(--bg);color:var(--ink)}
 /* Décor discret : la photo de chantier reste visible en très léger filigrane
    derrière les pages ; le voile clair au-dessus garde tout le texte et les
    cartes blanches parfaitement lisibles, sans rien changer d'autre. */
@@ -720,3 +720,20 @@ table tbody tr:hover { background: #f4fbf6; }
 .globalStatusBar--error button{white-space:nowrap}
 .globalStatusSpinner{display:inline-block;width:20px;height:20px;flex:0 0 auto;border:3px solid currentColor;border-right-color:transparent;border-radius:50%;animation:globalStatusSpin .7s linear infinite}
 @keyframes globalStatusSpin{to{transform:rotate(360deg)}}
+
+/* Fond d'écran de chantier visible partout : le menu de gauche et les
+   cartes deviennent semi-transparents (avec un léger flou pour garder le
+   texte lisible) au lieu d'être blancs opaques. */
+.sidebar{background:rgba(255,255,255,.4)!important;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.panel,.stats article,.modal,.authCard,.expensesPanel,.expenseStats article,
+.projectWorkflowTable article,.tenderInfoCard,.tenderDaoCard,
+.estimateControlPanel,.estimateVersionsPanel,.estimateWorksitePanel,.estimateLineEntryPanel,.estimateDetailPanel,
+.estimatePdfCard,.priceTile,.sharedPriceCard,.sharedPriceDetail,.billingProjectCard,.supplierTile,
+.daoAnalysisCard,.projectProgress,.projectSiteCard,.projectAttendanceItem,.projectExpenseItem,
+.projectExpenseSummary,.projectRequestActions,.priceCard,
+.estimateFinancialSummary>div,.estimateFinancialSummary .estimateMargin,.estimatePricingPanel .estimateMargin{
+  background:rgba(255,255,255,.68)!important;
+  backdrop-filter:blur(6px);
+  -webkit-backdrop-filter:blur(6px);
+}
+@media(max-width:760px){.sidebar{backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px)}}
