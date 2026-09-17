@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Image from "next/image";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
@@ -13,6 +13,16 @@ export default function LoginPage() {
   const [signup, setSignup] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // Message affiché quand /projects/layout a déconnecté un compte
+  // conducteur/chef qui n'est plus attaché à aucun chantier (chantier
+  // supprimé) : voir app/(dashboard)/layout.tsx.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (new URLSearchParams(window.location.search).get("acces") === "chantier_supprime") {
+      setError("Votre accès a été retiré : le chantier auquel vous étiez attaché a été supprimé. Contactez l'administrateur si vous pensez qu'il s'agit d'une erreur.");
+    }
+  }, []);
 
 
 
