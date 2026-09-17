@@ -1,12 +1,21 @@
 import { notFound } from "next/navigation";
 import { ProjectSiteManager } from "@/components/projects/ProjectSiteManager";
+import { ProjectExpensesManager } from "@/components/expenses/ProjectExpensesManager";
+import { ProjectWorkspaceTabs } from "@/components/projects/ProjectWorkspaceTabs";
 import { getContext } from "@/lib/organization";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 type Params = { id: string };
 
-export default async function ProjectPage({ params }: { params: Promise<Params> }) {
+export default async function ProjectPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<Params>;
+  searchParams: Promise<{ tab?: string }>;
+}) {
   const { id } = await params;
+  const { tab } = await searchParams;
   const { supabase, organizationId, user, memberRole } = await getContext();
   if (!organizationId || !user) notFound();
 
@@ -74,7 +83,7 @@ export default async function ProjectPage({ params }: { params: Promise<Params> 
   const ownAssignment = enrichedAssignments.find((assignment: any) => assignment.user_id === user.id && assignment.active);
   const accessRole = (isAdmin ? "admin" : (ownAssignment?.role ?? "viewer")) as "admin" | "works_manager" | "site_manager" | "viewer";
 
-  return <ProjectSiteManager
+  const siteContent = <ProjectSiteManager
     organizationId={organizationId}
     userId={user.id}
     accessRole={accessRole}
@@ -94,5 +103,59 @@ export default async function ProjectPage({ params }: { params: Promise<Params> 
     materialOrders={materialOrders ?? []}
     staffMembers={staffMembers ?? []}
     attendance={attendance ?? []}
+  />;
+
+  // Le conducteur de travaux voit, en plus de "Chantier", tout le menu
+  // Dépense (comme l'administrateur, sans les suppressions puisque
+  // accessRole reste "works_manager") directement sur cette même page, sous
+  // forme d'onglet : plus besoin de dépendre d'un second lien / d'une
+  // seconde page pour l'atteindre.
+  if (accessRole !== "works_manager") {
+    return siteContent;
+  }
+
+  const [
+    { data: salaryPayments },
+    { data: laborRateOverrides },
+    estimateLinesResult,
+  ] = await Promise.all([
+    supabase.from("project_salary_payments").select("*, project_salary_payment_lines(*)").eq("project_id", id).is("deleted_at", null).order("paid_at", { ascending: false }),
+    supabase.from("project_labor_rates").select("*").eq("project_id", id),
+    project.source_tender_id
+      ? (async () => {
+          const { data: estimate } = await supabase.from("estimates").select("id").eq("source_tender_id", project.source_tender_id).maybeSingle();
+          if (!estimate) return { data: [] };
+          return supabase.from("estimate_lines").select("id, data").eq("estimate_id", estimate.id);
+        })()
+      : Promise.resolve({ data: [] }),
+  ]);
+
+  const laborRates = ((estimateLinesResult as { data: Array<{ id: string; data: Record<string, unknown> }> | null }).data ?? [])
+    .filter((line) => line.data?.__internalOnly === true && line.data?.__recommendationKind === "labor")
+    .map((line) => ({ designation: String(line.data["Désignation"] ?? ""), unitPrice: line.data["Prix unitaire"] }));
+
+  // Conducteur(s) et chef(s) actifs : la paie du chantier doit les inclure,
+  // au même titre que les ouvriers déclarés (comme la Présence du jour).
+  const expensesAssignments = enrichedAssignments.filter(
+    (assignment: any) => assignment.active && (assignment.role === "works_manager" || assignment.role === "site_manager"),
+  );
+
+  const expensesContent = <ProjectExpensesManager
+    project={project}
+    accessRole={accessRole}
+    userId={user.id}
+    staffMembers={(staffMembers ?? []).filter((member: any) => member.active !== false)}
+    attendance={attendance ?? []}
+    materialOrders={materialOrders ?? []}
+    salaryPayments={(salaryPayments as any) ?? []}
+    laborRates={laborRates}
+    laborRateOverrides={laborRateOverrides ?? []}
+    assignments={expensesAssignments}
+  />;
+
+  return <ProjectWorkspaceTabs
+    initialTab={tab === "expenses" ? "expenses" : "site"}
+    siteContent={siteContent}
+    expensesContent={expensesContent}
   />;
 }

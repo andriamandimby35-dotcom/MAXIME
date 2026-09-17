@@ -43,8 +43,12 @@ export default async function DashboardLayout({
         .eq("role", "works_manager")
         .eq("active", true);
   const isWorksManager = !isAdmin && Boolean(worksManagerAssignments?.length);
+  // Le menu Dépense complet (comme l'administrateur, sans les suppressions)
+  // est maintenant affiché en onglet directement sur la page "Chantier" de
+  // ce chantier (voir app/(dashboard)/projects/[id]/page.tsx) : ce lien y
+  // renvoie avec ?tab=expenses pour l'ouvrir directement sur cet onglet.
   const expensesHref = worksManagerAssignments && worksManagerAssignments.length === 1
-    ? `/expenses/${worksManagerAssignments[0].project_id}`
+    ? `/projects/${worksManagerAssignments[0].project_id}?tab=expenses`
     : "/expenses";
 
 
