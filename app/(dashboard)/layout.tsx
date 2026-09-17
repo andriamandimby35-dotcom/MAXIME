@@ -134,9 +134,13 @@ export default async function DashboardLayout({
             Chantier
           </Link>
 
-          <Link href={expensesHref}>
+          {/* Lien HTML natif (pas <Link>) : signalé comme ne réagissant plus
+              au clic une fois sur "Chantier" — un vrai lien force toujours
+              un rechargement complet de la page, donc il ne peut pas rester
+              bloqué comme la navigation interne de Next.js. */}
+          <a href={expensesHref}>
             Dépense
-          </Link>
+          </a>
 
           </> : <Link href="/projects">
             Mes chantiers
