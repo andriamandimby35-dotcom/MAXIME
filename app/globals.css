@@ -76,6 +76,27 @@
     width: 100%;
     padding: 16px;
   }
+
+  /* Menu du conducteur (Chantier / Dépense) : sur téléphone en portrait
+     seulement, ces deux liens deviennent deux grandes cartes cliquables
+     plus faciles à toucher. Sur ordinateur/tablette, rien ne change. */
+  .sidebar nav.worksManagerNav {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .sidebar nav.worksManagerNav a {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 22px 10px;
+    border: 1px solid #d5e7da;
+    border-radius: 16px;
+    background: #f7fbf8;
+    font-size: 1rem;
+  }
 }
 
 
@@ -523,7 +544,7 @@ table tbody tr:hover { background: #f4fbf6; }
 .projectSiteCard.projectAttendanceCard,.projectSiteCard.projectExpenseCard{grid-column:span 2}.projectAttendanceCard{background:linear-gradient(145deg,#fff,#f4fbf6)}.projectAttendanceForm,.projectExpenseForm{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;align-items:end}.projectAttendanceForm input{min-width:0}.projectAttendanceForm button,.projectExpenseForm button{min-height:42px}.projectAttendanceList{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:15px}.projectAttendanceItem{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 12px;border:1px solid #d9e9dd;border-radius:12px;background:#fff}.projectAttendanceItem strong{display:block}.projectAttendanceItem small{display:block;margin-top:3px;color:#607a69;font-size:.77rem}.projectAttendanceItem button{min-width:92px;padding:8px 10px!important;background:#fff!important;color:#1b5e39!important;border:1px solid #8fc7a0!important;box-shadow:none!important}.projectAttendanceItem button.isPresent{background:#dff5e5!important;border-color:#4d9a68!important;color:#0e6532!important}.projectAttendanceItem button:disabled{background:#edf1ee!important;color:#718176!important;border-color:#d5dfd8!important}.projectExpenseCard{background:linear-gradient(145deg,#fafffb,#ecf8ef)}.projectExpenseForm{grid-template-columns:repeat(auto-fit,minmax(120px,1fr));padding:13px;border:1px solid #d5e8da;border-radius:14px;background:rgba(255,255,255,.75)}.projectExpenseForm button{grid-column:1/-1}.projectExpenseForm label{display:grid;gap:5px;color:#31513d;font-size:.75rem;font-weight:850}.projectExpenseForm input,.projectExpenseForm textarea{min-width:0}.projectExpenseForm textarea{min-height:42px;resize:vertical}.projectExpenseTabs{display:flex;gap:8px;margin-top:16px;border-bottom:1px solid #d9e7dc}.projectExpenseTabs button{position:relative;padding:10px 13px!important;background:transparent!important;color:#426653!important;border:0!important;border-radius:10px 10px 0 0!important;box-shadow:none!important}.projectExpenseTabs button.isActive{background:#fff!important;color:#105a33!important;box-shadow:inset 0 -3px #19824d!important}.projectExpenseList{display:grid;gap:9px;margin-top:13px}.projectExpenseItem{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;align-items:end;padding:13px;border:1px solid #d9e9dd;border-radius:13px;background:#fff}.projectExpenseItem strong,.projectExpenseItem small{display:block}.projectExpenseItem small{margin-top:4px;color:#587364;font-size:.78rem}.projectExpenseItem label{display:grid;gap:4px;color:#416250;font-size:.71rem;font-weight:800}.projectExpenseItem input{min-width:0}.projectExpenseItem button{min-height:40px;padding:8px 10px!important}.projectExpenseItem.paid{border-left:4px solid #3b9760;background:#f8fdf9}.projectExpenseSummary{margin-top:16px;padding:14px;border:1px solid #bdddc7;border-radius:14px;background:#fff;overflow:auto}.projectExpenseSummary h3{margin:0 0 10px;color:#174a2e;font-size:1rem}.projectExpenseSummary table{width:100%;min-width:540px;border-collapse:collapse}.projectExpenseSummary th,.projectExpenseSummary td{padding:9px 8px;border-bottom:1px solid #e1ece4;text-align:left}.projectExpenseSummary th{color:#567364;font-size:.71rem;letter-spacing:.05em;text-transform:uppercase}.projectExpenseSummary td:last-child,.projectExpenseSummary th:last-child{text-align:right}.projectExpenseSummary tfoot td{border-bottom:0;color:#124f2d;font-size:.95rem;font-weight:900}@media(max-width:1120px){.projectExpenseForm{grid-template-columns:repeat(3,minmax(0,1fr))}.projectExpenseItem{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:980px){.projectSiteCard.projectAttendanceCard,.projectSiteCard.projectExpenseCard{grid-column:auto}}@media(max-width:700px){.projectAttendanceForm,.projectExpenseForm,.projectExpenseItem{grid-template-columns:1fr}.projectExpenseForm textarea{min-height:76px}.projectExpenseTabs{overflow:auto}.projectExpenseTabs button{white-space:nowrap}.projectExpenseItem button{width:100%}}
 
 /* La présence se saisit en un geste : vert clair = présent, sombre = absent. */
-.projectAttendanceList>button{display:grid;gap:3px;text-align:left;padding:12px 14px!important;border:1px solid #527765!important;border-radius:12px!important;box-shadow:none!important;transition:transform .16s ease,filter .16s ease}.projectAttendanceList>button.present{background:#dff5e5!important;color:#115b33!important;border-color:#5aa676!important}.projectAttendanceList>button.absent{background:#365245!important;color:#fff!important;border-color:#274237!important}.projectAttendanceList>button:hover:not(:disabled){transform:translateY(-1px);filter:brightness(1.04)}.projectAttendanceList>button small{opacity:.84}.projectAttendanceList>button:disabled{opacity:.64;cursor:not-allowed}
+.projectAttendanceList>button{display:grid;gap:3px;text-align:left;padding:12px 14px!important;border:1px solid #527765!important;border-radius:12px!important;box-shadow:none!important;transition:transform .16s ease,filter .16s ease}.projectAttendanceList>button.present{background:#365245!important;color:#fff!important;border-color:#274237!important}.projectAttendanceList>button.absent{background:#dff5e5!important;color:#115b33!important;border-color:#5aa676!important}.projectAttendanceList>button:hover:not(:disabled){transform:translateY(-1px);filter:brightness(1.04)}.projectAttendanceList>button small{opacity:.84}.projectAttendanceList>button:disabled{opacity:.64;cursor:not-allowed}
 
 /* Réagencement de l'espace chantier en grille à 3 colonnes : accès en haut,
    puis deux rangées de 3 cartes (rapports/magasin/photos, puis
@@ -689,3 +710,13 @@ table tbody tr:hover { background: #f4fbf6; }
 .submissionDossierPage .text-amber-700{color:#b45309}
 .submissionDossierPage .spinner{display:inline-block;width:12px;height:12px;margin-right:7px;vertical-align:middle;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:submissionDossierSpin .6s linear infinite;opacity:.85}
 @keyframes submissionDossierSpin{to{transform:rotate(360deg)}}
+
+/* Signal visible, partout dans l'appli, dès qu'une page charge ou qu'une
+   erreur survient (au lieu d'un écran vide sans explication). */
+.globalStatusBar{display:flex;align-items:center;gap:14px;margin:18px;padding:16px 18px;border-radius:14px;font-weight:700}
+.globalStatusBar--loading{background:#eef6f0;color:#175a37;border:1px solid #bfe0cb}
+.globalStatusBar--error{background:#fbeaea;color:#7a2222;border:1px solid #edc3c3;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
+.globalStatusBar--error p{margin:4px 0 0;font-weight:500;color:#8a3a3a}
+.globalStatusBar--error button{white-space:nowrap}
+.globalStatusSpinner{display:inline-block;width:20px;height:20px;flex:0 0 auto;border:3px solid currentColor;border-right-color:transparent;border-radius:50%;animation:globalStatusSpin .7s linear infinite}
+@keyframes globalStatusSpin{to{transform:rotate(360deg)}}

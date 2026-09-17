@@ -199,14 +199,14 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   const canOperate = !projectFinished && (accessRole === "works_manager" || accessRole === "site_manager");
   const canInvite = !projectFinished && (isAdmin || accessRole === "works_manager");
   const ownAssignment = assignments.find((item) => item.user_id === userId && item.active);
-  // La fiche de présence montre aussi, à titre informatif (pas de case à
-  // cocher), la hiérarchie visible pour le niveau qui consulte : le
-  // conducteur voit ses chefs de chantier, l'admin voit conducteurs et chefs.
-  const attendanceHierarchyRoster: Array<{ id: string; name: string; role: string }> = isAdmin
+  // La fiche de présence montre aussi les conducteurs et chefs de chantier
+  // actifs sur ce chantier — y compris la personne qui consulte elle-même,
+  // puisqu'elle est forcément sur place pour faire sa saisie. S'il y a
+  // plusieurs conducteurs ou chefs sur le même chantier, ils voient tous la
+  // même liste complète (pas seulement leur propre binôme).
+  const attendanceHierarchyRoster: Array<{ id: string; name: string; role: string }> = (isAdmin || canOperate)
     ? [...activeConductors.map((item) => ({ id: item.id, name: item.displayName || "Conducteur", role: "Conducteur" })), ...activeSiteManagers.map((item) => ({ id: item.id, name: item.displayName || "Chef de chantier", role: "Chef de chantier" }))]
-    : accessRole === "works_manager"
-      ? activeSiteManagers.filter((item) => item.parent_assignment_id === ownAssignment?.id).map((item) => ({ id: item.id, name: item.displayName || "Chef de chantier", role: "Chef de chantier" }))
-      : [];
+    : [];
   // Le droit « Stocks » est choisi lors de la création de l'accès. Il couvre
   // l'ajout de matériaux, les mouvements et la correction de ses propres saisies du jour.
   const canManageStock = canOperate && ownAssignment?.permissions?.stock === true;
@@ -1002,7 +1002,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     const payload = {
       report_date: reportDraft.date || today,
       weather: reportDraft.weather || null,
-      workers_present: todayAttendance.filter((item) => item.present).length,
+      workers_present: todayAttendance.filter((item) => item.present).length + attendanceHierarchyRoster.length,
       completed_work: reportDraft.completedWork || null,
       next_day_plan: reportDraft.nextDayPlan || null,
       issues: reportDraft.issues || null,
@@ -1688,7 +1688,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
               <div className="projectReportChips">
                 <button type="button" className="projectReportChip" onClick={() => setOpenReportField("date")}><span>Date</span><strong>{reportDraft.date ? date.format(new Date(reportDraft.date)) : "Choisir"}</strong></button>
                 <button type="button" className="projectReportChip" onClick={() => setOpenReportField("weather")}><span>Météo</span><strong>{reportDraft.weather || "Choisir"}</strong></button>
-                <button type="button" className="projectReportChip" onClick={() => setOpenReportField("workers")}><span>Effectif</span><strong>{todayAttendance.filter((item) => item.present).length ? `${todayAttendance.filter((item) => item.present).length} présent(s)` : "Choisir"}</strong></button>
+                <button type="button" className="projectReportChip" onClick={() => setOpenReportField("workers")}><span>Effectif</span><strong>{(todayAttendance.filter((item) => item.present).length + attendanceHierarchyRoster.length) ? `${todayAttendance.filter((item) => item.present).length + attendanceHierarchyRoster.length} présent(s)` : "Choisir"}</strong></button>
                 <button type="button" className="projectReportChip" onClick={() => setOpenReportField("completedWork")}><span>Travaux réalisés</span><strong>{reportSelectedTasks.length ? `${reportSelectedTasks.length} étape(s)` : reportDraft.completedWork ? "Renseigné" : "Choisir"}</strong></button>
                 <button type="button" className="projectReportChip" onClick={() => setOpenReportField("nextDayPlan")}><span>Travaux prévus demain</span><strong>{reportTomorrowTaskIds.length || reportDraft.nextDayPlan ? "Renseigné" : "Choisir"}</strong></button>
                 {canUseReportStock && <button type="button" className="projectReportChip" onClick={() => setOpenReportField("materials")}><span>Matériaux utilisés</span><strong>{reportConsumptionDraft.length ? `${reportConsumptionDraft.length} matériau(x)` : "Choisir"}</strong></button>}
@@ -1709,7 +1709,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
               <p className="projectHint">Vérifiez le récapitulatif avant l’envoi définitif — le rapport, les photos et la déduction de stock seront enregistrés dès la confirmation.</p>
               <div className="priceDetailGrid" style={{ gridTemplateColumns: "1fr" }}>
                 <div className="priceDetailStat"><span>Météo</span><strong>{reportDraft.weather || "Non renseignée"}</strong></div>
-                <div className="priceDetailStat"><span>Effectif présent</span><strong>{todayAttendance.filter((item) => item.present).length} personne(s)</strong></div>
+                <div className="priceDetailStat"><span>Effectif présent</span><strong>{todayAttendance.filter((item) => item.present).length + attendanceHierarchyRoster.length} personne(s)</strong></div>
                 <div className="priceDetailStat"><span>Travaux réalisés</span><strong>{reportSelectedTasks.length ? reportSelectedTasks.map((item) => projectTasks.find((task) => task.id === item.task_id)?.title || "Étape").join(", ") : reportDraft.completedWork || "Non renseigné"}</strong></div>
                 <div className="priceDetailStat"><span>Travaux prévus demain</span><strong>{reportTomorrowTaskIds.length ? reportTomorrowTaskIds.map((id) => projectTasks.find((task) => task.id === id)?.title || "Étape").join(", ") : reportDraft.nextDayPlan || "Non renseigné"}</strong></div>
                 <div className="priceDetailStat"><span>Matériaux utilisés</span><strong>{reportConsumptionDraft.length ? reportConsumptionDraft.map((item) => { const material = projectMaterials.find((m) => m.id === item.material_id); return `${material?.designation || "Matériau"} : ${item.quantity} ${material?.unit || ""}`; }).join(", ") : "Aucun"}</strong></div>
@@ -1892,7 +1892,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
           </div>
         </div></div>}
         <section className="projectSiteCard projectAttendanceCard">
-          <div className="projectCardHead"><div><p className="projectEyebrow">PRÉSENCE DU JOUR</p><h2>Équipe sur le chantier</h2></div><span>{todayAttendance.filter((item) => item.present).length}/{projectStaff.length} présent(s)</span></div>
+          <div className="projectCardHead"><div><p className="projectEyebrow">PRÉSENCE DU JOUR</p><h2>Équipe sur le chantier</h2></div><span>{todayAttendance.filter((item) => item.present).length + attendanceHierarchyRoster.length}/{projectStaff.length + attendanceHierarchyRoster.length} présent(s)</span></div>
           <div className="projectAttendanceList">
             {attendanceHierarchyRoster.map((person) => <div className="projectTeamMember" key={person.id}><strong>{person.name}</strong><span className="projectChecklistBadge">{person.role}</span></div>)}
             {projectStaff.length ? projectStaff.map((member) => { const entry = todayAttendance.find((item) => item.staff_member_id === member.id); return <div className="projectTeamMember" key={member.id}><strong>{member.full_name}</strong><span>{entry?.present ? "Présent" : "Absent"}</span></div>; }) : (!attendanceHierarchyRoster.length && <p className="projectEmptyText">Aucun employé déclaré.</p>)}
