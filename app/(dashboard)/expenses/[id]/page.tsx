@@ -6,6 +6,12 @@ import { RealtimeRefresh } from "@/components/realtime-refresh";
 
 type Params = { id: string };
 
+// Même raison que sur /projects/[id] : cette page doit toujours refléter
+// l'état réel (clôturé ou non), même après un rechargement complet (F5).
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 export default async function ProjectExpensesPage({ params }: { params: Promise<Params> }) {
   const { id } = await params;
   const { supabase, organizationId, user, memberRole } = await getContext();

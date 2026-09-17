@@ -28,9 +28,16 @@ export async function createServerClient() {
           }
         },
       },
-      // Le lecteur PDF peut transmettre le jeton de la session navigateur.
-      // Cela complète les cookies pour les ouvertures dans un nouvel onglet.
-      global: authorization.startsWith("Bearer ") ? { headers: { Authorization: authorization } } : undefined,
+      global: {
+        // Le lecteur PDF peut transmettre le jeton de la session navigateur.
+        // Cela complète les cookies pour les ouvertures dans un nouvel onglet.
+        ...(authorization.startsWith("Bearer ") ? { headers: { Authorization: authorization } } : {}),
+        // Empêche toute mise en cache (par Next.js ou par un intermédiaire)
+        // des requêtes vers Supabase : un chantier clôturé, une carte qui
+        // devient rouge, etc. doivent toujours refléter l'état réel en base,
+        // même après un rechargement complet de la page (F5).
+        fetch: (input, init) => fetch(input, { ...init, cache: "no-store" }),
+      },
     }
   );
 

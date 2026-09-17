@@ -8,6 +8,13 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 type Params = { id: string };
 
+// Cette page doit toujours refléter l'état réel du chantier (clôturé ou non)
+// même après un rechargement complet (F5) : on interdit ici toute mise en
+// cache de la page ou des lectures Supabase qu'elle déclenche.
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 export default async function ProjectPage({
   params,
   searchParams,

@@ -5,6 +5,12 @@ import { RealtimeRefresh } from "@/components/realtime-refresh";
 const number = (value: number | string | null) => Number(value ?? 0);
 const money = (value: number) => `${value.toLocaleString("fr-FR", { maximumFractionDigits: 2 })} Ar`;
 
+// Même raison que sur /projects : toujours montrer l'état réel, même après
+// un rechargement complet.
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 // Chaque chantier a ses propres dépenses (salaires, achats, transport,
 // imprévus) : ce répertoire ne montre qu'un total par chantier, le détail
 // s'ouvre en cliquant, comme pour l'espace chantier.

@@ -3,6 +3,12 @@ import { RealtimeRefresh } from "@/components/realtime-refresh";
 import { CreateProjectFlow } from "@/components/projects/CreateProjectFlow";
 import { ProjectCard } from "@/components/projects/ProjectCard";
 
+// Le répertoire des chantiers doit toujours montrer l'état réel (carte
+// rouge dès qu'un chantier est clôturé), même après un rechargement complet.
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 export default async function ProjectsPage() {
   const { supabase, organizationId, memberRole, user } = await getContext();
   const isAdmin = memberRole === "admin" || memberRole === "owner";
