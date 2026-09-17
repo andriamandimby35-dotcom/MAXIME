@@ -39,6 +39,17 @@ export async function POST(request: Request) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return NextResponse.json({ error: "OPENAI_API_KEY n'est pas configurée." }, { status: 503 });
 
+  // Sécurité : si la variable OPENAI_MODEL a été mal configurée (par exemple
+  // si elle contient une clé API par erreur au lieu d'un nom de modèle), on
+  // ignore cette valeur et on revient au modèle par défaut plutôt que
+  // d'envoyer une clé secrète à l'API comme si c'était un nom de modèle.
+  const rawModel = process.env.OPENAI_MODEL;
+  const model = rawModel && !rawModel.startsWith("sk-") ? rawModel : "gpt-5.4-mini";
+
+  function redactSecrets(text: string) {
+    return text.replace(/sk-[A-Za-z0-9_-]{10,}/g, "[clé masquée]");
+  }
+
   // Le PDF est envoyé une seule fois au moteur IA (fichier temporaire), puis
   // supprimé aussitôt après l'analyse : il n'est jamais stocké côté Sébastien.
   const uploadForm = new FormData();
@@ -61,7 +72,7 @@ export async function POST(request: Request) {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: process.env.OPENAI_MODEL || "gpt-5.4-mini",
+      model,
       store: false,
       reasoning: { effort: "medium" },
       // Une partie du budget est consommée par le raisonnement interne du
@@ -127,7 +138,7 @@ export async function POST(request: Request) {
         ? "L'analyse du PDF a pris trop de temps. Réessayez."
         : "L'analyse du PDF a échoué. Réessayez.",
       upstream_status: aiResponse.status,
-      details: details.slice(0, 500),
+      details: redactSecrets(details).slice(0, 500),
     }, { status: 502 });
   }
 

@@ -256,6 +256,18 @@ export async function POST(request: Request) {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) return NextResponse.json({ error: "OPENAI_API_KEY n'est pas configurée." }, { status: 503 });
 
+    // Sécurité : si la variable OPENAI_DAO_MODEL a été mal configurée (par
+    // exemple si elle contient une clé API par erreur au lieu d'un nom de
+    // modèle), on ignore cette valeur et on revient au modèle par défaut
+    // plutôt que d'envoyer une clé secrète à l'API comme si c'était un nom de
+    // modèle.
+    const rawDaoModel = process.env.OPENAI_DAO_MODEL;
+    const daoModel = rawDaoModel && !rawDaoModel.startsWith("sk-") ? rawDaoModel : "gpt-5.4-mini";
+
+    function redactSecrets(text: string) {
+      return text.replace(/sk-[A-Za-z0-9_-]{10,}/g, "[clé masquée]");
+    }
+
     // Un fichier est téléversé directement à l'API plutôt que converti en base64.
     // Cela évite de gonfler fortement les gros DAO dans la requête HTTP.
     const uploadForm = new FormData();
@@ -282,7 +294,7 @@ export async function POST(request: Request) {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: process.env.OPENAI_DAO_MODEL || "gpt-5.4-mini",
+        model: daoModel,
         store: false,
         // Le raisonnement reste volontairement concis : la source de vérité est le
         // PDF fourni, et non une longue recherche externe qui retarde l'analyse.
@@ -388,7 +400,7 @@ export async function POST(request: Request) {
           ? "L'analyse du DAO a pris trop de temps. Réessayez : le DAO reste enregistré et aucune donnée existante n'est supprimée."
           : "Le moteur d'analyse n'a pas pu terminer le DAO. Réessayez dans un instant.",
         upstream_status: aiResponse.status,
-        details: details.slice(0, 500),
+        details: redactSecrets(details).slice(0, 500),
       }, { status: 502 });
     }
 
