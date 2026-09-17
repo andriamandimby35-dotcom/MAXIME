@@ -64,7 +64,11 @@ export function ProjectCard({
     // (rapports, photos, stocks, dépenses, accès…) sont supprimés en chaîne
     // par la base de données. Le devis et l'appel d'offres à l'origine du
     // chantier, eux, ne sont jamais touchés par cette suppression.
-    const { error: deleteError } = await supabase.from("projects").delete().eq("id", project.id);
+    // Passe par une fonction dédiée (admin_delete_project) plutôt qu'une
+    // suppression directe : elle neutralise le temps de l'opération le
+    // verrou "modification le jour même" qui bloquait sinon la suppression
+    // en chaîne dès qu'une des saisies du chantier datait d'un jour précédent.
+    const { error: deleteError } = await supabase.rpc("admin_delete_project", { p_project_id: project.id });
     setBusy(false);
     if (deleteError) { setError(`Suppression impossible : ${deleteError.message}`); return; }
     setRemoved(true);
