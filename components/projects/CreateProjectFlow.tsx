@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { createPortal } from "react-dom";
 
 type Step = "choice" | "upload" | "review";
 
@@ -93,7 +94,8 @@ export function CreateProjectFlow() {
       + Ajouter un chantier
     </button>
 
-    {showModal && <div className="modalBackdrop" onClick={closeModal}>
+    {showModal && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={closeModal}>
       <div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(560px,100%)" }}>
 
         {step === "choice" && <>
@@ -173,6 +175,6 @@ export function CreateProjectFlow() {
         </>}
 
       </div>
-    </div>}
+    </div>, document.body)}
   </>;
 }

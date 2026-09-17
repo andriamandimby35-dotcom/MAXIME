@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
 
@@ -771,7 +772,8 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
       </>}
     </section>}
 
-    {confirmingClose && <div className="modalBackdrop" style={{ pointerEvents: "auto" }} onClick={() => setConfirmingClose(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(440px,100%)" }}>
+    {confirmingClose && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" style={{ pointerEvents: "auto" }} onClick={() => setConfirmingClose(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(440px,100%)" }}>
       <h2 className="font-bold text-xl mb-4">Clôturer « {project.name} » ?</h2>
       <p className="projectHint">Le conducteur, le(s) chef(s) de chantier et l’équipe perdront l’accès à ce chantier jusqu’à sa réouverture. Vous seul (administrateur) garderez l’accès, en lecture seule. C’est réversible : vous pourrez rouvrir le chantier à tout moment depuis ici, ce qui réactivera automatiquement tous les accès qui étaient actifs.</p>
       {message && <p className={`projectAccessStatus ${message.kind}`}>{message.text}</p>}
@@ -779,9 +781,10 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
         <button type="button" className="dangerButton" disabled={busy} onClick={() => void closeProject()}>{busy ? "Clôture en cours…" : "Confirmer la clôture"}</button>
         <button type="button" className="ghostButton" onClick={() => setConfirmingClose(false)}>Annuler</button>
       </div>
-    </div></div>}
+    </div></div>, document.body)}
 
-    {confirmingReopen && <div className="modalBackdrop" style={{ pointerEvents: "auto" }} onClick={() => setConfirmingReopen(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(440px,100%)" }}>
+    {confirmingReopen && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" style={{ pointerEvents: "auto" }} onClick={() => setConfirmingReopen(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(440px,100%)" }}>
       <h2 className="font-bold text-xl mb-4">Rouvrir « {project.name} » ?</h2>
       <p className="projectHint">Tous les accès conducteur, chef et équipe qui étaient actifs au moment de la clôture seront réactivés. Le chantier redevient actif comme avant.</p>
       {message && <p className={`projectAccessStatus ${message.kind}`}>{message.text}</p>}
@@ -789,9 +792,10 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
         <button type="button" disabled={busy} onClick={() => void reopenProject()}>{busy ? "Réouverture…" : "Confirmer la réouverture"}</button>
         <button type="button" className="ghostButton" onClick={() => setConfirmingReopen(false)}>Annuler</button>
       </div>
-    </div></div>}
+    </div></div>, document.body)}
 
-    {viewingRates && <div className="modalBackdrop" onClick={() => setViewingRates(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(520px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+    {viewingRates && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingRates(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(520px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
       <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>Taux par poste</h2>
       <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", paddingRight: "4px" }}>
         <p className="projectHint">Indiquez le montant journalier (ou mensuel — le journalier est déduit sur 26 jours si le journalier n’est pas rempli) pour chaque poste présent sur ce chantier, y compris Conducteur et Chef de chantier.</p>
@@ -804,9 +808,10 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
       </div>
       {message && <p className={`projectAccessStatus ${message.kind}`} style={{ flex: "0 0 auto", marginTop: "10px" }}>{message.text}</p>}
       <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingRates(false)}>Fermer</button>
-    </div></div>}
+    </div></div>, document.body)}
 
-    {viewingMvolaConfirm && <div className="modalBackdrop" onClick={() => setViewingMvolaConfirm(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+    {viewingMvolaConfirm && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingMvolaConfirm(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
       <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>Confirmer le paiement groupé par Mvola</h2>
       <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", paddingRight: "4px" }}>
         <p className="projectHint">Ce bouton ne déclenche aucun transfert Mvola réel — il certifie que vous avez payé, et envoie le détail au compte dépense générale.</p>
@@ -817,9 +822,10 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
         <button type="button" disabled={busy} onClick={() => void payMvolaGroup()}>{busy ? "Envoi…" : `Confirmer — ${money(mvolaPayable.reduce((sum, row) => sum + row.amount, 0))}`}</button>
         <button type="button" className="ghostButton" onClick={() => setViewingMvolaConfirm(false)}>Annuler</button>
       </div>
-    </div></div>}
+    </div></div>, document.body)}
 
-    {confirmingCashPay && <div className="modalBackdrop" onClick={closeCashPayModal}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
+    {confirmingCashPay && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={closeCashPayModal}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
       <h2 className="font-bold text-xl mb-4">Confirmer le paiement</h2>
       <p className="projectHint">{confirmingCashPay.row.name} — {money(confirmingCashPay.row.amount)}. Ce paiement sera comptabilisé immédiatement dans le compte dépense générale.</p>
       <label>Mode de paiement<select value={confirmingCashPay.method} onChange={(event) => setConfirmingCashPay((current) => current ? { ...current, method: event.target.value as "cash" | "other" } : current)}><option value="cash">Espèces</option><option value="other">Autre</option></select></label>
@@ -827,9 +833,10 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
         <button type="button" disabled={busy} onClick={() => void confirmCashPayment()}>Valider</button>
         <button type="button" className="ghostButton" onClick={closeCashPayModal}>Annuler</button>
       </div>
-    </div></div>}
+    </div></div>, document.body)}
 
-    {viewingExport && <div className="modalBackdrop" onClick={() => setViewingExport(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(620px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+    {viewingExport && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingExport(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(620px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
       <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>Aperçu export salaires — {periodMonth}</h2>
       <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", paddingRight: "4px" }}>
         <h3>Feuille 1 — Salaires</h3>
@@ -851,9 +858,10 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
         <button type="button" onClick={exportExcel}>Télécharger le fichier Excel</button>
         <button type="button" className="ghostButton" onClick={() => setViewingExport(false)}>Fermer</button>
       </div>
-    </div></div>}
+    </div></div>, document.body)}
 
-    {viewingEmployeeDetail && <div className="modalBackdrop" onClick={() => setViewingEmployeeDetail(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+    {viewingEmployeeDetail && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingEmployeeDetail(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
       <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>{viewingEmployeeDetail.name}</h2>
       <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", paddingRight: "4px" }}>
         <p className="projectHint">{viewingEmployeeDetail.roleName}{viewingEmployeeDetail.phone ? ` · ${viewingEmployeeDetail.phone}` : ""}</p>
@@ -877,44 +885,49 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
       </div>
       {message && <p className={`projectAccessStatus ${message.kind}`} style={{ flex: "0 0 auto", marginTop: "10px" }}>{message.text}</p>}
       <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingEmployeeDetail(null)}>Fermer</button>
-    </div></div>}
+    </div></div>, document.body)}
 
-    {viewingSalaryHistory && <div className="modalBackdrop" onClick={() => setViewingSalaryHistory(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+    {viewingSalaryHistory && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingSalaryHistory(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
       <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>Historique des paiements de salaire</h2>
       <p className="projectHint" style={{ flex: "0 0 auto" }}>Les paiements supprimés restent visibles ici, avec la date de suppression, pour garder une trace.</p>
       <div className="projectStockSummaryList" style={{ flex: "1 1 auto", minHeight: 0, maxHeight: "none" }}>{allSalaryPaymentsSorted.length ? allSalaryPaymentsSorted.map((payment) => <div key={payment.id} style={{ cursor: payment.deleted_at ? "default" : "pointer", opacity: payment.deleted_at ? 0.6 : 1 }} onClick={() => !payment.deleted_at && setViewingSalaryDetail(payment)}>
         <span className="chipName">{dateFmt.format(new Date(payment.paid_at))} · {paymentLabel(payment)}{payment.deleted_at ? ` · Supprimé le ${dateFmt.format(new Date(payment.deleted_at))}` : ""}</span><span className="chipQty">{money(number(payment.total_amount))}</span>
       </div>) : <p className="projectEmptyText">Aucun paiement pour l’instant.</p>}</div>
       <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingSalaryHistory(false)}>Fermer</button>
-    </div></div>}
+    </div></div>, document.body)}
 
-    {viewingSalaryDetail && <div className="modalBackdrop" onClick={() => setViewingSalaryDetail(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+    {viewingSalaryDetail && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingSalaryDetail(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
       <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>Paiement du {dateFmt.format(new Date(viewingSalaryDetail.paid_at))}</h2>
       <div className="projectStockSummaryList" style={{ flex: "1 1 auto", minHeight: 0, maxHeight: "none" }}>{viewingSalaryDetail.project_salary_payment_lines.map((line) => <div key={line.id}>
         <span className="chipName">{line.full_name} <small style={{ color: "#8a5b08" }}>{line.role_name}</small></span><span className="chipQty">{line.days_worked ? `${line.days_worked} j × ${money(line.daily_rate)} = ` : ""}{money(line.amount)}</span>
       </div>)}</div>
       <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingSalaryDetail(null)}>Fermer</button>
-    </div></div>}
+    </div></div>, document.body)}
 
-    {confirmingMisc && <div className="modalBackdrop" onClick={() => setConfirmingMisc(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
+    {confirmingMisc && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setConfirmingMisc(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
       <h2 className="font-bold text-xl mb-4">Confirmer la dépense</h2>
       <p className="projectHint">{miscDraft.recipient} — {money(number(miscDraft.amount))}. Envoyée directement au compte dépense générale, aucune validation supplémentaire.</p>
       <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
         <button type="button" disabled={busy} onClick={() => void submitMiscExpense()}>Confirmer</button>
         <button type="button" className="ghostButton" onClick={() => setConfirmingMisc(false)}>Annuler</button>
       </div>
-    </div></div>}
+    </div></div>, document.body)}
 
-    {confirmingDelete && <div className="modalBackdrop" onClick={() => setConfirmingDelete(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
+    {confirmingDelete && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setConfirmingDelete(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
       <h2 className="font-bold text-xl mb-4">Supprimer cette ligne ?</h2>
       <p className="projectHint">"{confirmingDelete.label}" sera retirée du compte dépense générale. Cette action est réversible uniquement par un administrateur en base.</p>
       <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
         <button type="button" className="projectRejectButton" disabled={busy} onClick={() => void confirmDeleteRow()}>Supprimer</button>
         <button type="button" className="ghostButton" onClick={() => setConfirmingDelete(null)}>Annuler</button>
       </div>
-    </div></div>}
+    </div></div>, document.body)}
 
-    {viewingGeneralExport && <div className="modalBackdrop" onClick={() => setViewingGeneralExport(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(760px,100%)", display: "flex", flexDirection: "column", maxHeight: "90vh" }}>
+    {viewingGeneralExport && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingGeneralExport(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(760px,100%)", display: "flex", flexDirection: "column", maxHeight: "90vh" }}>
       <div className="printableExport" style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", paddingRight: "4px" }}>
         <h2 className="font-bold text-xl mb-1">Résumé dépense — {project.name}</h2>
         <p className="projectHint">{project.location || "Localisation à confirmer"}{project.project_code ? ` · ${project.project_code}` : ""} · Période : {periodMonth} · Généré le {exportGeneratedAt ? new Intl.DateTimeFormat("fr-FR", { dateStyle: "long", timeStyle: "short" }).format(new Date(exportGeneratedAt)) : ""}</p>
@@ -961,6 +974,6 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
         <button type="button" className="secondary" onClick={() => window.print()}>Imprimer</button>
         <button type="button" className="ghostButton" onClick={() => setViewingGeneralExport(false)}>Fermer</button>
       </div>
-    </div></div>}
+    </div></div>, document.body)}
   </div>;
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import EditPriceButton from "./EditPriceButton";
 import DeletePriceButton from "./DeletePriceButton";
 import { formatAr } from "@/lib/format-number";
@@ -70,7 +71,7 @@ className="priceTileActions"
 
 </div>
 
-{open && (
+{open && typeof document !== "undefined" && createPortal(
 
 <div className="modalBackdrop" onClick={()=>setOpen(false)}>
 
@@ -164,7 +165,9 @@ Fermer
 
 </div>
 
-</div>
+</div>,
+
+document.body,
 
 )}
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { createPortal } from "react-dom";
 
 
 export default function EditPriceButton({
@@ -72,7 +73,7 @@ Modifier
 
 
 
-{open && (
+{open && typeof document !== "undefined" && createPortal(
 
 <div className="modalBackdrop" onClick={(e)=>{e.stopPropagation();setOpen(false);}}>
 
@@ -151,7 +152,9 @@ Annuler
 </div>
 
 
-</div>
+</div>,
+
+document.body,
 
 )}
 

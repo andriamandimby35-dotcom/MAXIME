@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
 
@@ -701,7 +702,8 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       </div>
     </section>
   </main>
-  {viewingPdf && <div className="modalBackdrop" onClick={closePdfModal}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(1000px,95vw)", height: "90vh", display: "flex", flexDirection: "column" }}>
+  {viewingPdf && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={closePdfModal}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(1000px,95vw)", height: "90vh", display: "flex", flexDirection: "column" }}>
     <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", marginBottom: "10px" }}>
       <h2 style={{ margin: 0, fontWeight: 800, fontSize: "1.125rem", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{viewingPdf.title}</h2>
       <div style={{ display: "flex", gap: "8px", flex: "0 0 auto" }}>
@@ -710,6 +712,6 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       </div>
     </div>
     <iframe ref={pdfIframeRef} title={viewingPdf.title} src={`${viewingPdf.objectUrl}#toolbar=0&navpanes=0`} style={{ flex: "1 1 auto", minHeight: 0, width: "100%", border: "1px solid #e1ece4", borderRadius: "10px" }} />
-  </div></div>}
+  </div></div>, document.body)}
   </>;
 }

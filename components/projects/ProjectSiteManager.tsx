@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 import { deleteOfflinePhoto, loadOfflinePhoto, saveOfflinePhoto } from "@/lib/offline-photos";
 
@@ -1874,7 +1875,8 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
           </div>}
           </>}
         </section>}
-        {editingInvitation && <div className="modalBackdrop" onClick={() => setEditingInvitation(null)}>
+        {editingInvitation && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setEditingInvitation(null)}>
           <div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
             <h2 className="font-bold text-xl mb-4">Modifier l’adresse e-mail</h2>
             <input
@@ -1889,8 +1891,9 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
               <button type="button" className="ghostButton" onClick={() => setEditingInvitation(null)}>Annuler</button>
             </div>
           </div>
-        </div>}
-        {viewingAssignment && <div className="modalBackdrop" onClick={() => setViewingAssignment(null)}>
+        </div>, document.body)}
+        {viewingAssignment && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingAssignment(null)}>
           <div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
             <h2 className="font-bold text-xl mb-4">{viewingAssignment.role === "works_manager" ? "Compte conducteur" : "Compte chef de chantier"}</h2>
             <div className="priceDetailGrid" style={{gridTemplateColumns:"1fr"}}>
@@ -1902,7 +1905,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             <p className="projectHint" style={{marginTop:"10px"}}>Ces informations ne sont visibles que par l’administrateur — jamais par le titulaire du compte lui-même.</p>
             <button type="button" className="ghostButton mt-5" onClick={() => setViewingAssignment(null)}>Fermer</button>
           </div>
-        </div>}
+        </div>, document.body)}
         <section className={`projectSiteCard projectPlanning${isAdmin ? " mobAdminOrder11" : ""}`}><div className="projectCardHead"><div><p className="projectEyebrow">PLANNING DAO</p><h2>Avancement des travaux</h2></div><span>{projectTasks.filter((item) => item.status === "completed").length}/{projectTasks.length} terminée(s)</span></div>{projectTasks.length ? <div className="projectTaskList">{projectTasks.map((task) => { const editable = canEditOwnCurrentRecord(task); const checklistCount = task.checklist?.length ?? 0; return <article key={task.id}><div><strong>{task.title}</strong><small>{task.planned_start_date || "—"} → {task.planned_end_date || "—"}{!editable && " · consultation"}</small><small className={checklistCount ? "projectChecklistBadge isReady" : "projectChecklistBadge"}>{checklistCount ? `✓ ${checklistCount} sous-tâche(s) générée(s)` : "Aucune sous-tâche générée"}</small></div><select value={task.status} disabled={!editable} onChange={(event) => void updateTask(task.id, { status: event.target.value })}><option value="planned">Planifiée</option><option value="active">En cours</option><option value="blocked">Bloquée</option><option value="completed">Terminée</option></select><label>{number(task.progress_percent)} %<input type="range" min="0" max="100" disabled={!editable} value={number(task.progress_percent)} onChange={(event) => void updateTask(task.id, { progress_percent: number(event.target.value) })} /></label></article>; })}</div> : <p className="projectEmptyText">Le planning est importé automatiquement depuis le DAO. {isAdmin && online ? "Vous pouvez le relancer ci-dessous." : "Il sera visible dès que l’import sera terminé."}</p>}{isAdmin && <button type="button" className="secondary mt-3" disabled={!online || busy || projectFinished} onClick={() => void importDaoTasks()}>{busy ? "Importation…" : projectFinished ? "Planning archivé" : "Importer le planning du DAO"}</button>}{isAdmin && projectTasks.length > 0 && <><button type="button" className="secondary mt-2" disabled={!online || busy || projectFinished} onClick={() => void generateTaskChecklists()}>{busy ? "Génération…" : `Générer les sous-tâches IA (${projectTasks.filter((task) => (task.checklist?.length ?? 0) > 0).length}/${projectTasks.length} prêtes)`}</button>{checklistStatus && <p className={`projectAccessStatus ${checklistStatus.kind}`} role="status" aria-live="polite">{checklistStatus.text}</p>}</>}<p className="projectHint mt-2">Les étapes ne sont pas créées manuellement : elles conservent la structure du DAO. Chaque niveau consulte les saisies de l’équipe sous sa responsabilité, sans les modifier.</p></section>
         <section className={`projectSiteCard projectReports${isAdmin ? " mobAdminOrder5" : ""}`}>
           <div className="projectCardHead"><div><p className="projectEyebrow">TERRAIN</p><h2>Rapports journaliers</h2></div><span>{projectReports.length} rapport(s) · {projectPhotos.length} photo(s)</span></div>
@@ -1926,7 +1929,8 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             </div>
           </>}
           {!canOperate && <p className="projectHint">Historique en lecture seule. Vous pouvez signaler une erreur avec une annotation.</p>}
-          {viewingReportSummary && <div className="modalBackdrop" onClick={() => setViewingReportSummary(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(520px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+          {viewingReportSummary && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingReportSummary(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(520px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
             <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>Confirmer le rapport du {date.format(new Date(reportDraft.date || today))}</h2>
             <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", paddingRight: "4px" }}>
               <p className="projectHint">Vérifiez le récapitulatif avant l’envoi définitif — le rapport, les photos et la déduction de stock seront enregistrés dès la confirmation.</p>
@@ -1946,10 +1950,11 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
               <button type="button" className="button" disabled={reportSubmitting} onClick={() => { void submitDailyReport().then((success) => { if (success) setViewingReportSummary(false); }); }}>{reportSubmitting ? "Envoi en cours…" : "Confirmer et envoyer"}</button>
               <button type="button" className="ghostButton" onClick={() => setViewingReportSummary(false)}>Modifier</button>
             </div>
-          </div></div>}
+          </div></div>, document.body)}
           <div className="projectStockSummaryList">{projectReports.length ? projectReports.map((report) => <div key={report.id} style={{ cursor: "pointer" }} onClick={() => setViewingReportDetail(report)}><span className="chipName">{date.format(new Date(report.report_date))}</span><span className="chipQty">{readerName(report.created_by || "")}</span></div>) : <p className="projectEmptyText">Aucun rapport journalier enregistré.</p>}</div>
         </section>
-        {viewingReportDetail && <div className="modalBackdrop" onClick={() => setViewingReportDetail(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(560px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+        {viewingReportDetail && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingReportDetail(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(560px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
           <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>Rapport du {date.format(new Date(viewingReportDetail.report_date))}</h2>
           <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", paddingRight: "4px" }}>
             <div className="priceDetailGrid" style={{ gridTemplateColumns: "1fr" }}>
@@ -1969,8 +1974,9 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             {isAdmin && <button type="button" className="rounded-lg border border-red-700 bg-white px-3 py-2 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void adminDeleteReport(viewingReportDetail)}>Supprimer ce rapport</button>}
             <button type="button" className="ghostButton mt-5" onClick={() => setViewingReportDetail(null)}>Fermer</button>
           </div>
-        </div></div>}
-        {viewingPhotoUrl !== null && <div className="modalBackdrop" onClick={() => { setViewingPhotoUrl(null); setViewingPhotoRecord(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(640px,100%)" }}>
+        </div></div>, document.body)}
+        {viewingPhotoUrl !== null && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => { setViewingPhotoUrl(null); setViewingPhotoRecord(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(640px,100%)" }}>
           <h2 className="font-bold text-xl mb-4">Photo</h2>
           {viewingPhotoUrl ? <img src={viewingPhotoUrl} alt="" style={{ width: "100%", maxHeight: "70vh", objectFit: "contain", borderRadius: "12px", background: "#eef4f0" }} /> : <p className="projectHint">Chargement de la photo…</p>}
           {viewingPhotoRecord?.photo_type === "delivery" && viewingPhotoRecord.caption && <div className="priceDetailGrid mt-3" style={{ gridTemplateColumns: "1fr" }}>
@@ -1984,8 +1990,9 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
               pour une vraie photo enregistrée, sinon la suppression n'aurait aucun effet. */}
           {isAdmin && viewingPhotoRecord && photos.some((item) => item.id === viewingPhotoRecord.id) && <button type="button" className="rounded-lg border border-red-700 bg-white px-3 py-2 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 mt-3" disabled={busy} onClick={() => void adminDeletePhoto(viewingPhotoRecord)}>Supprimer cette photo</button>}
           <button type="button" className="ghostButton mt-5" onClick={() => { setViewingPhotoUrl(null); setViewingPhotoRecord(null); }}>Fermer</button>
-        </div></div>}
-        {aiAnalysisResult && viewingReportDetail && <div className="modalBackdrop" onClick={() => setAiAnalysisResult(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+        </div></div>, document.body)}
+        {aiAnalysisResult && viewingReportDetail && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setAiAnalysisResult(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
           <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>Analyse IA — {date.format(new Date(viewingReportDetail.report_date))}</h2>
           <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", paddingRight: "4px" }}>
             <p className="projectHint">Estimation visuelle approximative — à vérifier sur place, pas une certitude.</p>
@@ -2002,9 +2009,11 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             <button type="button" className="button" disabled={aiAnalysisStatus?.kind === "info"} onClick={() => void reportAiAnalysisAsNote()}>{aiAnalysisStatus?.kind === "info" ? "Envoi…" : "Signaler"}</button>
             <button type="button" className="ghostButton" onClick={() => { setAiAnalysisResult(null); setAiAnalysisStatus(null); }}>Fermer</button>
           </div>
-        </div></div>}
-        {openReportField === "date" && <div className="modalBackdrop" onClick={() => setOpenReportField(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(320px,100%)" }}><h2 className="font-bold text-xl mb-4">Date du rapport</h2><input type="date" className="w-full border p-3 rounded-lg mb-2" value={reportDraft.date} onChange={(event) => setReportDraft((draft) => ({ ...draft, date: event.target.value }))} autoFocus /><button type="button" className="button mt-3" onClick={() => setOpenReportField(null)}>Valider</button></div></div>}
-        {openReportField === "weather" && <div className="modalBackdrop" onClick={() => setOpenReportField(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(360px,100%)" }}>
+        </div></div>, document.body)}
+        {openReportField === "date" && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setOpenReportField(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(320px,100%)" }}><h2 className="font-bold text-xl mb-4">Date du rapport</h2><input type="date" className="w-full border p-3 rounded-lg mb-2" value={reportDraft.date} onChange={(event) => setReportDraft((draft) => ({ ...draft, date: event.target.value }))} autoFocus /><button type="button" className="button mt-3" onClick={() => setOpenReportField(null)}>Valider</button></div></div>, document.body)}
+        {openReportField === "weather" && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setOpenReportField(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(360px,100%)" }}>
           <h2 className="font-bold text-xl mb-4">Météo du jour</h2>
           <div className="projectChipChoices">{WEATHER_OPTIONS.map((option) => <button type="button" key={option} className={reportDraft.weather === option ? "isSelected" : ""} onClick={() => setReportDraft((draft) => ({ ...draft, weather: option }))}>{option}</button>)}</div>
           {(reportDraft.weather === "Pluvieux" || reportDraft.weather === "Orageux") && <div style={{ marginTop: "14px" }}>
@@ -2012,15 +2021,17 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             <div className="projectChipChoices"><button type="button" className={reportDraft.issues.includes("Travail arrêté à cause de la météo") ? "isSelected" : ""} onClick={() => toggleWeatherImpact()}>Travail arrêté à cause de la météo</button></div>
           </div>}
           <button type="button" className="button mt-3" onClick={() => setOpenReportField(null)}>Valider</button>
-        </div></div>}
-        {openReportField === "workers" && <div className="modalBackdrop" onClick={() => setOpenReportField(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
+        </div></div>, document.body)}
+        {openReportField === "workers" && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setOpenReportField(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
           <h2 className="font-bold text-xl mb-4">Effectif présent</h2>
           <p className="projectHint">Cliquez chaque personne présente aujourd’hui. Le compte et le rapport se mettent à jour automatiquement.</p>
           <form className="projectStaffForm" onSubmit={(event) => void addStaffMember(event)}><input name="full_name" required placeholder="Nom et prénom de l’employé" /><input name="role" placeholder="Poste (maçon, aide, magasinier…)" /><input name="mvola" placeholder="Numéro de téléphone (facultatif)" /><label className="projectInlineCheck"><input type="checkbox" name="mvola_enabled" defaultChecked /> Mvola</label><label className="projectInlineCheck"><input type="checkbox" name="call_enabled" defaultChecked /> Appel</label><button disabled={busy}>+ Ajouter à l’équipe</button></form>
           <div className="projectAttendanceList">{projectStaff.length ? projectStaff.map((member) => { const entry = todayAttendance.find((item) => item.staff_member_id === member.id); const editable = canRecordAttendance && (!entry?.recorded_by || entry.recorded_by === userId); return <button type="button" key={member.id} disabled={!editable} className={entry?.present ? "present" : "absent"} onClick={() => void toggleAttendance(member)}><strong>{member.full_name}</strong><span>{member.role_name || "Employé"}</span><small>{entry?.present ? "Présent" : "Absent"}{!editable ? " · consultation" : ""}</small></button>; }) : <p className="projectEmptyText">Ajoutez les employés avant de marquer leur présence.</p>}</div>
           <button type="button" className="button mt-3" onClick={() => setOpenReportField(null)}>Valider</button>
-        </div></div>}
-        {openReportField === "completedWork" && <div className="modalBackdrop" onClick={() => { setOpenReportField(null); setTaskChecklistTarget(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
+        </div></div>, document.body)}
+        {openReportField === "completedWork" && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => { setOpenReportField(null); setTaskChecklistTarget(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
           {taskChecklistTarget ? (() => {
             const task = taskChecklistTarget;
             const staged = reportSelectedTasks.find((item) => item.task_id === task.id);
@@ -2051,8 +2062,9 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             <textarea className="w-full border p-3 rounded-lg mt-3" rows={3} placeholder="Autre travail non planifié, précisions…" value={reportDraft.completedWork} onChange={(event) => setReportDraft((draft) => ({ ...draft, completedWork: event.target.value }))} />
             <button type="button" className="button mt-3" onClick={() => setOpenReportField(null)}>Terminer</button>
           </>}
-        </div></div>}
-        {openReportField === "nextDayPlan" && <div className="modalBackdrop" onClick={() => { setOpenReportField(null); setTaskChecklistTarget(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
+        </div></div>, document.body)}
+        {openReportField === "nextDayPlan" && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => { setOpenReportField(null); setTaskChecklistTarget(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
           {taskChecklistTarget ? (() => {
             const task = taskChecklistTarget;
             const checklist = task.checklist ?? [];
@@ -2074,8 +2086,9 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             <textarea className="w-full border p-3 rounded-lg mt-3" rows={3} placeholder="Autre, si aucune étape ne correspond…" value={reportDraft.nextDayPlan} onChange={(event) => setReportDraft((draft) => ({ ...draft, nextDayPlan: event.target.value }))} />
             <button type="button" className="button mt-3" onClick={() => setOpenReportField(null)}>Terminer</button>
           </>}
-        </div></div>}
-        {openReportField === "materials" && <div className="modalBackdrop" onClick={() => { setOpenReportField(null); setMaterialQtyTarget(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
+        </div></div>, document.body)}
+        {openReportField === "materials" && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => { setOpenReportField(null); setMaterialQtyTarget(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
           {materialQtyTarget ? <>
             <h2 className="font-bold text-xl mb-4">Quantité utilisée — {materialQtyTarget.designation}</h2>
             <input type="number" min="0.001" step="any" className="w-full border p-3 rounded-lg mb-2" value={modalInputValue} onChange={(event) => setModalInputValue(event.target.value)} autoFocus placeholder={`En stock : ${number(materialQtyTarget.on_site_quantity)} ${materialQtyTarget.unit}`} />
@@ -2088,8 +2101,9 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             {reportConsumptionDraft.length > 0 && <ul className="projectConsumptionDraft">{reportConsumptionDraft.map((usage) => { const material = projectMaterials.find((item) => item.id === usage.material_id); return <li key={usage.material_id}>{material?.designation} : <b>{usage.quantity} {material?.unit}</b><button type="button" onClick={() => setReportConsumptionDraft((rows) => rows.filter((item) => item.material_id !== usage.material_id))}>Retirer</button></li>; })}</ul>}
             <button type="button" className="button mt-3" onClick={() => setOpenReportField(null)}>Terminer</button>
           </>}
-        </div></div>}
-        {openReportField === "tomorrowMaterials" && <div className="modalBackdrop" onClick={() => { setOpenReportField(null); setTomorrowMaterialQtyTarget(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
+        </div></div>, document.body)}
+        {openReportField === "tomorrowMaterials" && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => { setOpenReportField(null); setTomorrowMaterialQtyTarget(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
           {tomorrowMaterialQtyTarget ? <>
             <h2 className="font-bold text-xl mb-4">Besoin prévu demain — {tomorrowMaterialQtyTarget.designation}</h2>
             <input type="number" min="0.001" step="any" className="w-full border p-3 rounded-lg mb-2" value={modalInputValue} onChange={(event) => setModalInputValue(event.target.value)} autoFocus placeholder={`Disponible pour demain : ${Math.max(0, number(tomorrowMaterialQtyTarget.on_site_quantity) - (reportConsumptionDraft.find((usage) => usage.material_id === tomorrowMaterialQtyTarget.id)?.quantity || 0))} ${tomorrowMaterialQtyTarget.unit}`} />
@@ -2100,8 +2114,9 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             <div className="projectChipChoices">{projectMaterials.map((material) => { const staged = reportTomorrowMaterials.find((item) => item.material_id === material.id); const usedToday = reportConsumptionDraft.find((usage) => usage.material_id === material.id)?.quantity || 0; const available = Math.max(0, number(material.on_site_quantity) - usedToday); return <button type="button" key={material.id} className={`projectMaterialChipRow${staged ? " isSelected" : ""}`} onClick={() => { setTomorrowMaterialQtyTarget(material); setModalInputValue(staged ? String(staged.quantity) : ""); setTomorrowQtyStatus(null); }}><span className="chipName">{material.designation}</span><span className="chipQty">{staged ? staged.quantity : `disponible ${available}`}</span></button>; })}</div>
             <button type="button" className="button mt-3" onClick={() => finishTomorrowMaterials()}>Terminer</button>
           </>}
-        </div></div>}
-        {viewingTomorrowSummary && <div className="modalBackdrop" onClick={() => setViewingTomorrowSummary(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+        </div></div>, document.body)}
+        {viewingTomorrowSummary && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingTomorrowSummary(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
           <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>Récapitulatif — matériaux de demain</h2>
           <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", paddingRight: "4px" }}>
             <h3 className="font-bold">Disponible pour demain</h3>
@@ -2113,7 +2128,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             <button type="button" className="button" onClick={() => void confirmTomorrowMaterialsSummary()}>Confirmer</button>
             <button type="button" className="ghostButton" onClick={() => setViewingTomorrowSummary(false)}>Retour</button>
           </div>
-        </div></div>}
+        </div></div>, document.body)}
         <section className={`projectSiteCard projectAttendanceCard${isAdmin ? " mobAdminOrder6" : ""}`}>
           <div className="projectCardHead"><div><p className="projectEyebrow">PRÉSENCE DU JOUR</p><h2>Équipe sur le chantier</h2></div><span>{todayAttendance.filter((item) => item.present).length + attendanceHierarchyRoster.length}/{projectStaff.length + attendanceHierarchyRoster.length} présent(s)</span></div>
           <div className="projectAttendanceList">
@@ -2122,7 +2137,8 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
           </div>
           <button type="button" className="secondary projectHistoryButton" onClick={() => setViewingAttendanceDetail(true)}>Voir l’historique</button>
         </section>
-        {viewingAttendanceDetail && <div className="modalBackdrop" onClick={() => { setViewingAttendanceDetail(false); setViewingAttendanceDay(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+        {viewingAttendanceDetail && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => { setViewingAttendanceDetail(false); setViewingAttendanceDay(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
           {viewingAttendanceDay ? <>
             <h2 className="font-bold text-xl mb-4">Présence — {date.format(new Date(viewingAttendanceDay))}</h2>
             <div className="projectNoteList projectNoteListScroll" style={{ flex: "1 1 auto", minHeight: 0 }}>{projectAttendance.filter((item) => item.report_date === viewingAttendanceDay && item.present).map((item) => { const member = projectStaff.find((row) => row.id === item.staff_member_id); return <div className="projectTeamMember" key={item.id}><strong>{member?.full_name || "Employé"}</strong></div>; })}</div>
@@ -2134,7 +2150,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             </div>
             <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingAttendanceDetail(false)}>Fermer</button>
           </>}
-        </div></div>}
+        </div></div>, document.body)}
         <section className={`projectSiteCard projectMaterials${isAdmin ? " mobAdminOrder3" : ""}`} id="materialsCard">
           <div className="projectCardHead"><div><p className="projectEyebrow">DEMANDE</p><h2>Matériaux et stock</h2></div><span className={lowStock.length ? "projectAlert" : "projectOk"}>{lowStock.length ? `${lowStock.length} alerte(s)` : "Stock suivi"}</span></div>
           <p className="projectHint">Cette carte sert uniquement à faire une demande de matériau. Le stock réel se consulte dans « Mouvements de stock ».</p>
@@ -2163,7 +2179,8 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             {newLibraryStatus && <p className={`projectAccessStatus ${newLibraryStatus.kind}`} role="status" aria-live="polite">{newLibraryStatus.text}</p>}
           </div>}
         </section>
-        {openRequestField === "material" && <div className="modalBackdrop" onClick={() => { setOpenRequestField(null); setEditingLibraryMaterial(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+        {openRequestField === "material" && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => { setOpenRequestField(null); setEditingLibraryMaterial(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
           {editingLibraryMaterial ? <>
             <h2 className="font-bold text-xl mb-4">{editingLibraryMaterial.designation}</h2>
             <p className="projectHint">Modifiez le prix et/ou la localisation. Une localisation différente crée une nouvelle entrée (variante) plutôt que d’écraser celle-ci.</p>
@@ -2182,19 +2199,21 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             {!requestMaterialMatches.length && <p className="projectHint">Aucun résultat. Ajoutez-le d’abord via « Nouveau matériau » ci-dessous.</p>}
             <button type="button" className="ghostButton mt-3" style={{ flex: "0 0 auto" }} onClick={() => setOpenRequestField(null)}>Fermer</button>
           </>}
-        </div></div>}
-        {openRequestField === "timing" && <div className="modalBackdrop" onClick={() => setOpenRequestField(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(360px,100%)" }}>
+        </div></div>, document.body)}
+        {openRequestField === "timing" && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setOpenRequestField(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(360px,100%)" }}>
           <h2 className="font-bold text-xl mb-4">Besoin pour quand ?</h2>
           <div className="projectChipChoices">{(["now", "tomorrow", "week"] as const).map((option) => <button type="button" key={option} className={requestDraft.timing === option ? "isSelected" : ""} onClick={() => { setRequestDraft((draft) => ({ ...draft, timing: option })); setOpenRequestField(null); }}>{TIMING_LABELS[option]}</button>)}</div>
           <button type="button" className="ghostButton mt-3" onClick={() => setOpenRequestField(null)}>Fermer</button>
-        </div></div>}
+        </div></div>, document.body)}
         <section className={`projectSiteCard projectMovementCard${isAdmin ? " mobAdminOrder4" : ""}`}>
           <div className="projectCardHead"><div><p className="projectEyebrow">MAGASIN</p><h2>Mouvements de stock</h2></div><span>{projectAllStockMovements.length} enregistré(s)</span></div>
           <p className="projectHint">Chaque réception, consommation ou ajustement est daté et historisé automatiquement.</p>
           <div className="projectStockSummaryList">{projectMaterials.length ? projectMaterials.map((material) => <div key={material.id}><span className="chipName">{material.designation}</span><span className="chipQty">{number(material.on_site_quantity)}</span></div>) : <p className="projectEmptyText">Aucun matériau suivi pour l’instant : le stock apparaît ici dès le premier achat validé.</p>}</div>
           <button type="button" className="secondary projectHistoryButton" onClick={() => setViewingStockDetail(true)}>Voir le détail et l’historique</button>
         </section>
-        {viewingStockDetail && <div className="modalBackdrop" onClick={() => setViewingStockDetail(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(640px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+        {viewingStockDetail && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingStockDetail(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(640px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
           <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>Stock — détail et historique</h2>
           <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", paddingRight: "4px" }}>
             <h3 className="font-bold">Stock actuel</h3>
@@ -2204,7 +2223,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             <div className="projectMovementList" style={{ maxHeight: "none" }}>{projectAllStockMovements.length ? projectAllStockMovements.map((movement) => { const material = materials.find((item) => item.id === movement.material_id); return <div key={movement.id} className="flex flex-wrap items-center justify-between gap-2"><div><strong>{movement.movement_type === "delivery" ? "Réception" : movement.movement_type === "consumption" ? "Consommation" : movement.movement_type === "return" ? "Retour" : movement.movement_type === "loss" ? "Perte" : "Ajustement"}</strong><span>{number(movement.quantity)} {material?.unit || ""} · {material?.designation || "Matériau"}</span><small>{dateTime.format(new Date(movement.created_at || movement.movement_date))}{movement.notes ? ` · ${movement.notes}` : ""}</small></div>{isAdmin && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void adminDeleteMovement(movement)}>Supprimer</button>}</div>; }) : <p className="projectEmptyText">Aucun mouvement enregistré.</p>}</div>
           </div>
           <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingStockDetail(false)}>Fermer</button>
-        </div></div>}
+        </div></div>, document.body)}
         <section className={`projectSiteCard projectPhotosCard${isAdmin ? " mobAdminOrder9" : ""}`}><div className="projectCardHead"><div><p className="projectEyebrow">CLASSEMENT</p><h2>Photos non classées</h2></div><span>{unassignedProjectPhotos.length} photo(s)</span></div><p className="projectHint">Les nouvelles photos sont classées directement dans leur rapport journalier. Cette liste contient seulement les anciennes photos à rattacher ou à consulter.</p><div className="projectPhotoThumbGrid">{unassignedProjectPhotos.length ? unassignedProjectPhotos.map((photo) => <button type="button" key={photo.id} className="projectPhotoThumbButton" onClick={() => void openPhoto(photo)}>{photoThumbnails[photo.id] ? <img src={photoThumbnails[photo.id]} alt="" /> : <span className="projectPhotoThumbLoading">…</span>}<small>{photoThumbLabel(photo)}</small></button>) : <p className="projectEmptyText">Toutes les photos du chantier sont classées dans un rapport journalier.</p>}</div>
           {isAdmin && deletedProjectPhotos.length > 0 && <div style={{ marginTop: "12px" }}>
             <small style={{cursor:"pointer",textDecoration:"underline"}} onClick={() => setViewingDeletedPhotos((current) => !current)}>{viewingDeletedPhotos ? "▾" : "▸"} {deletedProjectPhotos.length} photo(s) supprimée(s) (historique)</small>
@@ -2222,7 +2241,8 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
               <button type="button" className="projectRejectButton" disabled={busy} onClick={() => void rejectMaterialRequest(order)}>Rejeter</button>
             </div>
           </article>; }) : <p className="projectEmptyText">Aucune demande en attente.</p>}</div>
-          {viewingRequestDetail && <div className="modalBackdrop" onClick={() => setViewingRequestDetail(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
+          {viewingRequestDetail && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingRequestDetail(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
             <h2 className="font-bold text-xl mb-4">{viewingRequestDetail.material_name}</h2>
             <div className="priceDetailGrid" style={{ gridTemplateColumns: "1fr" }}>
               <div className="priceDetailStat"><span>Quantité demandée</span><strong>{number(viewingRequestDetail.quantity)} {viewingRequestDetail.unit}</strong></div>
@@ -2237,32 +2257,36 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
               <button type="button" className="projectRejectButton" disabled={busy} onClick={() => { void rejectMaterialRequest(viewingRequestDetail); setViewingRequestDetail(null); }}>Rejeter</button>
               <button type="button" className="ghostButton" onClick={() => setViewingRequestDetail(null)}>Fermer</button>
             </div>
-          </div></div>}
+          </div></div>, document.body)}
           <button type="button" className="secondary projectHistoryButton" onClick={() => setViewingAdminOrdersHistory(true)}>Voir l’historique</button>
         </section>}
-        {viewingAdminOrdersHistory && <div className="modalBackdrop" onClick={() => setViewingAdminOrdersHistory(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+        {viewingAdminOrdersHistory && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingAdminOrdersHistory(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
           <h2 className="font-bold text-xl mb-4">Historique des demandes de matériaux</h2>
           <div className="projectNoteList projectNoteListScroll" style={{ flex: "1 1 auto", minHeight: 0 }}>{allOrdersHistory.length ? allOrdersHistory.map((order) => <div className="projectTeamMember" key={order.id}><strong>{order.material_name}</strong><span>{number(order.quantity)} {order.unit} · {(number(order.quantity) * number(order.unit_price)).toLocaleString("fr-FR")} Ar · {orderStatusLabel(order)} · demandé par {readerName(order.requested_by || "")}</span><small>Demande : {order.submitted_at ? dateTime.format(new Date(order.submitted_at)) : "—"} · Validation : {order.approved_at ? dateTime.format(new Date(order.approved_at)) : "—"}</small></div>) : <p className="projectEmptyText">Aucune demande dans l’historique.</p>}</div>
           <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingAdminOrdersHistory(false)}>Fermer</button>
-        </div></div>}
+        </div></div>, document.body)}
         {!isAdmin && <section className="projectSiteCard projectSuggestionsCard">
           <div className="projectCardHead"><div><p className="projectEyebrow">DEMANDE</p><h2>Matériaux en attente de validation</h2></div><span>{pendingApprovalOrders.length}</span></div>
           <p className="projectHint">Toutes les demandes en attente du chantier, pour éviter qu’un autre poste redemande le même matériau.</p>
           {pendingApprovalOrders.length ? pendingApprovalOrders.map((order) => <div className="projectTeamMember" key={order.id}><strong>{order.material_name}</strong><span>{number(order.quantity)} {order.unit} · demandé par {readerName(order.requested_by || "")} · {orderStatusLabel(order)}</span></div>) : <p className="projectEmptyText">Aucune demande en attente.</p>}
           <button type="button" className="secondary projectHistoryButton" onClick={() => setViewingMyRequestsHistory(true)}>Voir l’historique</button>
         </section>}
-        {viewingMyRequestsHistory && <div className="modalBackdrop" onClick={() => setViewingMyRequestsHistory(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+        {viewingMyRequestsHistory && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingMyRequestsHistory(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
           <h2 className="font-bold text-xl mb-4">Historique de mes demandes</h2>
           <div className="projectNoteList projectNoteListScroll" style={{ flex: "1 1 auto", minHeight: 0 }}>{myMaterialOrdersHistory.length ? myMaterialOrdersHistory.map((order) => <div className="projectTeamMember" key={order.id}><strong>{order.material_name}</strong><span>{number(order.quantity)} {order.unit} · {(number(order.quantity) * number(order.unit_price)).toLocaleString("fr-FR")} Ar · {orderStatusLabel(order)}</span><small>Demande : {order.submitted_at ? dateTime.format(new Date(order.submitted_at)) : "—"} · Validation : {order.approved_at ? dateTime.format(new Date(order.approved_at)) : "—"}</small></div>) : <p className="projectEmptyText">Aucune demande dans l’historique.</p>}</div>
           <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingMyRequestsHistory(false)}>Fermer</button>
-        </div></div>}
+        </div></div>, document.body)}
         <section className={`projectSiteCard projectNotesCard${isAdmin ? " mobAdminOrder8" : ""}`} id="messagingCard"><div className="projectCardHead"><div><p className="projectEyebrow">MESSAGERIE INTERNE</p><h2>Remarques et notifications</h2></div><span>{projectNotes.length} message(s)</span></div><p className="projectHint">Les remarques permettent aux niveaux supérieurs de signaler un désaccord sans modifier la saisie d’origine. Elles restent consultables hors ligne après réception.</p><div className="projectNoteSettings"><button type="button" className="secondary" onClick={() => void toggleSoundAlerts()}>{soundEnabled ? "Son des alertes activé" : "Activer le son des alertes"}</button><small>Erreur grave : rouge + signal sonore · Point à contrôler : orange · Information : neutre.</small></div><form className="projectNoteForm" onSubmit={(event) => { event.preventDefault(); const form = new FormData(event.currentTarget); const [entity_type, entity_id] = String(form.get("target") || "").split(":"); if (!entity_type || !entity_id) { setMessage("Choisissez la saisie concernée par la remarque."); return; } void insert("project_record_notes", { entity_type, entity_id, severity: String(form.get("severity") || "review"), title: String(form.get("title") || "Remarque de suivi"), content: String(form.get("content") || "") }, (row) => setRecordNotes((rows) => [row, ...rows])); event.currentTarget.reset(); }}><select name="severity" defaultValue="review"><option value="urgent">Erreur grave</option><option value="review">Point à contrôler</option><option value="info">Information ou précision</option></select><select name="target" defaultValue="" required><option value="" disabled>Saisie concernée</option>{noteTargets.map((target) => <option key={`${target.type}-${target.id}`} value={`${target.type}:${target.id}`}>{target.label}</option>)}</select><input name="title" required placeholder="Objet de la remarque" /><textarea name="content" required placeholder="Décrivez le problème, le contrôle à faire ou la correction proposée." /><button disabled={busy || !noteTargets.length}>{noteTargets.length ? "Envoyer la remarque" : "Ajoutez d’abord une saisie"}</button></form><div className="projectNoteChipList">{projectNotes.length ? projectNotes.map((note) => { const bright = noteOriginalUnread(note) || noteReplyUnread(note); const notif = noteReplyUnread(note) && !noteOriginalUnread(note); return <div key={note.id} className={`projectNoteRow note-${note.severity}${bright ? "" : " isReadNote"}`} onClick={() => { setViewingNoteDetail(note); void markNoteRead(note); }}><span>{noteSeverityLabel(note.severity)}{notif && <span className="noteNotifDot" />}</span><span>{dateTime.format(new Date(note.created_at))}</span></div>; }) : <p className="projectEmptyText">Aucune remarque pour ce chantier.</p>}</div><button type="button" className="secondary projectHistoryButton" onClick={() => setViewingNotes(true)}>Voir l’historique</button></section>
-        {viewingNotes && <div className="modalBackdrop" onClick={() => setViewingNotes(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+        {viewingNotes && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingNotes(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
           <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>Messagerie — historique complet</h2>
           <div className="projectNoteChipList" style={{ flex: "1 1 auto", minHeight: 0, maxHeight: "none" }}>{allProjectNotes.length ? allProjectNotes.map((note) => { const bright = noteOriginalUnread(note) || noteReplyUnread(note); const notif = noteReplyUnread(note) && !noteOriginalUnread(note); return <div key={note.id} className={`projectNoteRow note-${note.severity}${bright ? "" : " isReadNote"}`} onClick={() => { setViewingNoteDetail(note); void markNoteRead(note); }}><span>{noteSeverityLabel(note.severity)}{notif && <span className="noteNotifDot" />}</span><span>{dateTime.format(new Date(note.created_at))}</span></div>; }) : <p className="projectEmptyText">Aucune remarque pour ce chantier.</p>}</div>
           <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingNotes(false)}>Fermer</button>
-        </div></div>}
-        {viewingNoteDetail && <div className="modalBackdrop" onClick={() => setViewingNoteDetail(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(520px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+        </div></div>, document.body)}
+        {viewingNoteDetail && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingNoteDetail(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(520px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
           <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>{noteSeverityLabel(viewingNoteDetail.severity)} · {dateTime.format(new Date(viewingNoteDetail.created_at))}</h2>
           <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", paddingRight: "4px" }}>
             <h3 className="font-bold">{viewingNoteDetail.title}</h3>
@@ -2279,7 +2303,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             <button type="button" className="button" onClick={() => void submitNoteReply(viewingNoteDetail)}>Valider la réponse</button>
             <button type="button" className="ghostButton" onClick={() => setViewingNoteDetail(null)}>Fermer</button>
           </div>
-        </div></div>}
+        </div></div>, document.body)}
         {(isAdmin || canUploadPurchaseEvidence) && <section className={`projectSiteCard projectExpenseWorkflow${isAdmin ? " mobAdminOrder2" : ""}`}>
           <div className="projectCardHead"><div><p className="projectEyebrow">ACHATS</p><h2>Matériaux validés</h2></div><span className={validatedOrdersToPurchase.length ? "projectAlert" : "projectOk"}>{validatedOrdersToPurchase.length} validé(s) à acheter</span></div>
           <p className="projectHint">Dès qu’une demande est validée, elle apparaît ici : achetez le matériau, prenez-en la photo, et le stock ainsi que les dépenses se mettent à jour automatiquement.</p>
@@ -2300,15 +2324,17 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
           </> : <button type="button" onClick={() => setAddingMiscExpense(true)}>+ Ajouter une dépense imprévue</button>}
           {miscExpenseStatus && <p className={`projectAccessStatus ${miscExpenseStatus.kind}`} role="status" aria-live="polite">{miscExpenseStatus.text}</p>}
         </section>}
-        {confirmingMiscExpense && <div className="modalBackdrop" onClick={() => setConfirmingMiscExpense(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
+        {confirmingMiscExpense && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setConfirmingMiscExpense(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
           <h2 className="font-bold text-xl mb-4">Confirmer la dépense</h2>
           <p className="projectHint">{miscExpenseDraft.recipient} — {number(miscExpenseDraft.amount).toLocaleString("fr-FR")} Ar. Envoyée directement au compte dépense générale, aucune validation supplémentaire.</p>
           <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
             <button type="button" disabled={busy} onClick={() => void submitMiscExpense()}>Confirmer</button>
             <button type="button" className="ghostButton" onClick={() => setConfirmingMiscExpense(false)}>Annuler</button>
           </div>
-        </div></div>}
-        {viewingOrder && <div className="modalBackdrop" onClick={() => { setViewingOrder(null); setSelectedTransportMode(null); setSelectedTransportPrice(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
+        </div></div>, document.body)}
+        {viewingOrder && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => { setViewingOrder(null); setSelectedTransportMode(null); setSelectedTransportPrice(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
           <h2 className="font-bold text-xl mb-4">{viewingOrder.material_name}</h2>
           <p className="projectHint">{number(viewingOrder.quantity)} {viewingOrder.unit} · {(number(viewingOrder.quantity) * number(viewingOrder.unit_price)).toLocaleString("fr-FR")} Ar · demandé par {readerName(viewingOrder.requested_by || "")}</p>
           {viewingOrder.status === "covered_by_stock" ? <p className="projectOk" style={{ padding: "10px", borderRadius: "10px" }}>Couvert par le stock disponible — aucun achat nécessaire.</p> : <form className="projectPurchaseForm" onSubmit={(event) => { void uploadPurchaseEvidence(event, viewingOrder).then((success) => { if (success) setViewingOrder(null); }); }}>
@@ -2320,27 +2346,30 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
           </form>}
           {purchaseStatus && <p className={`projectAccessStatus ${purchaseStatus.kind}`} role="status" aria-live="polite">{purchaseStatus.text}</p>}
           <button type="button" className="ghostButton mt-3" onClick={() => { setViewingOrder(null); setPurchaseStatus(null); setSelectedTransportMode(null); setSelectedTransportPrice(null); }}>Fermer</button>
-        </div></div>}
-        {transportChoiceOpen && <div className="modalBackdrop" onClick={() => setTransportChoiceOpen(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(360px,100%)" }}>
+        </div></div>, document.body)}
+        {transportChoiceOpen && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setTransportChoiceOpen(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(360px,100%)" }}>
           <h2 className="font-bold text-xl mb-4">Moyen de transport</h2>
           <div className="projectChipChoices">{(["homme", "charrette", "camionnette", "camion", "autre"] as const).map((mode) => <button type="button" key={mode} onClick={() => { setSelectedTransportMode(mode); setTransportChoiceOpen(false); setTransportPriceDraft(selectedTransportPrice ? String(selectedTransportPrice) : ""); setTransportPriceOpen(true); }}>{TRANSPORT_MODE_LABELS[mode]}</button>)}</div>
           <button type="button" className="ghostButton mt-3" onClick={() => setTransportChoiceOpen(false)}>Annuler</button>
-        </div></div>}
-        {transportPriceOpen && <div className="modalBackdrop" onClick={() => { setTransportPriceOpen(false); setSelectedTransportMode(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(360px,100%)" }}>
+        </div></div>, document.body)}
+        {transportPriceOpen && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => { setTransportPriceOpen(false); setSelectedTransportMode(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(360px,100%)" }}>
           <h2 className="font-bold text-xl mb-4">Prix du transport — {TRANSPORT_MODE_LABELS[selectedTransportMode || "autre"]}</h2>
           <input type="number" min="0" step="any" autoFocus placeholder="Prix payé (Ar)" value={transportPriceDraft} onChange={(event) => setTransportPriceDraft(event.target.value)} />
           <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
             <button type="button" disabled={!(number(transportPriceDraft) > 0)} onClick={() => { setSelectedTransportPrice(number(transportPriceDraft)); setTransportPriceOpen(false); }}>Valider</button>
             <button type="button" className="ghostButton" onClick={() => { setTransportPriceOpen(false); setSelectedTransportMode(null); setTransportPriceDraft(""); }}>Annuler</button>
           </div>
-        </div></div>}
-        {viewingAchats && <div className="modalBackdrop" onClick={() => setViewingAchats(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+        </div></div>, document.body)}
+        {viewingAchats && typeof document !== "undefined" && createPortal(
+<div className="modalBackdrop" onClick={() => setViewingAchats(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
             <h2 className="font-bold text-xl mb-4">Historique des achats</h2>
             <div className="projectNoteList projectNoteListScroll" style={{ flex: "1 1 auto", minHeight: 0 }}>
               {paidOrdersHistory.length ? paidOrdersHistory.map((order) => <div className="projectTeamMember" key={order.id}><strong>{order.material_name}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span>Demande : {order.submitted_at ? dateTime.format(new Date(order.submitted_at)) : "—"} · Validation : {order.approved_at ? dateTime.format(new Date(order.approved_at)) : "—"} · Achat : {order.paid_at ? dateTime.format(new Date(order.paid_at)) : "—"}{order.purchase_photo_path && <button type="button" className="ghostButton" style={{ marginLeft: "8px" }} onClick={() => void openPhoto({ id: order.id, project_id: selectedId || "", storage_path: order.purchase_photo_path!, caption: order.purchase_photo_caption || null, photo_type: "delivery", captured_at: order.paid_at || order.approved_at || new Date().toISOString(), created_at: order.paid_at || order.approved_at || new Date().toISOString() } as SitePhoto)}>Photo</button>}</span>{isAdmin && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void adminDeleteMaterialOrder(order)}>Supprimer</button>}</div></div>) : <p className="projectEmptyText">Aucun achat payé pour l’instant.</p>}
             </div>
             <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingAchats(false)}>Fermer</button>
-        </div></div>}
+        </div></div>, document.body)}
       </main>
     </>}
   </div>;
