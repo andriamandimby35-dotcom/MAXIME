@@ -615,8 +615,9 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     {message && <div className="notice">{message.text}</div>}
 
     <div className="projectSiteGrid">
-      {canManage && <section className="projectSiteCard">
+      {(canManage || accessRole === "works_manager") && <section className="projectSiteCard">
         <div className="projectCardHead"><div><p className="projectEyebrow">SALAIRE</p><h2>Salaire employés</h2></div><span>{money(salaryTotal)}</span></div>
+        {!canManage && <p className="projectHint">Lecture seule : seul l’administrateur peut modifier les taux ou marquer un paiement.</p>}
         <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px", flexWrap: "wrap" }}>
           <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: ".85rem", fontWeight: 600 }}>Période
             <input type="month" value={periodMonth} max={nowMonthKey} onChange={(event) => setPeriodMonth(event.target.value || nowMonthKey)} />
@@ -652,10 +653,10 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
         </div>) : <p className="projectEmptyText">Aucun achat payé.</p>}</div>
       </section>}
 
-      {canManage && <section className="projectSiteCard">
+      {(canManage || accessRole === "works_manager") && <section className="projectSiteCard">
         <div className="projectCardHead"><div><p className="projectEyebrow">IMPRÉVU</p><h2>Dépenses imprévues</h2></div></div>
-        <p className="projectHint">Cadeaux ou toute dépense hors matériau/salaire. Envoyée directement au compte dépense générale après confirmation.</p>
-        {addingMisc ? <>
+        <p className="projectHint">Cadeaux ou toute dépense hors matériau/salaire. Envoyée directement au compte dépense générale après confirmation.{!canManage ? " Lecture seule." : ""}</p>
+        {canManage && (addingMisc ? <>
           <div className="projectMaterialForm">
             <input placeholder="Nom du bénéficiaire ou organisme" value={miscDraft.recipient} onChange={(event) => setMiscDraft((draft) => ({ ...draft, recipient: event.target.value }))} />
             <input type="number" min="0" step="any" placeholder="Montant (Ar)" value={miscDraft.amount} onChange={(event) => setMiscDraft((draft) => ({ ...draft, amount: event.target.value }))} />
@@ -663,7 +664,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
             <button type="button" disabled={busy} onClick={() => setConfirmingMisc(true)}>Valider</button>
           </div>
           <button type="button" className="ghostButton mt-2" onClick={() => setAddingMisc(false)}>Annuler</button>
-        </> : <button type="button" onClick={() => setAddingMisc(true)}>+ Ajouter une dépense imprévue</button>}
+        </> : <button type="button" onClick={() => setAddingMisc(true)}>+ Ajouter une dépense imprévue</button>)}
       </section>}
 
       <section className="projectSiteCard">
