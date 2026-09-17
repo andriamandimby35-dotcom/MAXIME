@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
 import { toLoginEmail } from "@/lib/auth-identifier";
@@ -97,8 +98,12 @@ export default function LoginPage() {
 
     <main className="auth">
 
+      {/* Logo en haut à droite de la page de connexion (image fournie par
+          l'utilisateur), en plus du fond d'écran chantier déjà utilisé une
+          fois connecté (voir .auth dans globals.css). */}
+      <Image src="/images/logo-m.png" alt="" width={78} height={80} className="authLogo" priority />
 
-      <form 
+      <form
         className="authCard"
         onSubmit={submit}
       >

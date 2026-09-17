@@ -85,13 +85,13 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   assignments?: ConductorAssignment[];
 }) {
   const supabase = useState(() => createClient())[0];
-  const canManage = accessRole === "admin";
-  // Le conducteur (works_manager) a un accès en lecture seule aux dépenses
-  // matériaux/transport de son chantier (voir le commentaire dans
-  // app/(dashboard)/layout.tsx) : il voit "Demandes en cours" et "Achats
-  // payés", mais jamais le Salaire (données sensibles) ni les actions
-  // réservées à l'administrateur (payer, supprimer, dépense imprévue).
-  const canViewPurchases = canManage || accessRole === "works_manager";
+  // Le conducteur (works_manager) a les mêmes droits que l'administrateur sur
+  // la Dépense de son chantier (taux, paiements, acomptes, dépense imprévue,
+  // export…), sauf la suppression d'une ligne du compte dépense générale,
+  // qui reste réservée à l'administrateur (canDelete).
+  const canManage = accessRole === "admin" || accessRole === "works_manager";
+  const canDelete = accessRole === "admin";
+  const canViewPurchases = canManage;
   const [staffMembers, setStaffMembers] = useState(initialStaffMembers);
   const [attendance, setAttendance] = useState(initialAttendance);
   const [materialOrders, setMaterialOrders] = useState(initialMaterialOrders);
@@ -615,9 +615,8 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     {message && <div className="notice">{message.text}</div>}
 
     <div className="projectSiteGrid">
-      {(canManage || accessRole === "works_manager") && <section className="projectSiteCard">
+      {canManage && <section className="projectSiteCard">
         <div className="projectCardHead"><div><p className="projectEyebrow">SALAIRE</p><h2>Salaire employés</h2></div><span>{money(salaryTotal)}</span></div>
-        {!canManage && <p className="projectHint">Lecture seule : seul l’administrateur peut modifier les taux ou marquer un paiement.</p>}
         <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px", flexWrap: "wrap" }}>
           <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: ".85rem", fontWeight: 600 }}>Période
             <input type="month" value={periodMonth} max={nowMonthKey} onChange={(event) => setPeriodMonth(event.target.value || nowMonthKey)} />
@@ -653,9 +652,9 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
         </div>) : <p className="projectEmptyText">Aucun achat payé.</p>}</div>
       </section>}
 
-      {(canManage || accessRole === "works_manager") && <section className="projectSiteCard">
+      {canManage && <section className="projectSiteCard">
         <div className="projectCardHead"><div><p className="projectEyebrow">IMPRÉVU</p><h2>Dépenses imprévues</h2></div></div>
-        <p className="projectHint">Cadeaux ou toute dépense hors matériau/salaire. Envoyée directement au compte dépense générale après confirmation.{!canManage ? " Lecture seule." : ""}</p>
+        <p className="projectHint">Cadeaux ou toute dépense hors matériau/salaire. Envoyée directement au compte dépense générale après confirmation.</p>
         {canManage && (addingMisc ? <>
           <div className="projectMaterialForm">
             <input placeholder="Nom du bénéficiaire ou organisme" value={miscDraft.recipient} onChange={(event) => setMiscDraft((draft) => ({ ...draft, recipient: event.target.value }))} />
@@ -683,7 +682,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
         <span className="chipName">{row.date ? dateFmt.format(new Date(row.date)) : "—"} · {row.label}</span>
         <span className="chipQty" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
           {row.qty} · {money(row.amount)}
-          {canManage && revealedRowKey === row.key && <button type="button" className="projectRejectButton" style={{ padding: "4px 8px", fontSize: ".7rem" }} onClick={(event) => { event.stopPropagation(); setConfirmingDelete({ type: row.type, id: row.id, label: row.label }); }}>Supprimer</button>}
+          {canDelete && revealedRowKey === row.key && <button type="button" className="projectRejectButton" style={{ padding: "4px 8px", fontSize: ".7rem" }} onClick={(event) => { event.stopPropagation(); setConfirmingDelete({ type: row.type, id: row.id, label: row.label }); }}>Supprimer</button>}
         </span>
       </div>) : <p className="projectEmptyText">Aucune dépense enregistrée pour l’instant.</p>}</div>
       <div className="projectStockSummaryList" style={{ marginTop: "10px" }}>

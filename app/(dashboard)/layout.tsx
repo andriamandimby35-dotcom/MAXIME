@@ -30,10 +30,12 @@ export default async function DashboardLayout({
     .maybeSingle();
   const isAdmin = Boolean(member?.active && ["owner", "admin"].includes(member.role));
 
-  // Le conducteur de travaux a, en plus de "Chantier", un accès en
-  // lecture seule aux dépenses (et à la dépense matériaux) de ses chantiers.
-  // S'il n'a qu'un seul chantier, "Dépense" l'y emmène directement ; sinon,
-  // il choisit d'abord lequel (comme "Chantier").
+  // Le conducteur de travaux a, en plus de "Chantier", accès au menu Dépense
+  // complet (comme l'administrateur, sans les suppressions) : il est affiché
+  // en onglet directement sur la page "Chantier" (voir
+  // app/(dashboard)/projects/[id]/page.tsx), donc plus besoin d'un second
+  // lien "Dépense" dans le menu de gauche — il menait de toute façon à la
+  // même page.
   const { data: worksManagerAssignments } = isAdmin
     ? { data: [] }
     : await supabase
@@ -43,13 +45,6 @@ export default async function DashboardLayout({
         .eq("role", "works_manager")
         .eq("active", true);
   const isWorksManager = !isAdmin && Boolean(worksManagerAssignments?.length);
-  // Le menu Dépense complet (comme l'administrateur, sans les suppressions)
-  // est maintenant affiché en onglet directement sur la page "Chantier" de
-  // ce chantier (voir app/(dashboard)/projects/[id]/page.tsx) : ce lien y
-  // renvoie avec ?tab=expenses pour l'ouvrir directement sur cet onglet.
-  const expensesHref = worksManagerAssignments && worksManagerAssignments.length === 1
-    ? `/projects/${worksManagerAssignments[0].project_id}?tab=expenses`
-    : "/expenses";
 
 
 
@@ -136,14 +131,6 @@ export default async function DashboardLayout({
           <Link href="/projects">
             Chantier
           </Link>
-
-          {/* Lien HTML natif (pas <Link>) : signalé comme ne réagissant plus
-              au clic une fois sur "Chantier" — un vrai lien force toujours
-              un rechargement complet de la page, donc il ne peut pas rester
-              bloqué comme la navigation interne de Next.js. */}
-          <a href={expensesHref}>
-            Dépense
-          </a>
 
           </> : <Link href="/projects">
             Mes chantiers
