@@ -83,6 +83,33 @@ export default async function ProjectPage({
   const ownAssignment = enrichedAssignments.find((assignment: any) => assignment.user_id === user.id && assignment.active);
   const accessRole = (isAdmin ? "admin" : (ownAssignment?.role ?? "viewer")) as "admin" | "works_manager" | "site_manager" | "viewer";
 
+  // Chantier clôturé (voir le bouton "Clôture chantier" dans Dépense, réservé
+  // à l'administrateur) : le terrain n'y a plus accès pendant la clôture.
+  // L'administrateur, lui, continue de voir la page normalement (et peut
+  // rouvrir le chantier depuis la liste des chantiers, voir ProjectCard.tsx).
+  if (project.closed_at && accessRole === "site_manager") {
+    return (
+      <div style={{ position: "fixed", inset: 0, background: "rgba(163,59,62,.55)", backdropFilter: "blur(2px)", zIndex: 999, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ background: "#fff", borderRadius: 16, padding: "30px 32px", maxWidth: 420, textAlign: "center", boxShadow: "0 20px 60px rgba(0,0,0,.3)" }}>
+          <p style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 800, letterSpacing: ".08em", color: "#a33b3e", textTransform: "uppercase" }}>Chantier clôturé</p>
+          <h1 style={{ margin: "0 0 10px", fontSize: 20, color: "#7a2b2d" }}>{project.name}</h1>
+          <p style={{ margin: 0, color: "#5c4342" }}>L’administrateur a clôturé ce chantier. L’accès est verrouillé jusqu’à sa réouverture.</p>
+        </div>
+      </div>
+    );
+  }
+  if (project.closed_at && accessRole === "works_manager") {
+    return (
+      <div style={{ padding: "48px 24px", display: "flex", justifyContent: "center" }}>
+        <div style={{ maxWidth: 420, width: "100%", background: "#fdeceb", border: "1px solid #eab7b6", borderRadius: 20, padding: "30px 26px", textAlign: "center" }}>
+          <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 800, letterSpacing: ".08em", color: "#a33b3e", textTransform: "uppercase" }}>Chantier</p>
+          <h1 style={{ margin: "0 0 10px", fontSize: 22, color: "#7a2b2d" }}>{project.name}</h1>
+          <p style={{ margin: 0, color: "#8a4a49", fontWeight: 700 }}>Fini</p>
+        </div>
+      </div>
+    );
+  }
+
   const siteContent = <ProjectSiteManager
     organizationId={organizationId}
     userId={user.id}

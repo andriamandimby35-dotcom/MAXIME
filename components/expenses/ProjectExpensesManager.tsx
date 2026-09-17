@@ -73,7 +73,7 @@ function paymentLabel(payment: SalaryPayment) {
 }
 
 export function ProjectExpensesManager({ project, accessRole, userId, staffMembers: initialStaffMembers, attendance: initialAttendance, materialOrders: initialMaterialOrders, salaryPayments: initialSalaryPayments, laborRates, laborRateOverrides: initialLaborRateOverrides, assignments: initialAssignments }: {
-  project: { id: string; name: string; project_code?: string | null; organization_id: string; location?: string | null };
+  project: { id: string; name: string; project_code?: string | null; organization_id: string; location?: string | null; closed_at?: string | null };
   accessRole: AccessRole;
   userId: string;
   staffMembers: StaffMember[];
@@ -100,6 +100,10 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   const [assignments, setAssignments] = useState(initialAssignments ?? []);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ kind: "info" | "success" | "error"; text: string } | null>(null);
+  // Clôture du chantier : bloque l'accès de tout le monde sauf l'administrateur
+  // (voir aussi app/(dashboard)/projects/[id]/page.tsx et ProjectCard.tsx).
+  const [closedAt, setClosedAt] = useState(project.closed_at ?? null);
+  const [confirmingClose, setConfirmingClose] = useState(false);
 
   const [viewingRates, setViewingRates] = useState(false);
   const [viewingGeneralExport, setViewingGeneralExport] = useState(false);
@@ -604,6 +608,27 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     setMessage({ kind: "success", text: "Ligne supprimée du compte dépense générale." });
   }
 
+  async function closeProject() {
+    setBusy(true);
+    setMessage(null);
+    // On met en pause uniquement les accès actifs au moment de la clôture,
+    // avec une marque distincte (paused_by_closure) pour ne réactiver que
+    // ceux-là à la réouverture — jamais un accès retiré volontairement avant.
+    const { data: activeAssignments, error: readError } = await supabase.from("project_assignments").select("id").eq("project_id", project.id).eq("active", true);
+    if (readError) { setBusy(false); setMessage({ kind: "error", text: `Clôture impossible : ${readError.message}` }); return; }
+    if (activeAssignments?.length) {
+      const { error: pauseError } = await supabase.from("project_assignments").update({ active: false, paused_by_closure: true }).in("id", activeAssignments.map((row) => row.id));
+      if (pauseError) { setBusy(false); setMessage({ kind: "error", text: `Clôture impossible : ${pauseError.message}` }); return; }
+    }
+    const now = new Date().toISOString();
+    const { error } = await supabase.from("projects").update({ closed_at: now, closed_by: userId }).eq("id", project.id);
+    setBusy(false);
+    if (error) { setMessage({ kind: "error", text: `Clôture impossible : ${error.message}` }); return; }
+    setClosedAt(now);
+    setConfirmingClose(false);
+    setMessage({ kind: "success", text: "Chantier clôturé : les accès conducteur, chef et équipe sont maintenant bloqués. Réouvrez-le depuis la liste des chantiers pour tout réactiver." });
+  }
+
   return <div className="projectSitePage">
     <header className="projectSiteHeader">
       <div><p className="projectEyebrow">DÉPENSES ET APPROVISIONNEMENT</p><h1>{project.name}</h1><p>{project.project_code || ""}</p></div>
@@ -696,6 +721,24 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
         <strong style={{ fontSize: "1.35rem", color: "#0b3920" }}>{money(recapTotal)}</strong>
       </div>
     </section>
+
+    {accessRole === "admin" && <section className="projectSiteCard" style={{ marginTop: "18px", borderColor: "#eab7b6" }}>
+      <div className="projectCardHead"><div><p className="projectEyebrow" style={{ color: "#a33b3e" }}>ZONE SENSIBLE</p><h2>Clôture du chantier</h2></div></div>
+      {closedAt ? <p className="projectHint">🔒 Ce chantier est clôturé depuis le {dateFmt.format(new Date(closedAt))}. Les accès conducteur, chef et équipe sont bloqués. Réouvrez-le depuis <Link href="/projects">la liste des chantiers</Link> pour tout réactiver.</p> : <>
+        <p className="projectHint">Bloque l’accès de tout le monde sauf vous (administrateur) sur ce chantier : conducteur, chef de chantier et équipe. Réversible à tout moment depuis la liste des chantiers.</p>
+        <button type="button" className="dangerButton" disabled={busy} onClick={() => setConfirmingClose(true)}>🔒 Clôture chantier</button>
+      </>}
+    </section>}
+
+    {confirmingClose && <div className="modalBackdrop" onClick={() => setConfirmingClose(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(440px,100%)" }}>
+      <h2 className="font-bold text-xl mb-4">Clôturer « {project.name} » ?</h2>
+      <p className="projectHint">Le conducteur, le(s) chef(s) de chantier et l’équipe perdront l’accès à ce chantier jusqu’à sa réouverture. Vous seul (administrateur) garderez l’accès. C’est réversible : vous pourrez rouvrir le chantier à tout moment depuis la liste des chantiers, ce qui réactivera automatiquement tous les accès qui étaient actifs.</p>
+      {message && <p className={`projectAccessStatus ${message.kind}`}>{message.text}</p>}
+      <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
+        <button type="button" className="dangerButton" disabled={busy} onClick={() => void closeProject()}>{busy ? "Clôture en cours…" : "Confirmer la clôture"}</button>
+        <button type="button" className="ghostButton" onClick={() => setConfirmingClose(false)}>Annuler</button>
+      </div>
+    </div></div>}
 
     {viewingRates && <div className="modalBackdrop" onClick={() => setViewingRates(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(520px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
       <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>Taux par poste</h2>

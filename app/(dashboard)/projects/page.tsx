@@ -1,7 +1,7 @@
-import Link from "next/link";
 import { getContext } from "@/lib/organization";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
 import { CreateProjectFlow } from "@/components/projects/CreateProjectFlow";
+import { ProjectCard } from "@/components/projects/ProjectCard";
 
 export default async function ProjectsPage() {
   const { supabase, organizationId, memberRole, user } = await getContext();
@@ -9,12 +9,15 @@ export default async function ProjectsPage() {
   const { data: projects } = organizationId
     ? await supabase.from("projects").select("*").eq("organization_id", organizationId).order("created_at", { ascending: false })
     : { data: [] };
-  // Un conducteur ou chef de chantier ne voit que les chantiers où il a un
-  // accès actif — jamais l'ensemble des chantiers de l'entreprise.
+  // Un conducteur ou chef de chantier ne voit que les chantiers où il a (ou
+  // avait) un accès actif — jamais l'ensemble des chantiers de l'entreprise.
+  // Un accès seulement mis en pause par une clôture (paused_by_closure)
+  // compte aussi : la personne doit continuer à voir la carte, désormais
+  // rouge, du chantier clôturé — pas la voir disparaître.
   let projectRows = projects ?? [];
   if (!isAdmin && user) {
-    const { data: assignments } = await supabase.from("project_assignments").select("project_id").eq("user_id", user.id).eq("active", true);
-    const allowedIds = new Set((assignments ?? []).map((row) => row.project_id));
+    const { data: assignments } = await supabase.from("project_assignments").select("*").eq("user_id", user.id);
+    const allowedIds = new Set((assignments ?? []).filter((row: any) => row.active || row.paused_by_closure).map((row: any) => row.project_id));
     projectRows = projectRows.filter((project: any) => allowedIds.has(project.id));
   }
   const [{ data: tasks }, { data: reports }] = await Promise.all([
@@ -37,12 +40,13 @@ export default async function ProjectsPage() {
         const projectTasks = (tasks ?? []).filter((task: any) => task.project_id === project.id);
         const completed = projectTasks.filter((task: any) => task.status === "completed").length;
         const projectReports = (reports ?? []).filter((report: any) => report.project_id === project.id).length;
-        const location = project.location || "Localisation à confirmer";
-        return <Link key={project.id} href={`/projects/${project.id}`} className="projectDirectoryCard">
-          <span className="projectCardLabel">CHANTIER</span><h2>{project.name}</h2><p className="projectCardLocation">{location}</p>
-          <div className="projectCardMetrics"><span><strong>{Number(project.progress_percent ?? 0)} %</strong> avancement</span><span><strong>{completed}/{projectTasks.length}</strong> tâche(s)</span><span><strong>{projectReports}</strong> rapport(s)</span></div>
-          <span className="projectOpenButton">Ouvrir le chantier →</span>
-        </Link>;
+        return <ProjectCard
+          key={project.id}
+          project={project}
+          taskStats={{ completed, total: projectTasks.length }}
+          reportsCount={projectReports}
+          isAdmin={isAdmin}
+        />;
       })}
     </section>}
   </main>;

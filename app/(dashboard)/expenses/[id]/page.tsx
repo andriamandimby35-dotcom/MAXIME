@@ -10,7 +10,7 @@ export default async function ProjectExpensesPage({ params }: { params: Promise<
   const { supabase, organizationId, user, memberRole } = await getContext();
   if (!organizationId || !user) notFound();
 
-  const { data: project } = await supabase.from("projects").select("id, name, project_code, location, source_tender_id, organization_id").eq("id", id).eq("organization_id", organizationId).maybeSingle();
+  const { data: project } = await supabase.from("projects").select("id, name, project_code, location, source_tender_id, organization_id, closed_at").eq("id", id).eq("organization_id", organizationId).maybeSingle();
   if (!project) notFound();
 
   const isAdmin = memberRole === "admin" || memberRole === "owner";
