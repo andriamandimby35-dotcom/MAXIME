@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 
-type StaffMember = { id: string; project_id: string; full_name: string; role_name?: string | null; active?: boolean; mvola_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean };
+type StaffMember = { id: string; project_id: string; full_name: string; role_name?: string | null; active?: boolean; mvola_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; created_at?: string | null };
 type Attendance = { id: string; staff_member_id: string; report_date: string; present: boolean };
 type ConductorAssignment = { id: string; user_id: string; role: string; active?: boolean; displayName?: string | null; phone_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; created_at?: string };
 type MaterialOrder = {
@@ -31,6 +31,11 @@ type SalaryRow = {
   daysWorked: number;
   amount: number;
   alreadyPaid: boolean;
+  // Pour le récapitulatif d'export : depuis quand la personne est comptée
+  // (arrivée sur le chantier ou début de période, le plus tardif des deux)
+  // et combien de jours ouvrés du chantier elle a manqués sur cette période.
+  trackedDays: number;
+  absenceDays: number;
 };
 
 const number = (value: unknown) => Number(value) || 0;
@@ -68,7 +73,7 @@ function paymentLabel(payment: SalaryPayment) {
 }
 
 export function ProjectExpensesManager({ project, accessRole, userId, staffMembers: initialStaffMembers, attendance: initialAttendance, materialOrders: initialMaterialOrders, salaryPayments: initialSalaryPayments, laborRates, laborRateOverrides: initialLaborRateOverrides, assignments: initialAssignments }: {
-  project: { id: string; name: string; project_code?: string | null; organization_id: string };
+  project: { id: string; name: string; project_code?: string | null; organization_id: string; location?: string | null };
   accessRole: AccessRole;
   userId: string;
   staffMembers: StaffMember[];
@@ -97,6 +102,8 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   const [message, setMessage] = useState<{ kind: "info" | "success" | "error"; text: string } | null>(null);
 
   const [viewingRates, setViewingRates] = useState(false);
+  const [viewingGeneralExport, setViewingGeneralExport] = useState(false);
+  const [exportGeneratedAt, setExportGeneratedAt] = useState<string | null>(null);
   const [rateDrafts, setRateDrafts] = useState<Record<string, { daily: string; monthly: string }>>({});
   const [viewingSalaryHistory, setViewingSalaryHistory] = useState(false);
   const [viewingSalaryDetail, setViewingSalaryDetail] = useState<SalaryPayment | null>(null);
@@ -106,6 +113,20 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   const [revealedRowKey, setRevealedRowKey] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState<{ type: "salary" | "order"; id: string; label: string } | null>(null);
 
+  // Un clic sur une ligne du compte dépense générale révèle un petit bouton
+  // "Supprimer" ; un clic en dehors de cette ligne le referme sans rien
+  // supprimer (au lieu d'un bouton toujours visible).
+  useEffect(() => {
+    if (!revealedRowKey) return;
+    function handleClickOutside(event: MouseEvent) {
+      const target = event.target as HTMLElement | null;
+      if (target && target.closest("[data-revealable]")) return;
+      setRevealedRowKey(null);
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [revealedRowKey]);
+
   const nowMonthKey = new Date().toISOString().slice(0, 7);
   const [periodMonth, setPeriodMonth] = useState(nowMonthKey);
   const [viewingEmployeeDetail, setViewingEmployeeDetail] = useState<SalaryRow | null>(null);
@@ -113,6 +134,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   const [viewingMvolaConfirm, setViewingMvolaConfirm] = useState(false);
   const [viewingExport, setViewingExport] = useState(false);
   const [confirmingCashPay, setConfirmingCashPay] = useState<{ row: SalaryRow; method: "cash" | "other" } | null>(null);
+  const [resumeExportAfterCashPay, setResumeExportAfterCashPay] = useState(false);
 
   // Toute la page doit refléter en direct ce que fait un autre poste
   // (nouvel achat, salaire payé ailleurs, présence cochée, employé ajouté),
@@ -332,16 +354,31 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
       payment.project_salary_payment_lines.some((line) => kind === "staff" ? line.staff_member_id === id : line.assignment_id === id));
   }
 
+  // Jours suivis sur le chantier pendant la période : chaque date où au
+  // moins une présence a été pointée (par n'importe qui). Sert à calculer
+  // les absences d'un ouvrier sans compter les jours où le chantier
+  // lui-même n'a rien enregistré (dimanche, jour férié, etc.).
+  const trackedDatesInPeriod = Array.from(new Set(
+    attendance.filter((item) => item.report_date >= periodStart && item.report_date <= periodEnd).map((item) => item.report_date),
+  )).sort();
+
   // Un ouvrier n'a de jour "travaillé" que s'il a été pointé présent ; un
   // conducteur/chef est considéré présent chaque jour de sa mission active,
   // comme pour la Présence du jour de l'Espace chantier (pas de pointage).
   const staffRows: SalaryRow[] = staffMembers.filter((staff) => staff.active !== false).map((staff) => {
+    const joinedAt = staff.created_at ? staff.created_at.slice(0, 10) : periodStart;
+    const effectiveStart = joinedAt > periodStart ? joinedAt : periodStart;
     const daysWorked = attendance.filter((item) => item.staff_member_id === staff.id && item.present && item.report_date >= periodStart && item.report_date <= periodEnd).length;
+    // Jours où le chantier a pointé quelqu'un, depuis l'arrivée de cette
+    // personne : ce sont les jours où elle était censée être présente.
+    const trackedDays = trackedDatesInPeriod.filter((date) => date >= effectiveStart).length;
+    const absenceDays = Math.max(0, trackedDays - daysWorked);
     const dailyRate = matchLaborRate(staff.role_name || "");
     return {
       key: `staff-${staff.id}`, kind: "staff" as const, refId: staff.id, name: staff.full_name, roleName: staff.role_name || "Ouvrier",
       phone: staff.mvola_number || null, mvolaEnabled: Boolean(staff.mvola_enabled && staff.mvola_number), callEnabled: Boolean(staff.call_enabled && staff.mvola_number),
       dailyRate, daysWorked, amount: dailyRate ? dailyRate * daysWorked : 0, alreadyPaid: isPaidThisPeriod("staff", staff.id),
+      trackedDays, absenceDays,
     };
   });
   const assignmentRows: SalaryRow[] = assignments.map((assignment) => {
@@ -354,6 +391,9 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
       key: `assignment-${assignment.id}`, kind: "assignment" as const, refId: assignment.id, name: assignment.displayName || roleName, roleName,
       phone: assignment.phone_number || null, mvolaEnabled: Boolean(assignment.mvola_enabled && assignment.phone_number), callEnabled: Boolean(assignment.call_enabled && assignment.phone_number),
       dailyRate, daysWorked, amount: dailyRate ? dailyRate * daysWorked : 0, alreadyPaid: isPaidThisPeriod("assignment", assignment.id),
+      // Pas de pointage journalier pour le conducteur/chef : il est compté
+      // présent chaque jour de sa mission, donc jamais "absent" ici.
+      trackedDays: daysWorked, absenceDays: 0,
     };
   });
   const salaryRows: SalaryRow[] = [...assignmentRows, ...staffRows];
@@ -375,6 +415,9 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   const pendingOrders = activeOrders.filter((order) => ["draft", "requested", "submitted", "approved", "covered_by_stock"].includes(order.status));
   const paidOrders = activeOrders.filter((order) => order.status === "paid");
   const activeSalaryPayments = salaryPayments.filter((payment) => !payment.deleted_at);
+  // Trace de suppression : un paiement supprimé reste visible dans
+  // l'historique (avec la date de suppression) au lieu de disparaître.
+  const allSalaryPaymentsSorted = [...salaryPayments].sort((a, b) => b.paid_at.localeCompare(a.paid_at));
 
   // Un même matériau peut être acheté plusieurs fois (plusieurs lignes dans
   // Dépenses effectuées) : ici on les combine par matériau pour n'avoir
@@ -392,15 +435,26 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, "fr"));
   })();
 
-  type RecapRow = { key: string; type: "salary" | "order"; id: string; date: string; label: string; qty: string; amount: number };
+  type RecapCategory = "salaire" | "materiaux" | "transport" | "autre";
+  type RecapRow = { key: string; type: "salary" | "order"; id: string; date: string; label: string; qty: string; amount: number; category: RecapCategory };
+  function orderCategory(order: MaterialOrder): RecapCategory {
+    if (order.expense_kind === "transport") return "transport";
+    if (order.expense_kind === "other") return "autre";
+    return "materiaux";
+  }
   const recapRows: RecapRow[] = [
     ...activeSalaryPayments.map((payment) => {
       const totalDays = payment.project_salary_payment_lines.reduce((sum, line) => sum + number(line.days_worked), 0);
-      return { key: `salary-${payment.id}`, type: "salary" as const, id: payment.id, date: payment.paid_at, label: paymentLabel(payment), qty: `${totalDays} j-personne`, amount: number(payment.total_amount) };
+      return { key: `salary-${payment.id}`, type: "salary" as const, id: payment.id, date: payment.paid_at, label: paymentLabel(payment), qty: `${totalDays} j-personne`, amount: number(payment.total_amount), category: "salaire" as const };
     }),
-    ...paidOrders.map((order) => ({ key: `order-${order.id}`, type: "order" as const, id: order.id, date: order.paid_at || order.submitted_at || "", label: orderLabel(order), qty: `${number(order.quantity)} ${order.unit || ""}`.trim(), amount: orderTotal(order) })),
+    ...paidOrders.map((order) => ({ key: `order-${order.id}`, type: "order" as const, id: order.id, date: order.paid_at || order.submitted_at || "", label: orderLabel(order), qty: `${number(order.quantity)} ${order.unit || ""}`.trim(), amount: orderTotal(order), category: orderCategory(order) })),
   ].sort((a, b) => b.date.localeCompare(a.date));
   const recapTotal = recapRows.reduce((sum, row) => sum + row.amount, 0);
+  // Très important pour l'administrateur : voir combien part dans chaque
+  // catégorie avant le total général (matériaux, transport, salaire, autre).
+  const categoryTotals: Record<RecapCategory, number> = { materiaux: 0, transport: 0, salaire: 0, autre: 0 };
+  for (const row of recapRows) categoryTotals[row.category] += row.amount;
+  const categoryLabels: Record<RecapCategory, string> = { materiaux: "Matériaux", transport: "Transport", salaire: "Salaire", autre: "Autre" };
 
   async function insertSalaryPayment(rows: SalaryRow[], options: { paymentMethod: "mvola" | "cash" | "other" | null; isAdvance?: boolean; advanceNote?: string }) {
     const total = rows.reduce((sum, row) => sum + row.amount, 0);
@@ -443,9 +497,19 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     setMessage({ kind: "success", text: `Paiement Mvola de ${mvolaPayable.length} personne(s) envoyé au compte dépense générale.` });
   }
 
+  // Deux fenêtres ne doivent jamais s'afficher en même temps (elles se
+  // superposaient sans qu'on puisse dire laquelle était devant) : si la
+  // demande de paiement espèces/autre part de l'aperçu export, on referme
+  // l'aperçu pendant la confirmation, puis on le rouvre ensuite.
   function requestCashPayment(row: SalaryRow) {
     if (!canManage || row.alreadyPaid || row.daysWorked === 0) return;
+    if (viewingExport) { setViewingExport(false); setResumeExportAfterCashPay(true); }
     setConfirmingCashPay({ row, method: "cash" });
+  }
+
+  function closeCashPayModal() {
+    setConfirmingCashPay(null);
+    if (resumeExportAfterCashPay) { setResumeExportAfterCashPay(false); setViewingExport(true); }
   }
 
   async function confirmCashPayment() {
@@ -455,7 +519,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     setBusy(false);
     if (error) { setMessage({ kind: "error", text: `Paiement non enregistré : ${error.message}` }); return; }
     setMessage({ kind: "success", text: `Paiement de ${confirmingCashPay.row.name} enregistré et envoyé au compte dépense générale.` });
-    setConfirmingCashPay(null);
+    closeCashPayModal();
   }
 
   async function submitAdvance() {
@@ -543,7 +607,10 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   return <div className="projectSitePage">
     <header className="projectSiteHeader">
       <div><p className="projectEyebrow">DÉPENSES ET APPROVISIONNEMENT</p><h1>{project.name}</h1><p>{project.project_code || ""}</p></div>
-      <div className="projectHeaderActions"><Link className="projectBackLink" href="/expenses">← Retour aux dépenses</Link></div>
+      <div className="projectHeaderActions">
+        {canManage && <button type="button" className="dangerButton" onClick={() => { setExportGeneratedAt(new Date().toISOString()); setViewingGeneralExport(true); }}>📄 Exporter résumé dépense</button>}
+        <Link className="projectBackLink" href="/expenses">← Retour aux dépenses</Link>
+      </div>
     </header>
     {message && <div className="notice">{message.text}</div>}
 
@@ -611,13 +678,19 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     <section className="projectSiteCard expenseRecap" style={{ marginTop: "18px" }}>
       <div className="projectCardHead"><div><p className="projectEyebrow">RÉCAPITULATIF GÉNÉRAL</p><h2>Compte dépense générale</h2></div><span>{money(recapTotal)}</span></div>
       <p className="projectHint">Ne liste que ce qui est déjà payé (salaires, acomptes, achats, transport, imprévus). Cliquez une ligne pour la supprimer.</p>
-      <div className="projectStockSummaryList" style={{ maxHeight: "420px" }}>{recapRows.length ? recapRows.map((row) => <div key={row.key} style={{ cursor: "pointer" }} onClick={() => setRevealedRowKey((current) => current === row.key ? null : row.key)}>
+      <div className="projectStockSummaryList" style={{ maxHeight: "420px" }}>{recapRows.length ? recapRows.map((row) => <div key={row.key} data-revealable style={{ cursor: "pointer" }} onClick={() => setRevealedRowKey((current) => current === row.key ? null : row.key)}>
         <span className="chipName">{row.date ? dateFmt.format(new Date(row.date)) : "—"} · {row.label}</span>
         <span className="chipQty" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
           {row.qty} · {money(row.amount)}
           {canManage && revealedRowKey === row.key && <button type="button" className="projectRejectButton" style={{ padding: "4px 8px", fontSize: ".7rem" }} onClick={(event) => { event.stopPropagation(); setConfirmingDelete({ type: row.type, id: row.id, label: row.label }); }}>Supprimer</button>}
         </span>
       </div>) : <p className="projectEmptyText">Aucune dépense enregistrée pour l’instant.</p>}</div>
+      <div className="projectStockSummaryList" style={{ marginTop: "10px" }}>
+        {(Object.keys(categoryLabels) as RecapCategory[]).map((category) => <div key={category}>
+          <span className="chipName">Sous-total {categoryLabels[category]}</span>
+          <span className="chipQty">{money(categoryTotals[category])}</span>
+        </div>)}
+      </div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "12px", paddingTop: "12px", borderTop: "2px solid #145b35" }}>
         <strong style={{ fontSize: "1rem" }}>TOTAL GÉNÉRAL DES DÉPENSES</strong>
         <strong style={{ fontSize: "1.35rem", color: "#0b3920" }}>{money(recapTotal)}</strong>
@@ -652,13 +725,13 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
       </div>
     </div></div>}
 
-    {confirmingCashPay && <div className="modalBackdrop" onClick={() => setConfirmingCashPay(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
+    {confirmingCashPay && <div className="modalBackdrop" onClick={closeCashPayModal}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
       <h2 className="font-bold text-xl mb-4">Confirmer le paiement</h2>
       <p className="projectHint">{confirmingCashPay.row.name} — {money(confirmingCashPay.row.amount)}. Ce paiement sera comptabilisé immédiatement dans le compte dépense générale.</p>
       <label>Mode de paiement<select value={confirmingCashPay.method} onChange={(event) => setConfirmingCashPay((current) => current ? { ...current, method: event.target.value as "cash" | "other" } : current)}><option value="cash">Espèces</option><option value="other">Autre</option></select></label>
       <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
         <button type="button" disabled={busy} onClick={() => void confirmCashPayment()}>Valider</button>
-        <button type="button" className="ghostButton" onClick={() => setConfirmingCashPay(null)}>Annuler</button>
+        <button type="button" className="ghostButton" onClick={closeCashPayModal}>Annuler</button>
       </div>
     </div></div>}
 
@@ -714,8 +787,9 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
 
     {viewingSalaryHistory && <div className="modalBackdrop" onClick={() => setViewingSalaryHistory(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
       <h2 className="font-bold text-xl mb-4" style={{ flex: "0 0 auto" }}>Historique des paiements de salaire</h2>
-      <div className="projectStockSummaryList" style={{ flex: "1 1 auto", minHeight: 0, maxHeight: "none" }}>{activeSalaryPayments.length ? activeSalaryPayments.map((payment) => <div key={payment.id} style={{ cursor: "pointer" }} onClick={() => setViewingSalaryDetail(payment)}>
-        <span className="chipName">{dateFmt.format(new Date(payment.paid_at))} · {paymentLabel(payment)}</span><span className="chipQty">{money(number(payment.total_amount))}</span>
+      <p className="projectHint" style={{ flex: "0 0 auto" }}>Les paiements supprimés restent visibles ici, avec la date de suppression, pour garder une trace.</p>
+      <div className="projectStockSummaryList" style={{ flex: "1 1 auto", minHeight: 0, maxHeight: "none" }}>{allSalaryPaymentsSorted.length ? allSalaryPaymentsSorted.map((payment) => <div key={payment.id} style={{ cursor: payment.deleted_at ? "default" : "pointer", opacity: payment.deleted_at ? 0.6 : 1 }} onClick={() => !payment.deleted_at && setViewingSalaryDetail(payment)}>
+        <span className="chipName">{dateFmt.format(new Date(payment.paid_at))} · {paymentLabel(payment)}{payment.deleted_at ? ` · Supprimé le ${dateFmt.format(new Date(payment.deleted_at))}` : ""}</span><span className="chipQty">{money(number(payment.total_amount))}</span>
       </div>) : <p className="projectEmptyText">Aucun paiement pour l’instant.</p>}</div>
       <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingSalaryHistory(false)}>Fermer</button>
     </div></div>}
@@ -743,6 +817,55 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
       <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
         <button type="button" className="projectRejectButton" disabled={busy} onClick={() => void confirmDeleteRow()}>Supprimer</button>
         <button type="button" className="ghostButton" onClick={() => setConfirmingDelete(null)}>Annuler</button>
+      </div>
+    </div></div>}
+
+    {viewingGeneralExport && <div className="modalBackdrop" onClick={() => setViewingGeneralExport(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(760px,100%)", display: "flex", flexDirection: "column", maxHeight: "90vh" }}>
+      <div className="printableExport" style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", paddingRight: "4px" }}>
+        <h2 className="font-bold text-xl mb-1">Résumé dépense — {project.name}</h2>
+        <p className="projectHint">{project.location || "Localisation à confirmer"}{project.project_code ? ` · ${project.project_code}` : ""} · Période : {periodMonth} · Généré le {exportGeneratedAt ? new Intl.DateTimeFormat("fr-FR", { dateStyle: "long", timeStyle: "short" }).format(new Date(exportGeneratedAt)) : ""}</p>
+
+        <h3 style={{ marginTop: "16px" }}>Conducteur et chef(s) de chantier</h3>
+        <div className="projectStockSummaryList">{assignmentRows.length ? assignmentRows.map((row) => <div key={row.key}>
+          <span className="chipName">{row.roleName} — {row.name}</span>
+          <span className="chipQty">{row.daysWorked} j sur la période</span>
+        </div>) : <p className="projectEmptyText">Aucun conducteur ni chef de chantier actif.</p>}</div>
+
+        <h3 style={{ marginTop: "16px" }}>Ouvriers, manœuvres et autres présents</h3>
+        <div className="projectStockSummaryList">{staffRows.length ? staffRows.map((row) => <div key={row.key}>
+          <span className="chipName">{row.name} <small style={{ color: "#8a5b08" }}>{row.roleName}</small></span>
+          <span className="chipQty">{row.trackedDays === 0 ? "Aucun jour suivi" : row.absenceDays === 0 ? `Présent du début à la fin (${row.daysWorked} j)` : `${row.daysWorked} j présent · ${row.absenceDays} j d’absence`}</span>
+        </div>) : <p className="projectEmptyText">Aucun ouvrier déclaré.</p>}</div>
+
+        <h3 style={{ marginTop: "16px" }}>Détail des dépenses payées</h3>
+        <div className="projectStockSummaryList">{recapRows.length ? recapRows.map((row) => <div key={row.key}>
+          <span className="chipName">{row.date ? dateFmt.format(new Date(row.date)) : "—"} · {row.label}</span>
+          <span className="chipQty">{row.qty} · {money(row.amount)}</span>
+        </div>) : <p className="projectEmptyText">Aucune dépense enregistrée.</p>}</div>
+
+        <h3 style={{ marginTop: "16px" }}>Matériaux (quantités déjà achetées/utilisées)</h3>
+        <div className="projectStockSummaryList">{materialUsageTotals.length ? materialUsageTotals.map((item) => <div key={item.key}>
+          <span className="chipName">{item.name}</span><span className="chipQty">{item.quantity} {item.unit}</span>
+        </div>) : <p className="projectEmptyText">Aucun matériau acheté.</p>}</div>
+
+        <h3 style={{ marginTop: "16px" }}>Sous-totaux par catégorie</h3>
+        <div className="projectStockSummaryList">
+          {(Object.keys(categoryLabels) as RecapCategory[]).map((category) => <div key={category}>
+            <span className="chipName">Sous-total {categoryLabels[category]}</span>
+            <span className="chipQty">{money(categoryTotals[category])}</span>
+          </div>)}
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "16px", paddingTop: "12px", borderTop: "2px solid #145b35" }}>
+          <strong style={{ fontSize: "1rem" }}>TOTAL GÉNÉRAL DES DÉPENSES</strong>
+          <strong style={{ fontSize: "1.35rem", color: "#0b3920" }}>{money(recapTotal)}</strong>
+        </div>
+      </div>
+      <div className="noPrint" style={{ display: "flex", gap: "10px", marginTop: "14px", flex: "0 0 auto", flexWrap: "wrap" }}>
+        <button type="button" className="secondary" onClick={() => setExportGeneratedAt(new Date().toISOString())}>Nouvel export</button>
+        <button type="button" onClick={() => window.print()}>Enregistrer sous (PDF)</button>
+        <button type="button" className="secondary" onClick={() => window.print()}>Imprimer</button>
+        <button type="button" className="ghostButton" onClick={() => setViewingGeneralExport(false)}>Fermer</button>
       </div>
     </div></div>}
   </div>;

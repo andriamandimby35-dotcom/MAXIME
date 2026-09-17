@@ -12,7 +12,7 @@ type Task = { id: string; project_id: string; title: string; status: string; pla
 type Report = { id: string; project_id: string; report_date: string; weather?: string | null; workers_present: number | string; completed_work?: string | null; next_day_plan?: string | null; issues?: string | null; created_by?: string | null; created_at?: string };
 type Material = { id: string; project_id: string; designation: string; unit: string; planned_quantity: number | string; on_site_quantity: number | string; required_tomorrow: number | string; required_week: number | string; minimum_stock: number | string; notes?: string | null; created_by?: string | null; created_at?: string };
 type StockMovement = { id: string; project_id: string; material_id?: string | null; movement_type: string; quantity: number | string; movement_date: string; notes?: string | null; created_by?: string | null; created_at: string };
-type SitePhoto = { id: string; project_id: string; report_id?: string | null; task_id?: string | null; storage_path: string; caption?: string | null; photo_type: string; captured_at: string; created_by?: string | null; created_at: string };
+type SitePhoto = { id: string; project_id: string; report_id?: string | null; task_id?: string | null; storage_path: string; caption?: string | null; photo_type: string; captured_at: string; created_by?: string | null; created_at: string; deleted_at?: string | null };
 type AiSuggestion = { id: string; project_id: string; suggestion_type: string; title: string; content: string; confidence?: number | string | null; status: string; user_response?: string | null; created_by?: string | null; created_at: string };
 type NoteReadEntry = { user_id: string; read_at: string };
 type RecordNote = { id: string; project_id: string; entity_type: string; entity_id: string; severity: "info" | "review" | "urgent" | string; title: string; content: string; created_at: string; created_by?: string | null; read_by?: NoteReadEntry[] | null; reply_content?: string | null; reply_severity?: "urgent" | "review" | "confirmation" | string | null; replied_by?: string | null; replied_at?: string | null; reply_read_by?: NoteReadEntry[] | null };
@@ -47,10 +47,10 @@ type QueuedPurchasePayload = {
   transportPrice: number | null;
 };
 type ProjectAccessRole = "admin" | "works_manager" | "site_manager" | "viewer";
-type Assignment = { id: string; user_id: string; role: string; active: boolean; permissions?: Record<string, boolean> | null; parent_assignment_id?: string | null; created_at?: string; email?: string | null; displayName?: string | null; access_password?: string | null; phone_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean };
+type Assignment = { id: string; user_id: string; role: string; active: boolean; permissions?: Record<string, boolean> | null; parent_assignment_id?: string | null; created_at?: string; email?: string | null; displayName?: string | null; access_password?: string | null; phone_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; revoked_at?: string | null };
 type Invitation = { id: string; email: string; role: string; status: string; permissions?: Record<string, boolean> | null; parent_assignment_id?: string | null; invited_by?: string | null; accepted_at?: string | null; created_at?: string };
 type MaterialOrder = { id: string; project_id: string; material_id?: string | null; material_name: string; material_key: string; unit: string; quantity: number | string; unit_price: number | string; needed_date?: string | null; needed_timing?: "now" | "tomorrow" | "week" | null; status: "draft" | "submitted" | "approved" | "covered_by_stock" | "paid" | "rejected" | "cancelled" | string; notes?: string | null; requested_by?: string | null; validated_by?: string | null; request_group_id?: string | null; submitted_at?: string | null; approved_at?: string | null; approved_quantity?: number | string | null; stock_available_at_approval?: number | string | null; quantity_to_purchase?: number | string | null; purchased_quantity?: number | string | null; purchase_photo_path?: string | null; purchase_photo_caption?: string | null; paid_at?: string | null; seen_at?: string | null; created_at?: string };
-type StaffMember = { id: string; project_id: string; full_name: string; role_name?: string | null; active?: boolean; created_at?: string; mvola_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; supervisor_assignment_id?: string | null };
+type StaffMember = { id: string; project_id: string; full_name: string; role_name?: string | null; active?: boolean; created_at?: string; mvola_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; supervisor_assignment_id?: string | null; deleted_at?: string | null };
 type DailyAttendance = { id: string; project_id: string; staff_member_id: string; report_date: string; present: boolean; recorded_by?: string | null; created_at?: string };
 type ReportMaterialUsage = { id: string; project_id: string; report_id: string; material_id: string; quantity: number | string; unit: string; created_at?: string };
 
@@ -92,10 +92,24 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   const [pendingSync, setPendingSync] = useState<PendingSync[]>([]);
   const [editingInvitation, setEditingInvitation] = useState<Invitation | null>(null);
   const [editingInvitationEmail, setEditingInvitationEmail] = useState("");
-  const [createRole, setCreateRole] = useState("works_manager");
+  const [createRole, setCreateRole] = useState(accessRole === "admin" ? "works_manager" : "site_manager");
   const [createParentAssignmentId, setCreateParentAssignmentId] = useState("");
-  const [expandedRoster, setExpandedRoster] = useState<{ conductors: boolean; siteManagers: boolean }>({ conductors: true, siteManagers: true });
+  const [expandedRoster, setExpandedRoster] = useState<{ conductors: boolean; siteManagers: boolean; removed: boolean; removedStaff: boolean }>({ conductors: true, siteManagers: true, removed: false, removedStaff: false });
   const [viewingAssignment, setViewingAssignment] = useState<Assignment | null>(null);
+  // Suppression/retrait par simple clic sur la ligne, au lieu d'un bouton
+  // toujours visible : un clic révèle un petit bouton d'action (Retirer,
+  // Supprimer…), un clic en dehors le referme sans rien faire.
+  const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!revealedKey) return;
+    function handleClickOutside(event: MouseEvent) {
+      const target = event.target as HTMLElement | null;
+      if (target && target.closest("[data-revealable]")) return;
+      setRevealedKey(null);
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [revealedKey]);
   type PriceLibraryOption = { id: string; designation: string; unite: string; prix_retenu: number | string | null; prix_actuel: number | string | null; prix_ia: number | string | null; statut_prix?: string | null; ville?: string | null; fournisseur?: string | null };
   const [priceLibraryOptions, setPriceLibraryOptions] = useState<PriceLibraryOption[]>([]);
   // Demande de matériaux : petit assistant à sélection cliquée (matériau,
@@ -154,6 +168,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   const [viewingNoteDetail, setViewingNoteDetail] = useState<RecordNote | null>(null);
   const [replyDraft, setReplyDraft] = useState<{ severity: string; content: string }>({ severity: "review", content: "" });
   const [viewingAttendanceDay, setViewingAttendanceDay] = useState<string | null>(null);
+  const [viewingDeletedPhotos, setViewingDeletedPhotos] = useState(false);
   const [viewingMyRequestsHistory, setViewingMyRequestsHistory] = useState(false);
   const [viewingAdminOrdersHistory, setViewingAdminOrdersHistory] = useState(false);
   const [modalInputValue, setModalInputValue] = useState("");
@@ -167,7 +182,8 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   const projectReportMaterialUsages = reportMaterialUsages.filter((item) => item.project_id === selectedId);
   const projectAllStockMovements = stockMovements.filter((item) => item.project_id === selectedId).sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
   const projectStockMovements = projectAllStockMovements.slice(0, 5);
-  const projectPhotos = photos.filter((item) => item.project_id === selectedId).sort((a, b) => b.captured_at.localeCompare(a.captured_at));
+  const projectPhotos = photos.filter((item) => item.project_id === selectedId && !item.deleted_at).sort((a, b) => b.captured_at.localeCompare(a.captured_at));
+  const deletedProjectPhotos = photos.filter((item) => item.project_id === selectedId && item.deleted_at).sort((a, b) => (b.deleted_at || "").localeCompare(a.deleted_at || ""));
   const unassignedProjectPhotos = projectPhotos.filter((item) => !item.report_id);
   const projectSuggestions = suggestions.filter((item) => item.project_id === selectedId).slice(0, 5);
   const projectNotes = recordNotes.filter((item) => item.project_id === selectedId).slice(0, 12);
@@ -188,6 +204,9 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   };
   const projectMaterialOrders = materialOrders.filter((item) => item.project_id === selectedId).sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
   const projectStaff = staffMembers.filter((item) => item.project_id === selectedId && item.active !== false);
+  // Trace des retraits : gardée visible (avec la date) au lieu de disparaître.
+  const removedStaff = staffMembers.filter((item) => item.project_id === selectedId && item.active === false && item.deleted_at)
+    .sort((a, b) => (b.deleted_at || "").localeCompare(a.deleted_at || ""));
   const pendingInvitations = invitations.filter((item) => item.status === "pending");
   // Un accès est réellement actif lorsqu'un compte a accepté l'invitation et
   // possède une affectation projet. Les invitations seules restent « en attente ».
@@ -195,6 +214,9 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   const pendingConductors = invitations.filter((item) => item.role === "works_manager" && item.status === "pending");
   const activeSiteManagers = assignments.filter((item) => item.role === "site_manager" && item.active);
   const pendingSiteManagers = invitations.filter((item) => item.role === "site_manager" && item.status === "pending");
+  // Trace des accès retirés (conducteurs et chefs), avec la date de retrait.
+  const removedAssignments = assignments.filter((item) => !item.active && item.revoked_at)
+    .sort((a, b) => (b.revoked_at || "").localeCompare(a.revoked_at || ""));
   const projectAttendance = attendance.filter((item) => item.project_id === selectedId).sort((a, b) => b.report_date.localeCompare(a.report_date));
   const todayAttendance = projectAttendance.filter((item) => item.report_date === today);
   const isAdmin = accessRole === "admin";
@@ -872,16 +894,19 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   async function adminDeletePhoto(photo: SitePhoto) {
     if (!isAdmin) return;
     if (!online) { setMessage("Connectez-vous pour supprimer une photo."); return; }
-    if (!window.confirm("Supprimer définitivement cette photo ?")) return;
     setBusy(true);
     try {
-      await supabase.storage.from("btp-documents").remove([photo.storage_path]).catch(() => null);
-      const { error } = await supabase.from("project_photos").delete().eq("id", photo.id);
+      // La photo disparaît de la galerie mais la ligne reste en base (avec la
+      // date de suppression) pour garder une trace, comme pour les autres
+      // suppressions administrateur.
+      const deletedAt = new Date().toISOString();
+      const { error } = await supabase.from("project_photos").update({ deleted_at: deletedAt }).eq("id", photo.id);
       if (error) { setMessage(`Photo non supprimée : ${error.message}`); return; }
-      setPhotos((rows) => rows.filter((row) => row.id !== photo.id));
+      await supabase.storage.from("btp-documents").remove([photo.storage_path]).catch(() => null);
+      setPhotos((rows) => rows.map((row) => row.id === photo.id ? { ...row, deleted_at: deletedAt } : row));
       setViewingPhotoUrl(null);
       setViewingPhotoRecord(null);
-      setMessage("Photo supprimée.");
+      setMessage("Photo supprimée (trace conservée dans l’historique des photos).");
     } finally { setBusy(false); }
   }
 
@@ -946,13 +971,16 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   async function adminDeleteStaffMember(member: StaffMember) {
     if (!isAdmin) return;
     if (!online) { setMessage("Connectez-vous pour retirer un membre de l’équipe."); return; }
-    if (!window.confirm(`Retirer définitivement ${member.full_name} de l’équipe déclarée ?`)) return;
     setBusy(true);
     try {
-      const { error } = await supabase.from("project_staff_members").delete().eq("id", member.id);
+      // Retrait "doux" : la personne disparaît de l'équipe active mais la
+      // ligne reste en base (avec la date de retrait), pour garder une trace
+      // au lieu de perdre l'information — comme pour les paiements de salaire.
+      const { error } = await supabase.from("project_staff_members").update({ active: false, deleted_at: new Date().toISOString() }).eq("id", member.id);
       if (error) { setMessage(`Membre non retiré : ${error.message}`); return; }
-      setStaffMembers((rows) => rows.filter((row) => row.id !== member.id));
-      setMessage("Membre retiré de l’équipe.");
+      setStaffMembers((rows) => rows.map((row) => row.id === member.id ? { ...row, active: false, deleted_at: new Date().toISOString() } : row));
+      setRevealedKey(null);
+      setMessage("Membre retiré de l’équipe déclarée (visible dans l’historique de l’équipe).");
     } finally { setBusy(false); }
   }
 
@@ -1746,7 +1774,6 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
       setAccessFeedback({ kind: "error", text: "Le chantier est terminé : les accès sont déjà désactivés." });
       return;
     }
-    if (!window.confirm(`Retirer ${label} ? Les rapports, photos et données déjà enregistrés seront conservés.`)) return;
     setBusy(true);
     setAccessFeedback({ kind: "info", text: "Mise à jour de l’accès…" });
     try {
@@ -1760,9 +1787,11 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
         setAccessFeedback({ kind: "error", text: result.error || "Impossible de retirer l’accès." });
         return;
       }
+      const revokedAt = new Date().toISOString();
       if (payload.invitationId) setInvitations((rows) => rows.filter((item) => item.id !== payload.invitationId));
-      if (payload.assignmentId) setAssignments((rows) => rows.map((item) => item.id === payload.assignmentId ? { ...item, active: false } : item));
-      setAccessFeedback({ kind: "success", text: "Accès retiré. Les données déjà enregistrées sont conservées." });
+      if (payload.assignmentId) setAssignments((rows) => rows.map((item) => item.id === payload.assignmentId ? { ...item, active: false, revoked_at: revokedAt } : item));
+      setRevealedKey(null);
+      setAccessFeedback({ kind: "success", text: `${label} retiré. Les données déjà enregistrées sont conservées.` });
     } catch {
       setAccessFeedback({ kind: "error", text: "Impossible de retirer l’accès pour le moment." });
     } finally { setBusy(false); }
@@ -1795,21 +1824,46 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
             <button type="button" role="tab" aria-selected={teamView === "create"} className={teamView === "create" ? "isSelected" : ""} onClick={() => setTeamView("create")}>Créer un accès</button>
             <button type="button" role="tab" aria-selected={teamView === "team"} className={teamView === "team" ? "isSelected" : ""} onClick={() => setTeamView("team")}>Équipe <span>{activeConductors.length + pendingConductors.length + activeSiteManagers.length + pendingSiteManagers.length + projectStaff.length}</span></button>
           </div>
-          {teamView === "create" ? <form className="projectAccessForm" onSubmit={(event) => void inviteCollaborator(event)}>
+          {teamView === "create" ? <>
+          <form className="projectAccessForm" onSubmit={(event) => void inviteCollaborator(event)}>
             <input name="email" type="text" required disabled={projectFinished} placeholder="Identifiant du collaborateur (nom, pseudo ou e-mail)" />
             <input name="password" type="text" required minLength={6} disabled={projectFinished} placeholder="Mot de passe à lui transmettre (6 caractères min.)" />
             <input name="phone_number" type="text" disabled={projectFinished} placeholder="Numéro de téléphone (facultatif)" />
             <label className="projectInlineCheck"><input type="checkbox" name="mvola_enabled" /> Mvola</label>
             <label className="projectInlineCheck"><input type="checkbox" name="call_enabled" defaultChecked /> Appel</label>
-            {isAdmin ? <select name="role" value={createRole} disabled={projectFinished} onChange={(event) => { setCreateRole(event.target.value); setCreateParentAssignmentId(""); }}><option value="works_manager">Conducteur de travaux</option><option value="site_manager">Chef de chantier</option><option value="viewer">Consultation uniquement</option></select> : <input type="hidden" name="role" value="site_manager" />}
+            {/* Le conducteur voit le même choix que l'administrateur (Chef de
+                chantier / Consultation uniquement), sauf "Conducteur de
+                travaux" qu'il ne peut pas créer lui-même. Le rattachement se
+                fait automatiquement sous lui côté serveur, pas besoin de le
+                choisir ici. */}
+            <select name="role" value={createRole} disabled={projectFinished} onChange={(event) => { setCreateRole(event.target.value); setCreateParentAssignmentId(""); }}>
+              {isAdmin && <option value="works_manager">Conducteur de travaux</option>}
+              <option value="site_manager">Chef de chantier</option>
+              <option value="viewer">Consultation uniquement</option>
+            </select>
             {isAdmin && createRole === "site_manager" && <select value={createParentAssignmentId} disabled={projectFinished} onChange={(event) => setCreateParentAssignmentId(event.target.value)}><option value="">Rattacher sous quel conducteur ?</option>{activeConductors.map((item) => <option key={item.id} value={item.id}>{item.displayName || `Conducteur ${item.user_id.slice(0, 8)}`}</option>)}</select>}
             <div className="projectPermissionButtons" role="group" aria-label="Autorisations du collaborateur">{([['reports', 'Rapports'], ['stock', 'Stocks : ajout et enregistrement'], ['photos', 'Photos']] as const).map(([permission, label]) => <button key={permission} type="button" disabled={projectFinished} className={accessPermissions[permission] ? "isSelected" : ""} aria-pressed={accessPermissions[permission]} onClick={() => setAccessPermissions((current) => ({ ...current, [permission]: !current[permission] }))}>{accessPermissions[permission] ? "✓ " : ""}{label}</button>)}</div>
-            <button type="submit" disabled={busy || projectFinished}>{busy ? "Création en cours…" : projectFinished ? "Accès désactivés" : isAdmin ? "Créer le compte" : "Créer le compte chef de chantier"}</button>
+            <button type="submit" disabled={busy || projectFinished}>{busy ? "Création en cours…" : projectFinished ? "Accès désactivés" : `Créer le compte ${createRole === "works_manager" ? "conducteur" : createRole === "site_manager" ? "chef de chantier" : "de consultation"}`}</button>
             {accessFeedback && <p className={`projectAccessStatus ${accessFeedback.kind}`} role="status" aria-live="polite">{accessFeedback.text}</p>}
-          </form> : <div className="projectTeamRoster">
-            {isAdmin && <article><h3 style={{cursor:"pointer"}} onClick={() => setExpandedRoster((current) => ({ ...current, conductors: !current.conductors }))}>{expandedRoster.conductors ? "▾" : "▸"} Conducteurs</h3><p>{activeConductors.length} actif(s) · {pendingConductors.length} en attente</p>{expandedRoster.conductors && <>{activeConductors.map((item) => <div className="projectTeamMember" key={item.id}><strong style={isAdmin ? {cursor:"pointer",textDecoration:"underline"} : undefined} onClick={() => isAdmin && setViewingAssignment(item)}>Compte conducteur · {item.displayName || item.email || item.user_id.slice(0, 8)}</strong>{phoneLink(item.phone_number)}<div className="flex flex-wrap items-center justify-end gap-2"><span className="active">Actif</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ assignmentId: item.id }, "cet accès conducteur")}>Retirer</button>}</div></div>)}{pendingConductors.map((item) => <div className="projectTeamMember" key={item.id}><strong>{item.email}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span className="pending">En attente</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-emerald-700 bg-white px-2 py-1 text-xs font-bold text-emerald-800 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => openInvitationEdit(item)}>Modifier</button>}{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ invitationId: item.id }, "cette demande d’accès")}>Supprimer</button>}</div></div>)}{activeConductors.length + pendingConductors.length === 0 && <small>Aucun conducteur créé.</small>}</>}</article>}
-            <article><h3 style={{cursor:"pointer"}} onClick={() => setExpandedRoster((current) => ({ ...current, siteManagers: !current.siteManagers }))}>{expandedRoster.siteManagers ? "▾" : "▸"} Chefs de chantier</h3><p>{activeSiteManagers.length} actif(s) · {pendingSiteManagers.length} en attente</p>{expandedRoster.siteManagers && <>{activeSiteManagers.map((item) => <div className="projectTeamMember" key={item.id}><strong style={isAdmin ? {cursor:"pointer",textDecoration:"underline"} : undefined} onClick={() => isAdmin && setViewingAssignment(item)}>Compte chef de chantier · {item.displayName || item.email || item.user_id.slice(0, 8)}</strong>{phoneLink(item.phone_number)}<div className="flex flex-wrap items-center justify-end gap-2"><span className="active">Actif</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ assignmentId: item.id }, "cet accès chef de chantier")}>Retirer</button>}</div></div>)}{pendingSiteManagers.map((item) => <div className="projectTeamMember" key={item.id}><strong>{item.email}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span className="pending">En attente</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-emerald-700 bg-white px-2 py-1 text-xs font-bold text-emerald-800 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => openInvitationEdit(item)}>Modifier</button>}{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ invitationId: item.id }, "cette demande d’accès")}>Supprimer</button>}</div></div>)}{activeSiteManagers.length + pendingSiteManagers.length === 0 && <small>Le conducteur créera les chefs de chantier qui lui sont rattachés.</small>}</>}</article>
-            <article><h3>Équipe déclarée</h3><p>{projectStaff.length} personne(s) active(s)</p>{projectStaff.length ? projectStaff.map((member) => <div className="projectTeamMember" key={member.id}><strong>{member.full_name}</strong>{phoneLink(member.mvola_number)}<div className="flex flex-wrap items-center justify-end gap-2"><span>{member.role_name || "Équipe"}</span>{(isAdmin || accessRole === "works_manager") && activeSiteManagers.length > 0 ? <select value={member.supervisor_assignment_id || ""} disabled={busy || projectFinished} onChange={(event) => void updateStaffSupervisor(member, event.target.value)}><option value="">Chef non désigné</option>{activeSiteManagers.map((item) => <option key={item.id} value={item.id}>{item.displayName || `Chef ${item.user_id.slice(0, 8)}`}</option>)}</select> : null}{isAdmin && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void adminDeleteStaffMember(member)}>Retirer</button>}</div></div>) : <small>Les membres seront affichés dès leur ajout dans le rapport journalier.</small>}</article>
+          </form>
+          {/* Un ouvrier, manœuvre ou autre membre d'équipe n'a pas de mot de
+              passe : ni l'administrateur ni le conducteur ne devaient avoir
+              de moyen simple de l'ajouter en dehors du rapport journalier ou
+              du compte chef de chantier — corrigé ici. */}
+          <div className="projectStaffPanelForm" style={{ marginTop: "18px", paddingTop: "16px", borderTop: "1px solid var(--line)" }}>
+            <h3>Ajouter un ouvrier, manœuvre ou autre membre (sans identifiant)</h3>
+            {!projectFinished ? <form className="projectStaffForm" onSubmit={(event) => void addStaffMember(event)}><input name="full_name" required placeholder="Nom et prénom de l’employé" /><input name="role" placeholder="Poste (ouvrier, manœuvre, maçon, aide…)" /><input name="mvola" placeholder="Numéro de téléphone (facultatif)" /><label className="projectInlineCheck"><input type="checkbox" name="mvola_enabled" defaultChecked /> Mvola</label><label className="projectInlineCheck"><input type="checkbox" name="call_enabled" defaultChecked /> Appel</label><button disabled={busy}>+ Ajouter à l’équipe</button></form> : <p className="projectHint">Chantier clôturé : l’équipe ne peut plus être modifiée.</p>}
+          </div>
+          </> : <div className="projectTeamRoster">
+            {isAdmin && <article><h3 style={{cursor:"pointer"}} onClick={() => setExpandedRoster((current) => ({ ...current, conductors: !current.conductors }))}>{expandedRoster.conductors ? "▾" : "▸"} Conducteurs</h3><p>{activeConductors.length} actif(s) · {pendingConductors.length} en attente</p>{expandedRoster.conductors && <>{activeConductors.map((item) => <div className="projectTeamMember" key={item.id} data-revealable onClick={() => isAdmin && !projectFinished && setRevealedKey((current) => current === `assignment-${item.id}` ? null : `assignment-${item.id}`)}><strong style={isAdmin ? {cursor:"pointer",textDecoration:"underline"} : undefined} onClick={(event) => { event.stopPropagation(); isAdmin && setViewingAssignment(item); }}>Compte conducteur · {item.displayName || item.email || item.user_id.slice(0, 8)}</strong>{phoneLink(item.phone_number)}<div className="flex flex-wrap items-center justify-end gap-2"><span className="active">Actif</span>{isAdmin && !projectFinished && revealedKey === `assignment-${item.id}` && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={(event) => { event.stopPropagation(); revokeAccess({ assignmentId: item.id }, "cet accès conducteur"); }}>Retirer</button>}</div></div>)}{pendingConductors.map((item) => <div className="projectTeamMember" key={item.id} data-revealable onClick={() => isAdmin && !projectFinished && setRevealedKey((current) => current === `invite-${item.id}` ? null : `invite-${item.id}`)}><strong>{item.email}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span className="pending">En attente</span>{isAdmin && !projectFinished && revealedKey === `invite-${item.id}` && <><button type="button" className="rounded-lg border border-emerald-700 bg-white px-2 py-1 text-xs font-bold text-emerald-800 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={(event) => { event.stopPropagation(); openInvitationEdit(item); }}>Modifier</button><button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={(event) => { event.stopPropagation(); revokeAccess({ invitationId: item.id }, "cette demande d’accès"); }}>Supprimer</button></>}</div></div>)}{activeConductors.length + pendingConductors.length === 0 && <small>Aucun conducteur créé.</small>}</>}</article>}
+            <article><h3 style={{cursor:"pointer"}} onClick={() => setExpandedRoster((current) => ({ ...current, siteManagers: !current.siteManagers }))}>{expandedRoster.siteManagers ? "▾" : "▸"} Chefs de chantier</h3><p>{activeSiteManagers.length} actif(s) · {pendingSiteManagers.length} en attente</p>{expandedRoster.siteManagers && <>{activeSiteManagers.map((item) => <div className="projectTeamMember" key={item.id} data-revealable onClick={() => isAdmin && !projectFinished && setRevealedKey((current) => current === `assignment-${item.id}` ? null : `assignment-${item.id}`)}><strong style={isAdmin ? {cursor:"pointer",textDecoration:"underline"} : undefined} onClick={(event) => { event.stopPropagation(); isAdmin && setViewingAssignment(item); }}>Compte chef de chantier · {item.displayName || item.email || item.user_id.slice(0, 8)}</strong>{phoneLink(item.phone_number)}<div className="flex flex-wrap items-center justify-end gap-2"><span className="active">Actif</span>{isAdmin && !projectFinished && revealedKey === `assignment-${item.id}` && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={(event) => { event.stopPropagation(); revokeAccess({ assignmentId: item.id }, "cet accès chef de chantier"); }}>Retirer</button>}</div></div>)}{pendingSiteManagers.map((item) => <div className="projectTeamMember" key={item.id} data-revealable onClick={() => isAdmin && !projectFinished && setRevealedKey((current) => current === `invite-${item.id}` ? null : `invite-${item.id}`)}><strong>{item.email}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span className="pending">En attente</span>{isAdmin && !projectFinished && revealedKey === `invite-${item.id}` && <><button type="button" className="rounded-lg border border-emerald-700 bg-white px-2 py-1 text-xs font-bold text-emerald-800 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={(event) => { event.stopPropagation(); openInvitationEdit(item); }}>Modifier</button><button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={(event) => { event.stopPropagation(); revokeAccess({ invitationId: item.id }, "cette demande d’accès"); }}>Supprimer</button></>}</div></div>)}{activeSiteManagers.length + pendingSiteManagers.length === 0 && <small>Le conducteur créera les chefs de chantier qui lui sont rattachés.</small>}</>}</article>
+            {isAdmin && removedAssignments.length > 0 && <article><h3 style={{cursor:"pointer"}} onClick={() => setExpandedRoster((current) => ({ ...current, removed: !current.removed }))}>{expandedRoster.removed ? "▾" : "▸"} Accès retirés (historique)</h3><p>{removedAssignments.length} accès retiré(s)</p>{expandedRoster.removed && removedAssignments.map((item) => <div className="projectTeamMember" key={item.id} style={{ opacity: 0.6 }}><strong>{item.role === "works_manager" ? "Compte conducteur" : "Compte chef de chantier"} · {item.displayName || item.email || item.user_id.slice(0, 8)}</strong><span>Retiré le {item.revoked_at ? date.format(new Date(item.revoked_at)) : ""}</span></div>)}</article>}
+            <article><h3>Équipe déclarée</h3><p>{projectStaff.length} personne(s) active(s)</p>{projectStaff.length ? projectStaff.map((member) => <div className="projectTeamMember" key={member.id} data-revealable onClick={() => isAdmin && setRevealedKey((current) => current === `staff-${member.id}` ? null : `staff-${member.id}`)}><strong>{member.full_name}</strong>{phoneLink(member.mvola_number)}<div className="flex flex-wrap items-center justify-end gap-2" onClick={(event) => event.stopPropagation()}><span>{member.role_name || "Équipe"}</span>{(isAdmin || accessRole === "works_manager") && activeSiteManagers.length > 0 ? <select value={member.supervisor_assignment_id || ""} disabled={busy || projectFinished} onChange={(event) => void updateStaffSupervisor(member, event.target.value)}><option value="">Chef non désigné</option>{activeSiteManagers.map((item) => <option key={item.id} value={item.id}>{item.displayName || `Chef ${item.user_id.slice(0, 8)}`}</option>)}</select> : null}{isAdmin && revealedKey === `staff-${member.id}` && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void adminDeleteStaffMember(member)}>Retirer</button>}</div></div>) : <small>Les membres seront affichés dès leur ajout dans le rapport journalier.</small>}
+              {isAdmin && removedStaff.length > 0 && <div style={{ marginTop: "10px" }}>
+                <small style={{cursor:"pointer",textDecoration:"underline"}} onClick={() => setExpandedRoster((current) => ({ ...current, removedStaff: !current.removedStaff }))}>{expandedRoster.removedStaff ? "▾" : "▸"} {removedStaff.length} membre(s) retiré(s) (historique)</small>
+                {expandedRoster.removedStaff && removedStaff.map((member) => <div className="projectTeamMember" key={member.id} style={{ opacity: 0.6 }}><strong>{member.full_name}</strong><span>{member.role_name || "Équipe"} · Retiré le {member.deleted_at ? date.format(new Date(member.deleted_at)) : ""}</span></div>)}
+              </div>}
+            </article>
           </div>}
           </>}
         </section>}
@@ -2144,7 +2198,12 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
           </div>
           <button type="button" className="ghostButton mt-5" style={{ flex: "0 0 auto" }} onClick={() => setViewingStockDetail(false)}>Fermer</button>
         </div></div>}
-        <section className="projectSiteCard projectPhotosCard"><div className="projectCardHead"><div><p className="projectEyebrow">CLASSEMENT</p><h2>Photos non classées</h2></div><span>{unassignedProjectPhotos.length} photo(s)</span></div><p className="projectHint">Les nouvelles photos sont classées directement dans leur rapport journalier. Cette liste contient seulement les anciennes photos à rattacher ou à consulter.</p><div className="projectPhotoThumbGrid">{unassignedProjectPhotos.length ? unassignedProjectPhotos.map((photo) => <button type="button" key={photo.id} className="projectPhotoThumbButton" onClick={() => void openPhoto(photo)}>{photoThumbnails[photo.id] ? <img src={photoThumbnails[photo.id]} alt="" /> : <span className="projectPhotoThumbLoading">…</span>}<small>{photoThumbLabel(photo)}</small></button>) : <p className="projectEmptyText">Toutes les photos du chantier sont classées dans un rapport journalier.</p>}</div></section>
+        <section className="projectSiteCard projectPhotosCard"><div className="projectCardHead"><div><p className="projectEyebrow">CLASSEMENT</p><h2>Photos non classées</h2></div><span>{unassignedProjectPhotos.length} photo(s)</span></div><p className="projectHint">Les nouvelles photos sont classées directement dans leur rapport journalier. Cette liste contient seulement les anciennes photos à rattacher ou à consulter.</p><div className="projectPhotoThumbGrid">{unassignedProjectPhotos.length ? unassignedProjectPhotos.map((photo) => <button type="button" key={photo.id} className="projectPhotoThumbButton" onClick={() => void openPhoto(photo)}>{photoThumbnails[photo.id] ? <img src={photoThumbnails[photo.id]} alt="" /> : <span className="projectPhotoThumbLoading">…</span>}<small>{photoThumbLabel(photo)}</small></button>) : <p className="projectEmptyText">Toutes les photos du chantier sont classées dans un rapport journalier.</p>}</div>
+          {isAdmin && deletedProjectPhotos.length > 0 && <div style={{ marginTop: "12px" }}>
+            <small style={{cursor:"pointer",textDecoration:"underline"}} onClick={() => setViewingDeletedPhotos((current) => !current)}>{viewingDeletedPhotos ? "▾" : "▸"} {deletedProjectPhotos.length} photo(s) supprimée(s) (historique)</small>
+            {viewingDeletedPhotos && <div className="projectStockSummaryList" style={{ marginTop: "8px" }}>{deletedProjectPhotos.map((photo) => <div key={photo.id}><span className="chipName">{photo.caption || "Photo"}</span><span className="chipQty">Supprimée le {photo.deleted_at ? date.format(new Date(photo.deleted_at)) : ""}</span></div>)}</div>}
+          </div>}
+        </section>
         {isAdmin && <section className="projectSiteCard projectSuggestionsCard"><div className="projectCardHead"><div><p className="projectEyebrow">ASSISTANCE</p><h2>Recommandations à examiner</h2></div><span>Historisées</span></div><p className="projectHint">L’analyse est volontaire : elle examine les rapports, stocks et photos associées lorsque vous l’autorisez. Les anomalies détectées sont aussi signalées dans la messagerie du chantier.</p>{canOperate && <button type="button" className="projectAiReviewButton" onClick={() => void requestAiReview()} disabled={!online || busy}>{busy ? "Analyse en cours…" : online ? "Analyser le chantier" : "Analyse disponible en ligne"}</button>}<div className="projectSuggestionList">{projectSuggestions.length ? projectSuggestions.map((suggestion) => <article key={suggestion.id} className={`suggestion-${suggestion.status}`}><strong>{suggestion.title}</strong><p>{suggestion.content}</p><small>{suggestion.status === "accepted" ? "Acceptée" : suggestion.status === "rejected" ? "Écartée" : "À décider"}{suggestion.confidence ? ` · confiance ${number(suggestion.confidence)} %` : ""}</small>{suggestion.status === "pending" && canEditOwnCurrentRecord(suggestion) && <div><button type="button" onClick={() => void answerSuggestion(suggestion.id, "accepted", "Acceptée par l’utilisateur")}>Accepter</button><button type="button" className="secondary" onClick={() => void answerSuggestion(suggestion.id, "rejected", "Écartée par l’utilisateur")}>Écarter</button></div>}</article>) : <p className="projectEmptyText">Aucune recommandation à examiner pour ce chantier.</p>}</div></section>}
         {isAdmin && <section className="projectSiteCard projectSuggestionsCard">
           <div className="projectCardHead"><div><p className="projectEyebrow">DEMANDE</p><h2>Matériaux à valider</h2></div><span className={pendingApprovalOrders.length ? "projectAlert" : "projectOk"}>{pendingApprovalOrders.length} en attente</span></div>

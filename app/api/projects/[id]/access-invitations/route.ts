@@ -421,7 +421,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
 
     const { error: invitationRevokeError } = await admin
       .from("project_access_invitations")
-      .update({ status: "revoked" })
+      .update({ status: "revoked", revoked_at: new Date().toISOString() })
       .eq("id", invitation.id);
     if (invitationRevokeError) {
       console.error("Impossible d’annuler l’invitation", invitationRevokeError);
@@ -448,7 +448,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
 
   const { error: assignmentRevokeError } = await admin
     .from("project_assignments")
-    .update({ active: false })
+    .update({ active: false, revoked_at: new Date().toISOString() })
     .eq("id", assignment.id);
   if (assignmentRevokeError) {
     console.error("Impossible de retirer l’accès", assignmentRevokeError);

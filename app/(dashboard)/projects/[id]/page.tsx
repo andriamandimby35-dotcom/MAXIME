@@ -32,7 +32,10 @@ export default async function ProjectPage({ params }: { params: Promise<Params> 
     supabase.from("project_photos").select("*").eq("project_id", id).order("captured_at", { ascending: false }),
     supabase.from("project_ai_suggestions").select("*").eq("project_id", id).order("created_at", { ascending: false }),
     supabase.from("project_record_notes").select("*").eq("project_id", id).order("created_at", { ascending: false }),
-    supabase.from("project_assignments").select("*").eq("project_id", id).eq("active", true),
+    // Les accès retirés (active=false) restent chargés aussi : ils sont
+    // affichés dans un petit historique avec leur date de retrait, au lieu
+    // de disparaître (comme pour l'équipe déclarée et les photos).
+    supabase.from("project_assignments").select("*").eq("project_id", id),
     supabase.from("project_access_invitations").select("*").eq("project_id", id).order("created_at", { ascending: false }),
     supabase.from("project_material_orders").select("*").eq("project_id", id).order("created_at", { ascending: false }),
     supabase.from("project_staff_members").select("*").eq("project_id", id).order("full_name"),
