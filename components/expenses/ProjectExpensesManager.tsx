@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { RealtimeRefresh } from "@/components/realtime-refresh";
 
 type StaffMember = { id: string; project_id: string; full_name: string; role_name?: string | null; active?: boolean; mvola_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; created_at?: string | null };
 type Attendance = { id: string; staff_member_id: string; report_date: string; present: boolean };
@@ -104,6 +105,11 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   // (voir aussi app/(dashboard)/projects/[id]/page.tsx et ProjectCard.tsx).
   const [closedAt, setClosedAt] = useState(project.closed_at ?? null);
   const [confirmingClose, setConfirmingClose] = useState(false);
+  const [confirmingReopen, setConfirmingReopen] = useState(false);
+  // Si la clôture est faite ou annulée ailleurs (autre onglet, liste des
+  // chantiers), RealtimeRefresh redemande la page côté serveur et ce prop
+  // change : on garde l'état local synchronisé, sans rechargement complet.
+  useEffect(() => { setClosedAt(project.closed_at ?? null); }, [project.closed_at]);
 
   const [viewingRates, setViewingRates] = useState(false);
   const [viewingGeneralExport, setViewingGeneralExport] = useState(false);
@@ -440,20 +446,27 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   })();
 
   type RecapCategory = "salaire" | "materiaux" | "transport" | "autre";
-  type RecapRow = { key: string; type: "salary" | "order"; id: string; date: string; label: string; qty: string; amount: number; category: RecapCategory };
+  type RecapRow = { key: string; type: "salary" | "order"; id: string; date: string; label: string; qty: string; amount: number; category: RecapCategory; outsideClosure: boolean };
   function orderCategory(order: MaterialOrder): RecapCategory {
     if (order.expense_kind === "transport") return "transport";
     if (order.expense_kind === "other") return "autre";
     return "materiaux";
   }
+  // Une saisie faite hors ligne avant la clôture (par un appareil resté sans
+  // réseau) est synchronisée normalement dès le retour de connexion, même
+  // après la clôture. Si sa date dépasse la date de clôture, elle est quand
+  // même comptée dans le total — juste signalée à part, en rouge, pour que
+  // l'administrateur sache qu'elle est arrivée après coup.
+  const outsideClosure = (date: string) => Boolean(closedAt && date && date > closedAt);
   const recapRows: RecapRow[] = [
     ...activeSalaryPayments.map((payment) => {
       const totalDays = payment.project_salary_payment_lines.reduce((sum, line) => sum + number(line.days_worked), 0);
-      return { key: `salary-${payment.id}`, type: "salary" as const, id: payment.id, date: payment.paid_at, label: paymentLabel(payment), qty: `${totalDays} j-personne`, amount: number(payment.total_amount), category: "salaire" as const };
+      return { key: `salary-${payment.id}`, type: "salary" as const, id: payment.id, date: payment.paid_at, label: paymentLabel(payment), qty: `${totalDays} j-personne`, amount: number(payment.total_amount), category: "salaire" as const, outsideClosure: outsideClosure(payment.paid_at) };
     }),
-    ...paidOrders.map((order) => ({ key: `order-${order.id}`, type: "order" as const, id: order.id, date: order.paid_at || order.submitted_at || "", label: orderLabel(order), qty: `${number(order.quantity)} ${order.unit || ""}`.trim(), amount: orderTotal(order), category: orderCategory(order) })),
+    ...paidOrders.map((order) => { const date = order.paid_at || order.submitted_at || ""; return { key: `order-${order.id}`, type: "order" as const, id: order.id, date, label: orderLabel(order), qty: `${number(order.quantity)} ${order.unit || ""}`.trim(), amount: orderTotal(order), category: orderCategory(order), outsideClosure: outsideClosure(date) }; }),
   ].sort((a, b) => b.date.localeCompare(a.date));
   const recapTotal = recapRows.reduce((sum, row) => sum + row.amount, 0);
+  const outsideClosureTotal = recapRows.filter((row) => row.outsideClosure).reduce((sum, row) => sum + row.amount, 0);
   // Très important pour l'administrateur : voir combien part dans chaque
   // catégorie avant le total général (matériaux, transport, salaire, autre).
   const categoryTotals: Record<RecapCategory, number> = { materiaux: 0, transport: 0, salaire: 0, autre: 0 };
@@ -626,11 +639,32 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     if (error) { setMessage({ kind: "error", text: `Clôture impossible : ${error.message}` }); return; }
     setClosedAt(now);
     setConfirmingClose(false);
-    setMessage({ kind: "success", text: "Chantier clôturé : les accès conducteur, chef et équipe sont maintenant bloqués. Réouvrez-le depuis la liste des chantiers pour tout réactiver." });
+    setMessage({ kind: "success", text: "Chantier clôturé : les accès conducteur, chef et équipe sont maintenant bloqués, et vous-même êtes en lecture seule sur cette page. Réouvrez-le pour tout réactiver." });
   }
 
-  return <div className="projectSitePage">
-    <header className="projectSiteHeader">
+  async function reopenProject() {
+    setBusy(true);
+    setMessage(null);
+    const { error: reactivateError } = await supabase
+      .from("project_assignments")
+      .update({ active: true, paused_by_closure: false })
+      .eq("project_id", project.id)
+      .eq("paused_by_closure", true);
+    if (reactivateError) { setBusy(false); setMessage({ kind: "error", text: `Réouverture impossible : ${reactivateError.message}` }); return; }
+    const { error } = await supabase.from("projects").update({ closed_at: null, closed_by: null }).eq("id", project.id);
+    setBusy(false);
+    if (error) { setMessage({ kind: "error", text: `Réouverture impossible : ${error.message}` }); return; }
+    setClosedAt(null);
+    setConfirmingReopen(false);
+    setMessage({ kind: "success", text: "Chantier rouvert : tous les accès actifs au moment de la clôture sont réactivés." });
+  }
+
+  // Chantier clôturé : plus aucune modification n'est possible, y compris
+  // pour l'administrateur qui garde seulement la consultation (et l'accès à
+  // la réouverture, ci-dessous, volontairement exclue de ce verrouillage).
+  return <div className="projectSitePage" style={closedAt ? { pointerEvents: "none" } : undefined}>
+    <RealtimeRefresh channelName={`expense-closure-${project.id}`} tables={[{ table: "projects", filter: `id=eq.${project.id}` }]} />
+    <header className="projectSiteHeader" style={closedAt ? { pointerEvents: "auto" } : undefined}>
       <div><p className="projectEyebrow">DÉPENSES ET APPROVISIONNEMENT</p><h1>{project.name}</h1><p>{project.project_code || ""}</p></div>
       <div className="projectHeaderActions">
         {canManage && <button type="button" className="dangerButton" onClick={() => { setExportGeneratedAt(new Date().toISOString()); setViewingGeneralExport(true); }}>📄 Exporter résumé dépense</button>}
@@ -704,8 +738,8 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
       <div className="projectCardHead"><div><p className="projectEyebrow">RÉCAPITULATIF GÉNÉRAL</p><h2>Compte dépense générale</h2></div><span>{money(recapTotal)}</span></div>
       <p className="projectHint">Ne liste que ce qui est déjà payé (salaires, acomptes, achats, transport, imprévus). Cliquez une ligne pour la supprimer.</p>
       <div className="projectStockSummaryList" style={{ maxHeight: "420px" }}>{recapRows.length ? recapRows.map((row) => <div key={row.key} data-revealable style={{ cursor: "pointer" }} onClick={() => setRevealedRowKey((current) => current === row.key ? null : row.key)}>
-        <span className="chipName">{row.date ? dateFmt.format(new Date(row.date)) : "—"} · {row.label}</span>
-        <span className="chipQty" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+        <span className="chipName" style={row.outsideClosure ? { color: "#a33b3e" } : undefined}>{row.date ? dateFmt.format(new Date(row.date)) : "—"} · {row.label}{row.outsideClosure ? " · 🔴 Dépense hors clôture" : ""}</span>
+        <span className="chipQty" style={{ display: "flex", alignItems: "center", gap: "8px", color: row.outsideClosure ? "#a33b3e" : undefined }}>
           {row.qty} · {money(row.amount)}
           {canDelete && revealedRowKey === row.key && <button type="button" className="projectRejectButton" style={{ padding: "4px 8px", fontSize: ".7rem" }} onClick={(event) => { event.stopPropagation(); setConfirmingDelete({ type: row.type, id: row.id, label: row.label }); }}>Supprimer</button>}
         </span>
@@ -715,6 +749,10 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
           <span className="chipName">Sous-total {categoryLabels[category]}</span>
           <span className="chipQty">{money(categoryTotals[category])}</span>
         </div>)}
+        {outsideClosureTotal > 0 && <div>
+          <span className="chipName" style={{ color: "#a33b3e" }}>🔴 Sous-total dépense hors clôture</span>
+          <span className="chipQty" style={{ color: "#a33b3e" }}>{money(outsideClosureTotal)}</span>
+        </div>}
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "12px", paddingTop: "12px", borderTop: "2px solid #145b35" }}>
         <strong style={{ fontSize: "1rem" }}>TOTAL GÉNÉRAL DES DÉPENSES</strong>
@@ -722,21 +760,34 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
       </div>
     </section>
 
-    {accessRole === "admin" && <section className="projectSiteCard" style={{ marginTop: "18px", borderColor: "#eab7b6" }}>
+    {accessRole === "admin" && <section className="projectSiteCard" style={{ marginTop: "18px", borderColor: "#eab7b6", pointerEvents: "auto" }}>
       <div className="projectCardHead"><div><p className="projectEyebrow" style={{ color: "#a33b3e" }}>ZONE SENSIBLE</p><h2>Clôture du chantier</h2></div></div>
-      {closedAt ? <p className="projectHint">🔒 Ce chantier est clôturé depuis le {dateFmt.format(new Date(closedAt))}. Les accès conducteur, chef et équipe sont bloqués. Réouvrez-le depuis <Link href="/projects">la liste des chantiers</Link> pour tout réactiver.</p> : <>
-        <p className="projectHint">Bloque l’accès de tout le monde sauf vous (administrateur) sur ce chantier : conducteur, chef de chantier et équipe. Réversible à tout moment depuis la liste des chantiers.</p>
+      {closedAt ? <>
+        <p className="projectHint">🔒 Ce chantier est clôturé depuis le {dateFmt.format(new Date(closedAt))}. Les accès conducteur, chef et équipe sont bloqués, et vous-même êtes en lecture seule sur cette page. Réouvrez-le pour tout réactiver et retrouver la main.</p>
+        <button type="button" disabled={busy} onClick={() => setConfirmingReopen(true)}>Réouvrir le chantier</button>
+      </> : <>
+        <p className="projectHint">Bloque l’accès de tout le monde sauf vous (administrateur) sur ce chantier : conducteur, chef de chantier et équipe. Réversible à tout moment depuis ici ou la liste des chantiers.</p>
         <button type="button" className="dangerButton" disabled={busy} onClick={() => setConfirmingClose(true)}>🔒 Clôture chantier</button>
       </>}
     </section>}
 
-    {confirmingClose && <div className="modalBackdrop" onClick={() => setConfirmingClose(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(440px,100%)" }}>
+    {confirmingClose && <div className="modalBackdrop" style={{ pointerEvents: "auto" }} onClick={() => setConfirmingClose(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(440px,100%)" }}>
       <h2 className="font-bold text-xl mb-4">Clôturer « {project.name} » ?</h2>
-      <p className="projectHint">Le conducteur, le(s) chef(s) de chantier et l’équipe perdront l’accès à ce chantier jusqu’à sa réouverture. Vous seul (administrateur) garderez l’accès. C’est réversible : vous pourrez rouvrir le chantier à tout moment depuis la liste des chantiers, ce qui réactivera automatiquement tous les accès qui étaient actifs.</p>
+      <p className="projectHint">Le conducteur, le(s) chef(s) de chantier et l’équipe perdront l’accès à ce chantier jusqu’à sa réouverture. Vous seul (administrateur) garderez l’accès, en lecture seule. C’est réversible : vous pourrez rouvrir le chantier à tout moment depuis ici, ce qui réactivera automatiquement tous les accès qui étaient actifs.</p>
       {message && <p className={`projectAccessStatus ${message.kind}`}>{message.text}</p>}
       <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
         <button type="button" className="dangerButton" disabled={busy} onClick={() => void closeProject()}>{busy ? "Clôture en cours…" : "Confirmer la clôture"}</button>
         <button type="button" className="ghostButton" onClick={() => setConfirmingClose(false)}>Annuler</button>
+      </div>
+    </div></div>}
+
+    {confirmingReopen && <div className="modalBackdrop" style={{ pointerEvents: "auto" }} onClick={() => setConfirmingReopen(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(440px,100%)" }}>
+      <h2 className="font-bold text-xl mb-4">Rouvrir « {project.name} » ?</h2>
+      <p className="projectHint">Tous les accès conducteur, chef et équipe qui étaient actifs au moment de la clôture seront réactivés. Le chantier redevient actif comme avant.</p>
+      {message && <p className={`projectAccessStatus ${message.kind}`}>{message.text}</p>}
+      <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
+        <button type="button" disabled={busy} onClick={() => void reopenProject()}>{busy ? "Réouverture…" : "Confirmer la réouverture"}</button>
+        <button type="button" className="ghostButton" onClick={() => setConfirmingReopen(false)}>Annuler</button>
       </div>
     </div></div>}
 
@@ -882,8 +933,8 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
 
         <h3 style={{ marginTop: "16px" }}>Détail des dépenses payées</h3>
         <div className="projectStockSummaryList">{recapRows.length ? recapRows.map((row) => <div key={row.key}>
-          <span className="chipName">{row.date ? dateFmt.format(new Date(row.date)) : "—"} · {row.label}</span>
-          <span className="chipQty">{row.qty} · {money(row.amount)}</span>
+          <span className="chipName" style={row.outsideClosure ? { color: "#a33b3e" } : undefined}>{row.date ? dateFmt.format(new Date(row.date)) : "—"} · {row.label}{row.outsideClosure ? " · 🔴 Dépense hors clôture" : ""}</span>
+          <span className="chipQty" style={row.outsideClosure ? { color: "#a33b3e" } : undefined}>{row.qty} · {money(row.amount)}</span>
         </div>) : <p className="projectEmptyText">Aucune dépense enregistrée.</p>}</div>
 
         <h3 style={{ marginTop: "16px" }}>Matériaux (quantités déjà achetées/utilisées)</h3>

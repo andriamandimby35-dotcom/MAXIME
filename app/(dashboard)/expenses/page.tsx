@@ -12,12 +12,15 @@ export default async function ExpensesPage() {
   const { supabase, organizationId, memberRole, user } = await getContext();
   const isAdmin = memberRole === "admin" || memberRole === "owner";
   const { data: projects } = organizationId
-    ? await supabase.from("projects").select("id,name,project_code").eq("organization_id", organizationId).order("created_at", { ascending: false })
+    ? await supabase.from("projects").select("id,name,project_code,closed_at").eq("organization_id", organizationId).order("created_at", { ascending: false })
     : { data: [] };
   let projectRows = projects ?? [];
   if (!isAdmin && user) {
-    const { data: assignments } = await supabase.from("project_assignments").select("project_id").eq("user_id", user.id).eq("active", true);
-    const allowedIds = new Set((assignments ?? []).map((row) => row.project_id));
+    // Comme pour /projects : un accès seulement mis en pause par une clôture
+    // (paused_by_closure) compte aussi, pour que la carte reste visible
+    // (verrouillée) au lieu de disparaître.
+    const { data: assignments } = await supabase.from("project_assignments").select("*").eq("user_id", user.id);
+    const allowedIds = new Set((assignments ?? []).filter((row: any) => row.active || row.paused_by_closure).map((row: any) => row.project_id));
     projectRows = projectRows.filter((project: any) => allowedIds.has(project.id));
   }
   const { data: paidOrders } = organizationId
@@ -47,9 +50,10 @@ export default async function ExpensesPage() {
       <p>Ouvrez un chantier pour consulter ses salaires, achats, transport et son compte de dépense générale.</p>
     </div><span className="projectRoleBadge">{isAdmin ? "Administrateur" : "Accès chantier"}</span></header>
     {!projectRows.length ? <section className="projectEmptyCard"><h2>Aucun chantier</h2><p>Un chantier apparaîtra ici dès qu&apos;un devis est validé.</p></section> : <section className="projectDirectoryGrid" aria-label="Liste des chantiers">
-      {projectRows.map((project: any) => <Link key={project.id} href={`/expenses/${project.id}`} className="projectDirectoryCard">
+      {projectRows.map((project: any) => <Link key={project.id} href={`/expenses/${project.id}`} className={`projectDirectoryCard${project.closed_at ? " projectDirectoryCardClosed" : ""}`}>
         <span className="projectCardLabel">CHANTIER</span><h2>{project.name}</h2>
         <p className="projectCardLocation">{project.project_code || ""}</p>
+        {project.closed_at ? <p className="projectClosedBadge">🔒 Clôturé — lecture seule</p> : null}
         <div className="projectCardMetrics"><span><strong>{money(totalByProject.get(project.id) ?? 0)}</strong> dépensé</span></div>
         <span className="projectOpenButton">Voir les dépenses →</span>
       </Link>)}

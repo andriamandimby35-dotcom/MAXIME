@@ -1800,7 +1800,14 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   if (!organizationId) return <div className="notice danger">Aucune entreprise associée au compte.</div>;
   if (!projects.length) return <section className="panel projectEmpty"><h1>Chantiers</h1><p>Le chantier est créé automatiquement après validation d’un devis lié à un DAO.</p></section>;
 
-  return <div className="projectSitePage">
+  // Chantier clôturé : plus aucune modification n'est possible (y compris
+  // pour l'administrateur, qui garde seulement la consultation). Pour le
+  // conducteur et le chef, la page reste en plus recouverte d'un écran de
+  // verrouillage transparent géré par la page qui affiche ce composant —
+  // ce blocage-ci s'applique dans tous les cas, en filet de sécurité.
+  const locked = Boolean(project?.closed_at);
+
+  return <div className="projectSitePage" style={locked ? { pointerEvents: "none" } : undefined}>
     <header className="projectSiteHeader"><div><p className="projectEyebrow">PILOTAGE OPÉRATIONNEL</p><h1>{projectPage ? (isAdmin ? "Espace chantier" : accessRole === "works_manager" ? "Espace conducteur de travaux" : accessRole === "site_manager" ? "Espace chef de chantier" : "Espace chantier") : "Chantiers"}</h1><p>{isAdmin ? "Consultez les rapports, importez le planning DAO et gérez les accès de l’équipe." : "Saisissez les informations autorisées pour ce chantier."}</p></div><div className="projectHeaderActions">{projectPage && !isSiteManager && <Link className="projectBackLink" href="/projects">← Retour aux chantiers</Link>}{unreadNotes.length > 0 && <button type="button" className="projectNotesBell" onClick={() => { setViewingNotes(true); void markNotesRead(); }} title="Voir les messages non lus">🔔 {unreadNotes.length}</button>}{isAdmin && unseenOrdersForAdmin.length > 0 && <button type="button" className="projectNotesBell" onClick={() => document.getElementById("materialsCard")?.scrollIntoView({ behavior: "smooth", block: "start" })} title="Voir les nouvelles demandes de matériaux">📦 {unseenOrdersForAdmin.length}</button>}<span className={`projectConnection ${online ? "online" : "offline"}`}>{online ? "● Connecté" : "● Hors ligne"}</span><button type="button" className="projectAlertPermission" onClick={() => void toggleSoundAlerts()}>{soundEnabled ? "Alertes sonores actives" : "Activer les alertes"}</button>{pendingSync.length > 0 && <button type="button" onClick={() => void synchronizePending()} disabled={!online || busy}>Synchroniser {pendingSync.length} saisie(s)</button>}{!projectPage && <label>Chantier actif<select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>{projects.map((item) => <option key={item.id} value={item.id}>{item.project_code ? `${item.project_code} — ` : ""}{item.name}</option>)}</select></label>}</div></header>
     {message && <div className="notice">{message}</div>}
     {project && <>

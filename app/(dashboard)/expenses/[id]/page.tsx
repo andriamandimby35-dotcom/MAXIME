@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { getContext } from "@/lib/organization";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ProjectExpensesManager } from "@/components/expenses/ProjectExpensesManager";
+import { RealtimeRefresh } from "@/components/realtime-refresh";
 
 type Params = { id: string };
 
@@ -18,7 +19,11 @@ export default async function ProjectExpensesPage({ params }: { params: Promise<
   if (isAdmin) {
     accessRole = "admin";
   } else {
-    const { data: assignment } = await supabase.from("project_assignments").select("role").eq("project_id", id).eq("user_id", user.id).eq("active", true).maybeSingle();
+    // Un accès seulement mis en pause par une clôture (paused_by_closure)
+    // compte aussi : la page reste accessible (en lecture verrouillée),
+    // au lieu de renvoyer une page introuvable.
+    const { data: ownAssignments } = await supabase.from("project_assignments").select("role,active,paused_by_closure").eq("project_id", id).eq("user_id", user.id);
+    const assignment = (ownAssignments ?? []).find((row: any) => row.active || row.paused_by_closure);
     if (!assignment) notFound();
     accessRole = assignment.role as typeof accessRole;
   }
@@ -68,7 +73,12 @@ export default async function ProjectExpensesPage({ params }: { params: Promise<
     displayName: displayNames.get(assignment.id) ?? assignment.user_id.slice(0, 8),
   }));
 
-  return <ProjectExpensesManager
+  // Cette page est normalement réservée à l'administrateur (le conducteur
+  // passe désormais par l'onglet Dépense de /projects/[id]) ; en filet de
+  // sécurité, un accès direct par un rôle terrain voit quand même son écran
+  // se verrouiller ici pendant une clôture, comme sur l'Espace chantier.
+  const fieldLocked = Boolean(project.closed_at) && accessRole !== "admin";
+  const content = <ProjectExpensesManager
     project={project}
     accessRole={accessRole}
     userId={user.id}
@@ -80,4 +90,15 @@ export default async function ProjectExpensesPage({ params }: { params: Promise<
     laborRateOverrides={laborRateOverrides ?? []}
     assignments={assignments}
   />;
+
+  return <div style={{ position: "relative" }}>
+    <RealtimeRefresh channelName={`project-closure-${id}`} tables={[{ table: "projects", filter: `id=eq.${id}` }]} />
+    {fieldLocked && <div style={{ position: "fixed", inset: 0, zIndex: 999, background: "rgba(255,255,255,.78)", backdropFilter: "blur(3px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center" }}>
+      <div>
+        <p style={{ margin: "0 0 10px", fontSize: "clamp(1.5rem,5vw,2.3rem)", fontWeight: 900, color: "#7a2b2d", letterSpacing: "-.02em" }}>Chantier clôturé</p>
+        <p style={{ margin: 0, fontSize: ".85rem", color: "#8a4a49" }}>Demandez à l’administrateur si vous souhaitez y accéder de nouveau.</p>
+      </div>
+    </div>}
+    <div style={{ pointerEvents: fieldLocked ? "none" : undefined }}>{content}</div>
+  </div>;
 }

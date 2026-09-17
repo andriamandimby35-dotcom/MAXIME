@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { ProjectSiteManager } from "@/components/projects/ProjectSiteManager";
 import { ProjectExpensesManager } from "@/components/expenses/ProjectExpensesManager";
 import { ProjectWorkspaceTabs } from "@/components/projects/ProjectWorkspaceTabs";
+import { RealtimeRefresh } from "@/components/realtime-refresh";
 import { getContext } from "@/lib/organization";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -80,35 +81,30 @@ export default async function ProjectPage({
     access_password: isAdmin ? assignment.access_password ?? null : null,
   }));
 
-  const ownAssignment = enrichedAssignments.find((assignment: any) => assignment.user_id === user.id && assignment.active);
+  // Un accès mis en pause par une clôture (paused_by_closure) doit toujours
+  // être reconnu comme conducteur/chef pour l'affichage du verrouillage —
+  // sinon accessRole retombe sur "viewer" dès la clôture et le verrouillage
+  // ci-dessous ne s'affiche jamais. Ses droits d'écriture restent bien
+  // désactivés côté base (active=false), seul le RÔLE affiché change ici.
+  const ownAssignment = enrichedAssignments.find((assignment: any) => assignment.user_id === user.id && (assignment.active || assignment.paused_by_closure));
   const accessRole = (isAdmin ? "admin" : (ownAssignment?.role ?? "viewer")) as "admin" | "works_manager" | "site_manager" | "viewer";
 
   // Chantier clôturé (voir le bouton "Clôture chantier" dans Dépense, réservé
-  // à l'administrateur) : le terrain n'y a plus accès pendant la clôture.
-  // L'administrateur, lui, continue de voir la page normalement (et peut
-  // rouvrir le chantier depuis la liste des chantiers, voir ProjectCard.tsx).
-  if (project.closed_at && accessRole === "site_manager") {
-    return (
-      <div style={{ position: "fixed", inset: 0, background: "rgba(163,59,62,.55)", backdropFilter: "blur(2px)", zIndex: 999, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
-        <div style={{ background: "#fff", borderRadius: 16, padding: "30px 32px", maxWidth: 420, textAlign: "center", boxShadow: "0 20px 60px rgba(0,0,0,.3)" }}>
-          <p style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 800, letterSpacing: ".08em", color: "#a33b3e", textTransform: "uppercase" }}>Chantier clôturé</p>
-          <h1 style={{ margin: "0 0 10px", fontSize: 20, color: "#7a2b2d" }}>{project.name}</h1>
-          <p style={{ margin: 0, color: "#5c4342" }}>L’administrateur a clôturé ce chantier. L’accès est verrouillé jusqu’à sa réouverture.</p>
-        </div>
+  // à l'administrateur) : tout le monde sauf l'administrateur voit sa page
+  // se verrouiller — mais la page reste montée (pas de redirection ni de
+  // page bloquante à part) pour que la synchronisation hors ligne déjà en
+  // attente (saisies faites avant ou après la clôture par un appareil resté
+  // hors réseau) continue à se faire normalement une fois reconnecté.
+  const fieldLocked = Boolean(project.closed_at) && accessRole !== "admin";
+  const closureWatcher = <RealtimeRefresh channelName={`project-closure-${id}`} tables={[{ table: "projects", filter: `id=eq.${id}` }]} />;
+  const lockOverlay = fieldLocked ? (
+    <div style={{ position: "fixed", inset: 0, zIndex: 999, background: "rgba(255,255,255,.78)", backdropFilter: "blur(3px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center" }}>
+      <div>
+        <p style={{ margin: "0 0 10px", fontSize: "clamp(1.5rem,5vw,2.3rem)", fontWeight: 900, color: "#7a2b2d", letterSpacing: "-.02em" }}>Chantier clôturé</p>
+        <p style={{ margin: 0, fontSize: ".85rem", color: "#8a4a49" }}>Demandez à l’administrateur si vous souhaitez y accéder de nouveau.</p>
       </div>
-    );
-  }
-  if (project.closed_at && accessRole === "works_manager") {
-    return (
-      <div style={{ padding: "48px 24px", display: "flex", justifyContent: "center" }}>
-        <div style={{ maxWidth: 420, width: "100%", background: "#fdeceb", border: "1px solid #eab7b6", borderRadius: 20, padding: "30px 26px", textAlign: "center" }}>
-          <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 800, letterSpacing: ".08em", color: "#a33b3e", textTransform: "uppercase" }}>Chantier</p>
-          <h1 style={{ margin: "0 0 10px", fontSize: 22, color: "#7a2b2d" }}>{project.name}</h1>
-          <p style={{ margin: 0, color: "#8a4a49", fontWeight: 700 }}>Fini</p>
-        </div>
-      </div>
-    );
-  }
+    </div>
+  ) : null;
 
   const siteContent = <ProjectSiteManager
     organizationId={organizationId}
@@ -138,7 +134,11 @@ export default async function ProjectPage({
   // forme d'onglet : plus besoin de dépendre d'un second lien / d'une
   // seconde page pour l'atteindre.
   if (accessRole !== "works_manager") {
-    return siteContent;
+    return <div style={{ position: "relative" }}>
+      {closureWatcher}
+      {lockOverlay}
+      <div style={{ pointerEvents: fieldLocked ? "none" : undefined }}>{siteContent}</div>
+    </div>;
   }
 
   const [
@@ -180,9 +180,15 @@ export default async function ProjectPage({
     assignments={expensesAssignments}
   />;
 
-  return <ProjectWorkspaceTabs
-    initialTab={tab === "expenses" ? "expenses" : "site"}
-    siteContent={siteContent}
-    expensesContent={expensesContent}
-  />;
+  return <div style={{ position: "relative" }}>
+    {closureWatcher}
+    {lockOverlay}
+    <div style={{ pointerEvents: fieldLocked ? "none" : undefined }}>
+      <ProjectWorkspaceTabs
+        initialTab={tab === "expenses" ? "expenses" : "site"}
+        siteContent={siteContent}
+        expensesContent={expensesContent}
+      />
+    </div>
+  </div>;
 }
