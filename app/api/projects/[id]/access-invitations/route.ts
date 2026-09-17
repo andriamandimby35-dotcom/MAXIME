@@ -11,6 +11,7 @@ type InvitationPayload = {
   role?: ProjectRole;
   permissions?: Record<string, boolean>;
   parentAssignmentId?: string;
+  confirmReplace?: boolean;
 };
 
 type RevokePayload = {
@@ -32,6 +33,20 @@ function safePermissions(value: unknown) {
     stock: permissions.stock !== false,
     photos: permissions.photos !== false,
   };
+}
+
+// Recherche un compte Auth existant par e-mail (utilisé pour détecter un
+// identifiant déjà utilisé, par exemple par un accès supprimé auparavant).
+async function findAuthUserByEmail(admin: ReturnType<typeof createAdminClient>, email: string) {
+  const perPage = 200;
+  for (let page = 1; page <= 25; page++) {
+    const { data, error } = await admin.auth.admin.listUsers({ page, perPage });
+    if (error || !data) return null;
+    const match = data.users.find((item) => item.email?.trim().toLowerCase() === email);
+    if (match) return match;
+    if (data.users.length < perPage) return null;
+  }
+  return null;
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -136,27 +151,62 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   // Le compte est créé directement avec l'identifiant et le mot de passe
   // saisis par la personne qui l'invite (pas d'e-mail d'invitation à
   // envoyer) : elle transmet elle-même ces identifiants au collaborateur.
-  const { data: createdUser, error: createUserError } = await admin.auth.admin.createUser({
-    email,
-    password,
-    email_confirm: true,
-    user_metadata: { organization_id: project.organization_id, project_id: projectId, project_role: role, identifier },
-  });
-  if (createUserError || !createdUser.user) {
-    const alreadyRegistered = /already|registered|exists|duplicate/i.test(createUserError?.message ?? "");
-    console.error("Création du compte chantier impossible", createUserError);
-    return NextResponse.json({
-      error: alreadyRegistered
-        ? "Un compte existe déjà avec cette adresse e-mail."
-        : `Compte non créé : ${createUserError?.message ?? "erreur inconnue"}`,
-    }, { status: alreadyRegistered ? 409 : 500 });
+  // Si un compte existe déjà avec cet identifiant (souvent parce qu'il avait
+  // été retiré d'un chantier auparavant — le compte Auth n'est jamais
+  // supprimé lors d'un retrait), on demande confirmation avant de le
+  // réactiver avec les nouvelles informations plutôt que de simplement
+  // échouer.
+  const confirmReplace = payload.confirmReplace === true;
+  const existingUser = await findAuthUserByEmail(admin, email);
+
+  let createdUserId: string;
+
+  if (existingUser) {
+    const existingOrgId = (existingUser.user_metadata as Record<string, unknown> | null)?.organization_id;
+    if (existingOrgId && existingOrgId !== project.organization_id) {
+      return NextResponse.json({ error: "Cet identifiant est déjà utilisé par un compte d'une autre entreprise. Choisissez un autre identifiant." }, { status: 409 });
+    }
+    if (!confirmReplace) {
+      return NextResponse.json({
+        error: "Un compte existe déjà avec cet identifiant (il a probablement été créé puis retiré d'un chantier auparavant).",
+        conflict: true,
+      }, { status: 409 });
+    }
+    const { data: updatedUser, error: updateUserError } = await admin.auth.admin.updateUserById(existingUser.id, {
+      password,
+      email_confirm: true,
+      user_metadata: { organization_id: project.organization_id, project_id: projectId, project_role: role, identifier },
+    });
+    if (updateUserError || !updatedUser.user) {
+      console.error("Réactivation du compte chantier impossible", updateUserError);
+      return NextResponse.json({ error: `Compte non réactivé : ${updateUserError?.message ?? "erreur inconnue"}` }, { status: 500 });
+    }
+    createdUserId = updatedUser.user.id;
+  } else {
+    const { data: createdUser, error: createUserError } = await admin.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: { organization_id: project.organization_id, project_id: projectId, project_role: role, identifier },
+    });
+    if (createUserError || !createdUser.user) {
+      const alreadyRegistered = /already|registered|exists|duplicate/i.test(createUserError?.message ?? "");
+      console.error("Création du compte chantier impossible", createUserError);
+      return NextResponse.json({
+        error: alreadyRegistered
+          ? "Un compte existe déjà avec cette adresse e-mail."
+          : `Compte non créé : ${createUserError?.message ?? "erreur inconnue"}`,
+        conflict: alreadyRegistered ? true : undefined,
+      }, { status: alreadyRegistered ? 409 : 500 });
+    }
+    createdUserId = createdUser.user.id;
   }
 
   const memberRole = role === "works_manager" ? "works_manager" : "site_manager";
   const { error: memberError } = await admin
     .from("organization_members")
     .upsert(
-      { organization_id: project.organization_id, user_id: createdUser.user.id, role: memberRole, active: true },
+      { organization_id: project.organization_id, user_id: createdUserId, role: memberRole, active: true },
       { onConflict: "organization_id,user_id" },
     );
   if (memberError) {
@@ -164,21 +214,30 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     return NextResponse.json({ error: `Compte créé mais rattachement à l'organisation impossible : ${memberError.message}` }, { status: 500 });
   }
 
-  const { data: assignment, error: assignmentError } = await admin
+  // Si cette personne avait déjà un accès (même désactivé) sur ce chantier,
+  // on met à jour cette ligne au lieu d'en créer une deuxième.
+  const { data: existingAssignment } = await admin
     .from("project_assignments")
-    .insert({
-      organization_id: project.organization_id,
-      project_id: projectId,
-      user_id: createdUser.user.id,
-      role,
-      active: true,
-      permissions: safePermissions(payload.permissions),
-      parent_assignment_id: parentAssignmentId,
-      assigned_by: user.id,
-      access_password: password,
-    })
-    .select()
-    .single();
+    .select("id")
+    .eq("project_id", projectId)
+    .eq("user_id", createdUserId)
+    .maybeSingle();
+
+  const assignmentFields = {
+    organization_id: project.organization_id,
+    project_id: projectId,
+    user_id: createdUserId,
+    role,
+    active: true,
+    permissions: safePermissions(payload.permissions),
+    parent_assignment_id: parentAssignmentId,
+    assigned_by: user.id,
+    access_password: password,
+  };
+
+  const { data: assignment, error: assignmentError } = existingAssignment
+    ? await admin.from("project_assignments").update(assignmentFields).eq("id", existingAssignment.id).select().single()
+    : await admin.from("project_assignments").insert(assignmentFields).select().single();
   if (assignmentError || !assignment) {
     console.error("Accès chantier non enregistré", assignmentError);
     return NextResponse.json({ error: `Compte créé mais accès au chantier non enregistré : ${assignmentError?.message ?? "erreur inconnue"}` }, { status: 500 });
@@ -186,7 +245,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
   return NextResponse.json({
     assignment: { ...assignment, email, displayName: identifier },
-    message: "Compte créé avec l'identifiant et le mot de passe saisis : transmettez-les à la personne concernée.",
+    message: existingAssignment
+      ? "Compte réactivé avec les nouvelles informations : transmettez l'identifiant et le mot de passe à la personne concernée."
+      : "Compte créé avec l'identifiant et le mot de passe saisis : transmettez-les à la personne concernée.",
   }, { status: 201 });
 }
 

@@ -1,4 +1,4 @@
-:root{--bg:#f4f6f3;--card:#fff;--ink:#17251d;--muted:#6b776f;--line:#e2e8e3;--green:#153f2b;--green2:#245e41;--gold:#e7b449;--danger:#a33b3e}*{box-sizing:border-box}html,body{margin:0;min-height:100%;overflow-x:hidden;font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;background:linear-gradient(rgba(244,246,243,.94),rgba(244,246,243,.94)),url('/images/chantier-bg.jpg') center/cover fixed no-repeat,var(--bg);color:var(--ink)}
+:root{--bg:#f4f6f3;--card:#fff;--ink:#17251d;--muted:#6b776f;--line:#e2e8e3;--green:#153f2b;--green2:#245e41;--gold:#e7b449;--danger:#a33b3e}*{box-sizing:border-box}html,body{margin:0;min-height:100%;overflow-x:hidden;font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;background:linear-gradient(rgba(244,246,243,.5),rgba(244,246,243,.5)),url('/images/chantier-bg.jpg') center/cover fixed no-repeat,var(--bg);color:var(--ink)}
 /* Décor discret : la photo de chantier reste visible en très léger filigrane
    derrière les pages ; le voile clair au-dessus garde tout le texte et les
    cartes blanches parfaitement lisibles, sans rien changer d'autre. */

@@ -1506,6 +1506,39 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     } finally { setBusy(false); }
   }
 
+  async function submitAccessInvitation(body: Record<string, unknown>, formElement: HTMLFormElement) {
+    setBusy(true);
+    setAccessFeedback({ kind: "info", text: body.confirmReplace ? "Réactivation du compte en cours…" : "Création du compte en cours…" });
+    try {
+      const response = await fetch(`/api/projects/${selectedId}/access-invitations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const result = await response.json().catch(() => ({})) as { assignment?: Assignment; error?: string; message?: string; conflict?: boolean };
+      if (!response.ok) {
+        if (result.conflict && !body.confirmReplace) {
+          setBusy(false);
+          const wantsReplace = window.confirm(`${result.error || "Un compte existe déjà avec cet identifiant."}\n\nVoulez-vous réactiver ce compte avec les nouvelles informations saisies (mot de passe, rôle et permissions) ?`);
+          if (wantsReplace) { await submitAccessInvitation({ ...body, confirmReplace: true }, formElement); return; }
+          setAccessFeedback({ kind: "error", text: result.error || "Compte non créé." });
+          return;
+        }
+        setAccessFeedback({ kind: "error", text: result.error || "Compte non créé." });
+        return;
+      }
+      if (result.assignment) setAssignments((rows) => [result.assignment!, ...rows.filter((item) => item.id !== result.assignment!.id)]);
+      formElement.reset();
+      setAccessPermissions({ reports: true, stock: true, photos: true });
+      setCreateRole("works_manager");
+      setCreateParentAssignmentId("");
+      setAccessFeedback({ kind: "success", text: result.message || "Compte créé avec l’identifiant et le mot de passe saisis : transmettez-les à la personne concernée." });
+      setTeamView("team");
+    } catch {
+      setAccessFeedback({ kind: "error", text: "Impossible de créer l’accès pour le moment. Vérifiez votre connexion puis réessayez." });
+    } finally { setBusy(false); }
+  }
+
   async function inviteCollaborator(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (projectFinished) { setAccessFeedback({ kind: "error", text: "Le chantier est terminé : aucun nouvel accès ne peut être créé." }); return; }
@@ -1519,26 +1552,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     if (!email) { setAccessFeedback({ kind: "error", text: "Saisissez l’adresse e-mail du collaborateur." }); return; }
     if (password.length < 6) { setAccessFeedback({ kind: "error", text: "Le mot de passe doit contenir au moins 6 caractères." }); return; }
     if (isAdmin && role === "site_manager" && !createParentAssignmentId) { setAccessFeedback({ kind: "error", text: "Choisissez le conducteur sous lequel rattacher ce chef de chantier." }); return; }
-    setBusy(true);
-    setAccessFeedback({ kind: "info", text: "Création du compte en cours…" });
-    try {
-      const response = await fetch(`/api/projects/${selectedId}/access-invitations`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password, role, permissions: accessPermissions, parentAssignmentId: isAdmin && role === "site_manager" ? createParentAssignmentId : undefined }),
-      });
-      const result = await response.json().catch(() => ({})) as { assignment?: Assignment; error?: string; message?: string };
-      if (!response.ok) { setAccessFeedback({ kind: "error", text: result.error || "Compte non créé." }); return; }
-      if (result.assignment) setAssignments((rows) => [result.assignment!, ...rows]);
-      formElement.reset();
-      setAccessPermissions({ reports: true, stock: true, photos: true });
-      setCreateRole("works_manager");
-      setCreateParentAssignmentId("");
-      setAccessFeedback({ kind: "success", text: result.message || "Compte créé avec l’identifiant et le mot de passe saisis : transmettez-les à la personne concernée." });
-      setTeamView("team");
-    } catch {
-      setAccessFeedback({ kind: "error", text: "Impossible de créer l’accès pour le moment. Vérifiez votre connexion puis réessayez." });
-    } finally { setBusy(false); }
+    await submitAccessInvitation({ email, password, role, permissions: accessPermissions, parentAssignmentId: isAdmin && role === "site_manager" ? createParentAssignmentId : undefined }, formElement);
   }
 
   function openInvitationEdit(invitation: Invitation) {
