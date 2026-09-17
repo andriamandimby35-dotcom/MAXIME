@@ -121,7 +121,14 @@ export async function POST(request: Request) {
   if (!aiResponse.ok) {
     const details = await aiResponse.text();
     console.error("OpenAI devis PDF analysis failed", aiResponse.status, details);
-    return NextResponse.json({ error: "L'analyse du PDF a échoué. Réessayez." }, { status: 502 });
+    const isTimeout = aiResponse.status === 408 || aiResponse.status === 504;
+    return NextResponse.json({
+      error: isTimeout
+        ? "L'analyse du PDF a pris trop de temps. Réessayez."
+        : "L'analyse du PDF a échoué. Réessayez.",
+      upstream_status: aiResponse.status,
+      details: details.slice(0, 500),
+    }, { status: 502 });
   }
 
   const aiPayload = await aiResponse.json() as {

@@ -54,9 +54,15 @@ export function CreateProjectFlow() {
     const form = new FormData();
     form.append("file", pdfFile);
     const response = await fetch("/api/projects/extract-tasks-from-pdf", { method: "POST", body: form });
-    const payload = await response.json().catch(() => ({})) as { error?: string; works?: string[]; project_name?: string; location?: string };
+    const payload = await response.json().catch(() => ({})) as { error?: string; works?: string[]; project_name?: string; location?: string; upstream_status?: number; details?: string };
     setAnalyzing(false);
-    if (!response.ok || !payload.works) { setError(payload.error || "L'analyse du PDF a échoué."); return; }
+    if (!response.ok || !payload.works) {
+      // Diagnostic temporaire : on affiche aussi la réponse brute du moteur IA
+      // pour comprendre pourquoi l'analyse échoue.
+      const diag = payload.upstream_status ? ` [DIAG: status=${payload.upstream_status} — ${payload.details ?? ""}]` : "";
+      setError((payload.error || "L'analyse du PDF a échoué.") + diag);
+      return;
+    }
     setName(payload.project_name || "");
     setLocation(payload.location || "");
     setTasks(payload.works);
