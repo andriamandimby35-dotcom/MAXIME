@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
 function isLocalDocument(url: string) {
@@ -12,7 +12,17 @@ function isLocalDocument(url: string) {
   }
 }
 
+function closePdfViewer(router: ReturnType<typeof useRouter>) {
+  window.close();
+  // Si l'onglet n'a pas pu être fermé (ex : ouvert sans le bouton "Ouvrir le DAO"),
+  // on revient simplement à la page précédente.
+  window.setTimeout(() => {
+    if (!window.closed) router.back();
+  }, 150);
+}
+
 function PdfViewerContent() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const documentUrl = searchParams.get("document") || searchParams.get("url") || "";
   const requestMethod = searchParams.get("method") === "POST" ? "POST" : "GET";
@@ -83,9 +93,9 @@ function PdfViewerContent() {
     };
   }, [documentUrl, requestMethod]);
 
-  if (!documentUrl || (!viewerUrl && !loading)) return <main className="pdfViewerError"><h1>PDF indisponible</h1><p>{message}</p><p>Revenez à l’application puis ouvrez de nouveau le document.</p></main>;
+  if (!documentUrl || (!viewerUrl && !loading)) return <main className="pdfViewerError"><h1>PDF indisponible</h1><p>{message}</p><p>Revenez à l’application puis ouvrez de nouveau le document.</p><button type="button" className="ghostButton mt-3" onClick={() => closePdfViewer(router)}>Fermer</button></main>;
   if (!viewerUrl) return <main className="pdfViewerError"><h1>Préparation du PDF…</h1><p>{message}</p></main>;
-  return <main className="pdfViewerPage"><header><strong>Lecteur PDF</strong><span>{message}</span></header><iframe title="Lecteur PDF" src={viewerUrl} /></main>;
+  return <main className="pdfViewerPage"><header><strong>Lecteur PDF</strong><span>{message}</span><button type="button" className="pdfViewerCloseButton" onClick={() => closePdfViewer(router)}>Fermer ✕</button></header><iframe title="Lecteur PDF" src={viewerUrl} /></main>;
 }
 
 export default function PdfViewerPage() {

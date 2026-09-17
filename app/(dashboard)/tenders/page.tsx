@@ -195,7 +195,7 @@ export default async function TendersPage() {
                 <td className="p-4 tenderRowActions" data-label="Actions">
                   {tender.document_url ? (
                     <a
-                      href={`/pdf-viewer?url=${encodeURIComponent(tender.document_url)}`}
+                      href={`/pdf-viewer?document=${encodeURIComponent(`/api/tenders/${tender.id}/document`)}`}
                       target="_blank"
                       rel="noreferrer"
                       className="tenderButton"
