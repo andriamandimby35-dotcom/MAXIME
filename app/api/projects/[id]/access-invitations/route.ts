@@ -12,6 +12,9 @@ type InvitationPayload = {
   permissions?: Record<string, boolean>;
   parentAssignmentId?: string;
   confirmReplace?: boolean;
+  phoneNumber?: string;
+  mvolaEnabled?: boolean;
+  callEnabled?: boolean;
 };
 
 type RevokePayload = {
@@ -223,6 +226,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     .eq("user_id", createdUserId)
     .maybeSingle();
 
+  const phoneNumber = String(payload.phoneNumber ?? "").trim();
   const assignmentFields = {
     organization_id: project.organization_id,
     project_id: projectId,
@@ -233,6 +237,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     parent_assignment_id: parentAssignmentId,
     assigned_by: user.id,
     access_password: password,
+    phone_number: phoneNumber || null,
+    mvola_enabled: phoneNumber ? payload.mvolaEnabled === true : false,
+    call_enabled: phoneNumber ? payload.callEnabled === true : false,
   };
 
   const { data: assignment, error: assignmentError } = existingAssignment

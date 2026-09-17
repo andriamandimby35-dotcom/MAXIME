@@ -47,10 +47,10 @@ type QueuedPurchasePayload = {
   transportPrice: number | null;
 };
 type ProjectAccessRole = "admin" | "works_manager" | "site_manager" | "viewer";
-type Assignment = { id: string; user_id: string; role: string; active: boolean; permissions?: Record<string, boolean> | null; parent_assignment_id?: string | null; created_at?: string; email?: string | null; displayName?: string | null; access_password?: string | null };
+type Assignment = { id: string; user_id: string; role: string; active: boolean; permissions?: Record<string, boolean> | null; parent_assignment_id?: string | null; created_at?: string; email?: string | null; displayName?: string | null; access_password?: string | null; phone_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean };
 type Invitation = { id: string; email: string; role: string; status: string; permissions?: Record<string, boolean> | null; parent_assignment_id?: string | null; invited_by?: string | null; accepted_at?: string | null; created_at?: string };
 type MaterialOrder = { id: string; project_id: string; material_id?: string | null; material_name: string; material_key: string; unit: string; quantity: number | string; unit_price: number | string; needed_date?: string | null; needed_timing?: "now" | "tomorrow" | "week" | null; status: "draft" | "submitted" | "approved" | "covered_by_stock" | "paid" | "rejected" | "cancelled" | string; notes?: string | null; requested_by?: string | null; validated_by?: string | null; request_group_id?: string | null; submitted_at?: string | null; approved_at?: string | null; approved_quantity?: number | string | null; stock_available_at_approval?: number | string | null; quantity_to_purchase?: number | string | null; purchased_quantity?: number | string | null; purchase_photo_path?: string | null; purchase_photo_caption?: string | null; paid_at?: string | null; seen_at?: string | null; created_at?: string };
-type StaffMember = { id: string; project_id: string; full_name: string; role_name?: string | null; active?: boolean; created_at?: string; mvola_number?: string | null; supervisor_assignment_id?: string | null };
+type StaffMember = { id: string; project_id: string; full_name: string; role_name?: string | null; active?: boolean; created_at?: string; mvola_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; supervisor_assignment_id?: string | null };
 type DailyAttendance = { id: string; project_id: string; staff_member_id: string; report_date: string; present: boolean; recorded_by?: string | null; created_at?: string };
 type ReportMaterialUsage = { id: string; project_id: string; report_id: string; material_id: string; quantity: number | string; unit: string; created_at?: string };
 
@@ -59,6 +59,10 @@ const date = new Intl.DateTimeFormat("fr-FR");
 const dateTime = new Intl.DateTimeFormat("fr-FR", { dateStyle: "short", timeStyle: "short" });
 const isLocked = (createdAt?: string) => Boolean(createdAt && !createdAt.startsWith(new Date().toISOString().slice(0, 10)));
 const materialKey = (value: string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+function phoneLink(phone?: string | null) {
+  if (!phone) return null;
+  return <a className="projectPhoneLink" href={`tel:${phone.replace(/\s+/g, "")}`} onClick={(event) => event.stopPropagation()}>{phone}</a>;
+}
 
 export function ProjectSiteManager({ organizationId, userId, accessRole = "admin", projectPage = false, assignments: initialAssignments = [], invitations: initialInvitations = [], projects: initialProjects, tasks: initialTasks, reports: initialReports, materials: initialMaterials, stockMovements: initialStockMovements, photos: initialPhotos, suggestions: initialSuggestions, notes: initialNotes, materialOrders: initialMaterialOrders = [], staffMembers: initialStaffMembers = [], attendance: initialAttendance = [], reportMaterialUsages: initialReportMaterialUsages = [], priceItems: initialPriceItems = [] }: { organizationId: string | null; userId?: string | null; accessRole?: ProjectAccessRole; projectPage?: boolean; assignments?: Assignment[]; invitations?: Invitation[]; projects: Project[]; tasks: Task[]; reports: Report[]; materials: Material[]; stockMovements: StockMovement[]; photos: SitePhoto[]; suggestions: AiSuggestion[]; notes: RecordNote[]; materialOrders?: MaterialOrder[]; staffMembers?: StaffMember[]; attendance?: DailyAttendance[]; reportMaterialUsages?: ReportMaterialUsage[]; priceItems?: PriceItem[] }) {
   const supabase = useMemo(() => createClient(), []);
@@ -204,8 +208,8 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   // puisqu'elle est forcément sur place pour faire sa saisie. S'il y a
   // plusieurs conducteurs ou chefs sur le même chantier, ils voient tous la
   // même liste complète (pas seulement leur propre binôme).
-  const attendanceHierarchyRoster: Array<{ id: string; name: string; role: string }> = (isAdmin || canOperate)
-    ? [...activeConductors.map((item) => ({ id: item.id, name: item.displayName || "Conducteur", role: "Conducteur" })), ...activeSiteManagers.map((item) => ({ id: item.id, name: item.displayName || "Chef de chantier", role: "Chef de chantier" }))]
+  const attendanceHierarchyRoster: Array<{ id: string; name: string; role: string; phone?: string | null }> = (isAdmin || canOperate)
+    ? [...activeConductors.map((item) => ({ id: item.id, name: item.displayName || "Conducteur", role: "Conducteur", phone: item.phone_number })), ...activeSiteManagers.map((item) => ({ id: item.id, name: item.displayName || "Chef de chantier", role: "Chef de chantier", phone: item.phone_number }))]
     : [];
   // Le droit « Stocks » est choisi lors de la création de l'accès. Il couvre
   // l'ajout de matériaux, les mouvements et la correction de ses propres saisies du jour.
@@ -396,6 +400,90 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     return () => { void supabase.removeChannel(channel); };
   }, [selectedId, supabase]);
 
+  // Accès (comptes conducteur/chef), équipe déclarée et présence du jour :
+  // un retrait, un ajout ou un pointage fait par un autre poste (ou par
+  // l'administrateur) apparaît en direct, sans avoir besoin de rafraîchir.
+  useEffect(() => {
+    if (!selectedId) return;
+    const channel = supabase
+      .channel(`project-team-${selectedId}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "project_assignments", filter: `project_id=eq.${selectedId}` },
+        (payload) => {
+          const row = payload.new as Assignment;
+          setAssignments((rows) => rows.some((item) => item.id === row.id) ? rows : [row, ...rows]);
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "project_assignments", filter: `project_id=eq.${selectedId}` },
+        (payload) => {
+          const row = payload.new as Assignment;
+          setAssignments((rows) => rows.map((item) => item.id === row.id ? { ...item, ...row } : item));
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "project_access_invitations", filter: `project_id=eq.${selectedId}` },
+        (payload) => {
+          const row = payload.new as Invitation;
+          setInvitations((rows) => rows.some((item) => item.id === row.id) ? rows : [row, ...rows]);
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "project_access_invitations", filter: `project_id=eq.${selectedId}` },
+        (payload) => {
+          const row = payload.new as Invitation;
+          setInvitations((rows) => rows.map((item) => item.id === row.id ? row : item));
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "project_staff_members", filter: `project_id=eq.${selectedId}` },
+        (payload) => {
+          const row = payload.new as StaffMember;
+          setStaffMembers((rows) => rows.some((item) => item.id === row.id) ? rows : [...rows, row]);
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "project_staff_members", filter: `project_id=eq.${selectedId}` },
+        (payload) => {
+          const row = payload.new as StaffMember;
+          setStaffMembers((rows) => rows.map((item) => item.id === row.id ? row : item));
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "DELETE", schema: "public", table: "project_staff_members" },
+        (payload) => {
+          const oldRow = payload.old as { id?: string };
+          if (!oldRow.id) return;
+          setStaffMembers((rows) => rows.filter((item) => item.id !== oldRow.id));
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "project_daily_attendance", filter: `project_id=eq.${selectedId}` },
+        (payload) => {
+          const row = payload.new as DailyAttendance;
+          setAttendance((rows) => rows.some((item) => item.id === row.id) ? rows : [row, ...rows]);
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "project_daily_attendance", filter: `project_id=eq.${selectedId}` },
+        (payload) => {
+          const row = payload.new as DailyAttendance;
+          setAttendance((rows) => rows.map((item) => item.id === row.id ? row : item));
+        },
+      )
+      .subscribe();
+    return () => { void supabase.removeChannel(channel); };
+  }, [selectedId, supabase]);
+
   // Idem pour les rapports journaliers : un rapport envoyé par un autre poste
   // (avec ses photos et consommations) apparaît en direct, sans rechargement.
   useEffect(() => {
@@ -432,6 +520,49 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
         (payload) => {
           const row = payload.new as ReportMaterialUsage;
           setReportMaterialUsages((rows) => rows.some((item) => item.id === row.id) ? rows : [row, ...rows]);
+        },
+      )
+      .subscribe();
+    return () => { void supabase.removeChannel(channel); };
+  }, [selectedId, supabase]);
+
+  // Idem pour les tâches du planning et les suggestions IA : une mise à jour
+  // faite par un autre poste (avancement, statut, réponse à une suggestion)
+  // apparaît en direct, sans rechargement.
+  useEffect(() => {
+    if (!selectedId) return;
+    const channel = supabase
+      .channel(`project-tasks-${selectedId}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "project_tasks", filter: `project_id=eq.${selectedId}` },
+        (payload) => {
+          const row = payload.new as Task;
+          setTasks((rows) => rows.some((item) => item.id === row.id) ? rows : [...rows, row]);
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "project_tasks", filter: `project_id=eq.${selectedId}` },
+        (payload) => {
+          const row = payload.new as Task;
+          setTasks((rows) => rows.map((item) => item.id === row.id ? { ...item, ...row } : item));
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "project_ai_suggestions", filter: `project_id=eq.${selectedId}` },
+        (payload) => {
+          const row = payload.new as AiSuggestion;
+          setSuggestions((rows) => rows.some((item) => item.id === row.id) ? rows : [row, ...rows]);
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "project_ai_suggestions", filter: `project_id=eq.${selectedId}` },
+        (payload) => {
+          const row = payload.new as AiSuggestion;
+          setSuggestions((rows) => rows.map((item) => item.id === row.id ? { ...item, ...row } : item));
         },
       )
       .subscribe();
@@ -1397,7 +1528,9 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     if (!full_name) return;
     if (projectStaff.some((item) => materialKey(item.full_name) === materialKey(full_name))) { setMessage("Cette personne est déjà dans la liste du chantier."); return; }
     const mvola = String(form.get("mvola") || "").trim();
-    const payload = { organization_id: organizationId, project_id: selectedId, full_name, role_name: String(form.get("role") || "Ouvrier"), active: true, mvola_number: mvola || null };
+    const mvolaEnabled = form.get("mvola_enabled") === "on";
+    const callEnabled = form.get("call_enabled") === "on";
+    const payload = { organization_id: organizationId, project_id: selectedId, full_name, role_name: String(form.get("role") || "Ouvrier"), active: true, mvola_number: mvola || null, mvola_enabled: mvola ? mvolaEnabled : false, call_enabled: mvola ? callEnabled : false };
     if (!online) {
       const local = { ...payload, id: `local-${crypto.randomUUID()}`, created_at: new Date().toISOString() } as StaffMember;
       setStaffMembers((rows) => [...rows, local]); queueForSync("Membre de l’équipe", "insert", "project_staff_members", payload); formElement.reset(); return;
@@ -1558,10 +1691,13 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     const role = String(form.get("role") || "site_manager");
     const email = String(form.get("email") || "").trim().toLowerCase();
     const password = String(form.get("password") || "");
+    const phoneNumber = String(form.get("phone_number") || "").trim();
+    const mvolaEnabled = form.get("mvola_enabled") === "on";
+    const callEnabled = form.get("call_enabled") === "on";
     if (!email) { setAccessFeedback({ kind: "error", text: "Saisissez l’adresse e-mail du collaborateur." }); return; }
     if (password.length < 6) { setAccessFeedback({ kind: "error", text: "Le mot de passe doit contenir au moins 6 caractères." }); return; }
     if (isAdmin && role === "site_manager" && !createParentAssignmentId) { setAccessFeedback({ kind: "error", text: "Choisissez le conducteur sous lequel rattacher ce chef de chantier." }); return; }
-    await submitAccessInvitation({ email, password, role, permissions: accessPermissions, parentAssignmentId: isAdmin && role === "site_manager" ? createParentAssignmentId : undefined }, formElement);
+    await submitAccessInvitation({ email, password, role, permissions: accessPermissions, phoneNumber: phoneNumber || undefined, mvolaEnabled: phoneNumber ? mvolaEnabled : false, callEnabled: phoneNumber ? callEnabled : false, parentAssignmentId: isAdmin && role === "site_manager" ? createParentAssignmentId : undefined }, formElement);
   }
 
   function openInvitationEdit(invitation: Invitation) {
@@ -1646,12 +1782,12 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
           {isSiteManager ? <div className="projectStaffPanel">
             <div className="projectStaffPanelForm">
               <h3>Ajouter un membre</h3>
-              {canRecordAttendance ? <form className="projectStaffForm" onSubmit={(event) => void addStaffMember(event)}><input name="full_name" required placeholder="Nom et prénom de l’employé" /><input name="role" placeholder="Poste (maçon, aide, magasinier…)" /><input name="mvola" placeholder="Numéro MVola (facultatif)" /><button disabled={busy}>+ Ajouter à l’équipe</button></form> : <p className="projectHint">Votre accès ne permet pas d’ajouter des membres.</p>}
+              {canRecordAttendance ? <form className="projectStaffForm" onSubmit={(event) => void addStaffMember(event)}><input name="full_name" required placeholder="Nom et prénom de l’employé" /><input name="role" placeholder="Poste (maçon, aide, magasinier…)" /><input name="mvola" placeholder="Numéro de téléphone (facultatif)" /><label className="projectInlineCheck"><input type="checkbox" name="mvola_enabled" defaultChecked /> Mvola</label><label className="projectInlineCheck"><input type="checkbox" name="call_enabled" defaultChecked /> Appel</label><button disabled={busy}>+ Ajouter à l’équipe</button></form> : <p className="projectHint">Votre accès ne permet pas d’ajouter des membres.</p>}
             </div>
             <div className="projectStaffPanelList">
               <h3>Équipe déclarée</h3>
               <p>{projectStaff.length} personne(s) active(s)</p>
-              {projectStaff.length ? projectStaff.map((member) => <div className="projectTeamMember" key={member.id}><strong>{member.full_name}</strong><span>{member.role_name || "Équipe"}</span></div>) : <small>Ajoutez votre équipe : elle sera aussi disponible depuis le rapport journalier.</small>}
+              {projectStaff.length ? projectStaff.map((member) => <div className="projectTeamMember" key={member.id}><strong>{member.full_name}</strong>{phoneLink(member.mvola_number)}<span>{member.role_name || "Équipe"}</span></div>) : <small>Ajoutez votre équipe : elle sera aussi disponible depuis le rapport journalier.</small>}
             </div>
           </div> : <>
           <p className="projectHint">Créez les accès depuis ce chantier. Chaque personne ne voit que les données autorisées ; les journées précédentes restent uniquement consultables.</p>{projectFinished && <p className="projectHint">Chantier clôturé : les accès ne peuvent plus être créés ni modifiés.</p>}
@@ -1662,15 +1798,18 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
           {teamView === "create" ? <form className="projectAccessForm" onSubmit={(event) => void inviteCollaborator(event)}>
             <input name="email" type="text" required disabled={projectFinished} placeholder="Identifiant du collaborateur (nom, pseudo ou e-mail)" />
             <input name="password" type="text" required minLength={6} disabled={projectFinished} placeholder="Mot de passe à lui transmettre (6 caractères min.)" />
+            <input name="phone_number" type="text" disabled={projectFinished} placeholder="Numéro de téléphone (facultatif)" />
+            <label className="projectInlineCheck"><input type="checkbox" name="mvola_enabled" /> Mvola</label>
+            <label className="projectInlineCheck"><input type="checkbox" name="call_enabled" defaultChecked /> Appel</label>
             {isAdmin ? <select name="role" value={createRole} disabled={projectFinished} onChange={(event) => { setCreateRole(event.target.value); setCreateParentAssignmentId(""); }}><option value="works_manager">Conducteur de travaux</option><option value="site_manager">Chef de chantier</option><option value="viewer">Consultation uniquement</option></select> : <input type="hidden" name="role" value="site_manager" />}
             {isAdmin && createRole === "site_manager" && <select value={createParentAssignmentId} disabled={projectFinished} onChange={(event) => setCreateParentAssignmentId(event.target.value)}><option value="">Rattacher sous quel conducteur ?</option>{activeConductors.map((item) => <option key={item.id} value={item.id}>{item.displayName || `Conducteur ${item.user_id.slice(0, 8)}`}</option>)}</select>}
             <div className="projectPermissionButtons" role="group" aria-label="Autorisations du collaborateur">{([['reports', 'Rapports'], ['stock', 'Stocks : ajout et enregistrement'], ['photos', 'Photos']] as const).map(([permission, label]) => <button key={permission} type="button" disabled={projectFinished} className={accessPermissions[permission] ? "isSelected" : ""} aria-pressed={accessPermissions[permission]} onClick={() => setAccessPermissions((current) => ({ ...current, [permission]: !current[permission] }))}>{accessPermissions[permission] ? "✓ " : ""}{label}</button>)}</div>
             <button type="submit" disabled={busy || projectFinished}>{busy ? "Création en cours…" : projectFinished ? "Accès désactivés" : isAdmin ? "Créer le compte" : "Créer le compte chef de chantier"}</button>
             {accessFeedback && <p className={`projectAccessStatus ${accessFeedback.kind}`} role="status" aria-live="polite">{accessFeedback.text}</p>}
           </form> : <div className="projectTeamRoster">
-            {isAdmin && <article><h3 style={{cursor:"pointer"}} onClick={() => setExpandedRoster((current) => ({ ...current, conductors: !current.conductors }))}>{expandedRoster.conductors ? "▾" : "▸"} Conducteurs</h3><p>{activeConductors.length} actif(s) · {pendingConductors.length} en attente</p>{expandedRoster.conductors && <>{activeConductors.map((item) => <div className="projectTeamMember" key={item.id}><strong style={isAdmin ? {cursor:"pointer",textDecoration:"underline"} : undefined} onClick={() => isAdmin && setViewingAssignment(item)}>Compte conducteur · {item.displayName || item.email || item.user_id.slice(0, 8)}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span className="active">Actif</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ assignmentId: item.id }, "cet accès conducteur")}>Retirer</button>}</div></div>)}{pendingConductors.map((item) => <div className="projectTeamMember" key={item.id}><strong>{item.email}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span className="pending">En attente</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-emerald-700 bg-white px-2 py-1 text-xs font-bold text-emerald-800 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => openInvitationEdit(item)}>Modifier</button>}{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ invitationId: item.id }, "cette demande d’accès")}>Supprimer</button>}</div></div>)}{activeConductors.length + pendingConductors.length === 0 && <small>Aucun conducteur créé.</small>}</>}</article>}
-            <article><h3 style={{cursor:"pointer"}} onClick={() => setExpandedRoster((current) => ({ ...current, siteManagers: !current.siteManagers }))}>{expandedRoster.siteManagers ? "▾" : "▸"} Chefs de chantier</h3><p>{activeSiteManagers.length} actif(s) · {pendingSiteManagers.length} en attente</p>{expandedRoster.siteManagers && <>{activeSiteManagers.map((item) => <div className="projectTeamMember" key={item.id}><strong style={isAdmin ? {cursor:"pointer",textDecoration:"underline"} : undefined} onClick={() => isAdmin && setViewingAssignment(item)}>Compte chef de chantier · {item.displayName || item.email || item.user_id.slice(0, 8)}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span className="active">Actif</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ assignmentId: item.id }, "cet accès chef de chantier")}>Retirer</button>}</div></div>)}{pendingSiteManagers.map((item) => <div className="projectTeamMember" key={item.id}><strong>{item.email}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span className="pending">En attente</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-emerald-700 bg-white px-2 py-1 text-xs font-bold text-emerald-800 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => openInvitationEdit(item)}>Modifier</button>}{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ invitationId: item.id }, "cette demande d’accès")}>Supprimer</button>}</div></div>)}{activeSiteManagers.length + pendingSiteManagers.length === 0 && <small>Le conducteur créera les chefs de chantier qui lui sont rattachés.</small>}</>}</article>
-            <article><h3>Équipe déclarée</h3><p>{projectStaff.length} personne(s) active(s)</p>{projectStaff.length ? projectStaff.map((member) => <div className="projectTeamMember" key={member.id}><strong>{member.full_name}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span>{member.role_name || "Équipe"}</span>{(isAdmin || accessRole === "works_manager") && activeSiteManagers.length > 0 ? <select value={member.supervisor_assignment_id || ""} disabled={busy || projectFinished} onChange={(event) => void updateStaffSupervisor(member, event.target.value)}><option value="">Chef non désigné</option>{activeSiteManagers.map((item) => <option key={item.id} value={item.id}>{item.displayName || `Chef ${item.user_id.slice(0, 8)}`}</option>)}</select> : null}{isAdmin && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void adminDeleteStaffMember(member)}>Retirer</button>}</div></div>) : <small>Les membres seront affichés dès leur ajout dans le rapport journalier.</small>}</article>
+            {isAdmin && <article><h3 style={{cursor:"pointer"}} onClick={() => setExpandedRoster((current) => ({ ...current, conductors: !current.conductors }))}>{expandedRoster.conductors ? "▾" : "▸"} Conducteurs</h3><p>{activeConductors.length} actif(s) · {pendingConductors.length} en attente</p>{expandedRoster.conductors && <>{activeConductors.map((item) => <div className="projectTeamMember" key={item.id}><strong style={isAdmin ? {cursor:"pointer",textDecoration:"underline"} : undefined} onClick={() => isAdmin && setViewingAssignment(item)}>Compte conducteur · {item.displayName || item.email || item.user_id.slice(0, 8)}</strong>{phoneLink(item.phone_number)}<div className="flex flex-wrap items-center justify-end gap-2"><span className="active">Actif</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ assignmentId: item.id }, "cet accès conducteur")}>Retirer</button>}</div></div>)}{pendingConductors.map((item) => <div className="projectTeamMember" key={item.id}><strong>{item.email}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span className="pending">En attente</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-emerald-700 bg-white px-2 py-1 text-xs font-bold text-emerald-800 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => openInvitationEdit(item)}>Modifier</button>}{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ invitationId: item.id }, "cette demande d’accès")}>Supprimer</button>}</div></div>)}{activeConductors.length + pendingConductors.length === 0 && <small>Aucun conducteur créé.</small>}</>}</article>}
+            <article><h3 style={{cursor:"pointer"}} onClick={() => setExpandedRoster((current) => ({ ...current, siteManagers: !current.siteManagers }))}>{expandedRoster.siteManagers ? "▾" : "▸"} Chefs de chantier</h3><p>{activeSiteManagers.length} actif(s) · {pendingSiteManagers.length} en attente</p>{expandedRoster.siteManagers && <>{activeSiteManagers.map((item) => <div className="projectTeamMember" key={item.id}><strong style={isAdmin ? {cursor:"pointer",textDecoration:"underline"} : undefined} onClick={() => isAdmin && setViewingAssignment(item)}>Compte chef de chantier · {item.displayName || item.email || item.user_id.slice(0, 8)}</strong>{phoneLink(item.phone_number)}<div className="flex flex-wrap items-center justify-end gap-2"><span className="active">Actif</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ assignmentId: item.id }, "cet accès chef de chantier")}>Retirer</button>}</div></div>)}{pendingSiteManagers.map((item) => <div className="projectTeamMember" key={item.id}><strong>{item.email}</strong><div className="flex flex-wrap items-center justify-end gap-2"><span className="pending">En attente</span>{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-emerald-700 bg-white px-2 py-1 text-xs font-bold text-emerald-800 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => openInvitationEdit(item)}>Modifier</button>}{isAdmin && !projectFinished && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => revokeAccess({ invitationId: item.id }, "cette demande d’accès")}>Supprimer</button>}</div></div>)}{activeSiteManagers.length + pendingSiteManagers.length === 0 && <small>Le conducteur créera les chefs de chantier qui lui sont rattachés.</small>}</>}</article>
+            <article><h3>Équipe déclarée</h3><p>{projectStaff.length} personne(s) active(s)</p>{projectStaff.length ? projectStaff.map((member) => <div className="projectTeamMember" key={member.id}><strong>{member.full_name}</strong>{phoneLink(member.mvola_number)}<div className="flex flex-wrap items-center justify-end gap-2"><span>{member.role_name || "Équipe"}</span>{(isAdmin || accessRole === "works_manager") && activeSiteManagers.length > 0 ? <select value={member.supervisor_assignment_id || ""} disabled={busy || projectFinished} onChange={(event) => void updateStaffSupervisor(member, event.target.value)}><option value="">Chef non désigné</option>{activeSiteManagers.map((item) => <option key={item.id} value={item.id}>{item.displayName || `Chef ${item.user_id.slice(0, 8)}`}</option>)}</select> : null}{isAdmin && <button type="button" className="rounded-lg border border-red-700 bg-white px-2 py-1 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void adminDeleteStaffMember(member)}>Retirer</button>}</div></div>) : <small>Les membres seront affichés dès leur ajout dans le rapport journalier.</small>}</article>
           </div>}
           </>}
         </section>}
@@ -1816,7 +1955,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
         {openReportField === "workers" && <div className="modalBackdrop" onClick={() => setOpenReportField(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
           <h2 className="font-bold text-xl mb-4">Effectif présent</h2>
           <p className="projectHint">Cliquez chaque personne présente aujourd’hui. Le compte et le rapport se mettent à jour automatiquement.</p>
-          <form className="projectStaffForm" onSubmit={(event) => void addStaffMember(event)}><input name="full_name" required placeholder="Nom et prénom de l’employé" /><input name="role" placeholder="Poste (maçon, aide, magasinier…)" /><input name="mvola" placeholder="Numéro MVola (facultatif)" /><button disabled={busy}>+ Ajouter à l’équipe</button></form>
+          <form className="projectStaffForm" onSubmit={(event) => void addStaffMember(event)}><input name="full_name" required placeholder="Nom et prénom de l’employé" /><input name="role" placeholder="Poste (maçon, aide, magasinier…)" /><input name="mvola" placeholder="Numéro de téléphone (facultatif)" /><label className="projectInlineCheck"><input type="checkbox" name="mvola_enabled" defaultChecked /> Mvola</label><label className="projectInlineCheck"><input type="checkbox" name="call_enabled" defaultChecked /> Appel</label><button disabled={busy}>+ Ajouter à l’équipe</button></form>
           <div className="projectAttendanceList">{projectStaff.length ? projectStaff.map((member) => { const entry = todayAttendance.find((item) => item.staff_member_id === member.id); const editable = canRecordAttendance && (!entry?.recorded_by || entry.recorded_by === userId); return <button type="button" key={member.id} disabled={!editable} className={entry?.present ? "present" : "absent"} onClick={() => void toggleAttendance(member)}><strong>{member.full_name}</strong><span>{member.role_name || "Employé"}</span><small>{entry?.present ? "Présent" : "Absent"}{!editable ? " · consultation" : ""}</small></button>; }) : <p className="projectEmptyText">Ajoutez les employés avant de marquer leur présence.</p>}</div>
           <button type="button" className="button mt-3" onClick={() => setOpenReportField(null)}>Valider</button>
         </div></div>}
@@ -1917,7 +2056,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
         <section className="projectSiteCard projectAttendanceCard">
           <div className="projectCardHead"><div><p className="projectEyebrow">PRÉSENCE DU JOUR</p><h2>Équipe sur le chantier</h2></div><span>{todayAttendance.filter((item) => item.present).length + attendanceHierarchyRoster.length}/{projectStaff.length + attendanceHierarchyRoster.length} présent(s)</span></div>
           <div className="projectAttendanceList">
-            {attendanceHierarchyRoster.map((person) => <div className="projectTeamMember" key={person.id}><strong>{person.name}</strong><span className="projectChecklistBadge">{person.role}</span></div>)}
+            {attendanceHierarchyRoster.map((person) => <div className="projectTeamMember" key={person.id}><strong>{person.name}</strong>{phoneLink(person.phone)}<span className="projectChecklistBadge">{person.role}</span></div>)}
             {projectStaff.length ? projectStaff.map((member) => { const entry = todayAttendance.find((item) => item.staff_member_id === member.id); return <div className="projectTeamMember" key={member.id}><strong>{member.full_name}</strong><span>{entry?.present ? "Présent" : "Absent"}</span></div>; }) : (!attendanceHierarchyRoster.length && <p className="projectEmptyText">Aucun employé déclaré.</p>)}
           </div>
           <button type="button" className="secondary projectHistoryButton" onClick={() => setViewingAttendanceDetail(true)}>Voir l’historique</button>

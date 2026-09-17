@@ -737,3 +737,7 @@ table tbody tr:hover { background: #f4fbf6; }
   -webkit-backdrop-filter:blur(6px);
 }
 @media(max-width:760px){.sidebar{backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px)}}
+.projectInlineCheck{display:inline-flex!important;align-items:center;gap:6px;width:auto!important;font-size:.85rem;font-weight:600;color:#3d493f;padding:8px 10px!important;cursor:pointer}
+.projectInlineCheck input{width:auto!important;flex:0 0 auto}
+.projectPhoneLink{color:#15703b;font-weight:700;text-decoration:none;white-space:nowrap}
+.projectPhoneLink:hover{text-decoration:underline}

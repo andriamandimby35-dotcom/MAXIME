@@ -1,4 +1,4 @@
-const CACHE = "sebastien-btp-v2";
+const CACHE = "sebastien-btp-v3";
 const OFFLINE = "/offline.html";
 const STATIC_ASSETS = [OFFLINE, "/manifest.webmanifest", "/icons/icon-192.png", "/icons/icon-512.png"];
 
