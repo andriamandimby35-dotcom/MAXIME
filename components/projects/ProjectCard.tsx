@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 
 type Project = {
@@ -83,23 +84,29 @@ export function ProjectCard({
         <button type="button" className="secondary" disabled={busy} onClick={() => setConfirming("delete")}>Supprimer</button>
       </div> : <Link href={`/projects/${project.id}`} className="projectOpenButton" style={{ marginTop: "auto" }}>Consulter →</Link>}
 
-      {confirming === "reopen" && <div className="modalBackdrop" onClick={() => setConfirming(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
-        <h2 className="font-bold text-xl mb-4">Rouvrir « {project.name} » ?</h2>
-        <p className="projectHint">Tous les accès conducteur, chef et équipe qui étaient actifs au moment de la clôture seront réactivés. Le chantier redevient actif comme avant.</p>
-        <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
-          <button type="button" disabled={busy} onClick={() => void reopen()}>{busy ? "Réouverture…" : "Confirmer la réouverture"}</button>
-          <button type="button" className="ghostButton" onClick={() => setConfirming(null)}>Annuler</button>
-        </div>
-      </div></div>}
+      {confirming === "reopen" && typeof document !== "undefined" && createPortal(
+        <div className="modalBackdrop" onClick={() => setConfirming(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
+          <h2 className="font-bold text-xl mb-4">Rouvrir « {project.name} » ?</h2>
+          <p className="projectHint">Tous les accès conducteur, chef et équipe qui étaient actifs au moment de la clôture seront réactivés. Le chantier redevient actif comme avant.</p>
+          <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
+            <button type="button" disabled={busy} onClick={() => void reopen()}>{busy ? "Réouverture…" : "Confirmer la réouverture"}</button>
+            <button type="button" className="ghostButton" onClick={() => setConfirming(null)}>Annuler</button>
+          </div>
+        </div></div>,
+        document.body,
+      )}
 
-      {confirming === "delete" && <div className="modalBackdrop" onClick={() => setConfirming(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
-        <h2 className="font-bold text-xl mb-4">Supprimer « {project.name} » ?</h2>
-        <p className="projectHint">Suppression définitive et irréversible : le chantier et tout ce qui lui est rattaché (rapports, photos, stocks, dépenses, accès…) seront supprimés. Le devis et l’appel d’offres à l’origine de ce chantier, eux, ne sont pas touchés.</p>
-        <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
-          <button type="button" className="dangerButton" disabled={busy} onClick={() => void remove()}>{busy ? "Suppression…" : "Confirmer la suppression"}</button>
-          <button type="button" className="ghostButton" onClick={() => setConfirming(null)}>Annuler</button>
-        </div>
-      </div></div>}
+      {confirming === "delete" && typeof document !== "undefined" && createPortal(
+        <div className="modalBackdrop" onClick={() => setConfirming(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
+          <h2 className="font-bold text-xl mb-4">Supprimer « {project.name} » ?</h2>
+          <p className="projectHint">Suppression définitive et irréversible : le chantier et tout ce qui lui est rattaché (rapports, photos, stocks, dépenses, accès…) seront supprimés. Le devis et l’appel d’offres à l’origine de ce chantier, eux, ne sont pas touchés.</p>
+          <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
+            <button type="button" className="dangerButton" disabled={busy} onClick={() => void remove()}>{busy ? "Suppression…" : "Confirmer la suppression"}</button>
+            <button type="button" className="ghostButton" onClick={() => setConfirming(null)}>Annuler</button>
+          </div>
+        </div></div>,
+        document.body,
+      )}
     </div>;
   }
 
@@ -115,13 +122,16 @@ export function ProjectCard({
     {error && <p className="projectHint" style={{ color: "#a33b3e" }}>{error}</p>}
     <span className="projectOpenButton">Ouvrir le chantier →</span>
 
-    {confirming === "delete" && <div className="modalBackdrop" onClick={(event) => { event.stopPropagation(); setConfirming(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
-      <h2 className="font-bold text-xl mb-4">Supprimer « {project.name} » ?</h2>
-      <p className="projectHint">Suppression définitive et irréversible : le chantier et tout ce qui lui est rattaché (rapports, photos, stocks, dépenses, accès…) seront supprimés, clôturé ou non. Le devis et l’appel d’offres à l’origine de ce chantier, eux, ne sont pas touchés.</p>
-      <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
-        <button type="button" className="dangerButton" disabled={busy} onClick={() => void remove()}>{busy ? "Suppression…" : "Confirmer la suppression"}</button>
-        <button type="button" className="ghostButton" onClick={() => setConfirming(null)}>Annuler</button>
-      </div>
-    </div></div>}
+    {confirming === "delete" && typeof document !== "undefined" && createPortal(
+      <div className="modalBackdrop" onClick={(event) => { event.stopPropagation(); setConfirming(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
+        <h2 className="font-bold text-xl mb-4">Supprimer « {project.name} » ?</h2>
+        <p className="projectHint">Suppression définitive et irréversible : le chantier et tout ce qui lui est rattaché (rapports, photos, stocks, dépenses, accès…) seront supprimés, clôturé ou non. Le devis et l’appel d’offres à l’origine de ce chantier, eux, ne sont pas touchés.</p>
+        <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
+          <button type="button" className="dangerButton" disabled={busy} onClick={() => void remove()}>{busy ? "Suppression…" : "Confirmer la suppression"}</button>
+          <button type="button" className="ghostButton" onClick={() => setConfirming(null)}>Annuler</button>
+        </div>
+      </div></div>,
+      document.body,
+    )}
   </div>;
 }
