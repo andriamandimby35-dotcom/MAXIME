@@ -20,6 +20,17 @@ export async function POST(req: Request) {
     const prix = Number(body.prix);
     const fournisseur = String(body.fournisseur || "").trim();
     const lieu = String(body.lieu || "").trim();
+    const region = String(body.region || "").trim();
+    const disponibilite = String(body.disponibilite || "").trim();
+    const livraison = String(body.livraison || "").trim();
+    const caracteristiques = Array.isArray(body.caracteristiques)
+      ? body.caracteristiques
+          .map((item: unknown) => ({
+            label: String((item as { label?: unknown })?.label ?? "").trim(),
+            valeur: String((item as { valeur?: unknown })?.valeur ?? "").trim(),
+          }))
+          .filter((item: { label: string; valeur: string }) => item.label && item.valeur)
+      : [];
     const isIa = String(body.source || "") === "IA";
     if (!designation || !unite || !Number.isFinite(prix) || prix < 0) return NextResponse.json({ error: "Désignation, unité et prix valides obligatoires." }, { status: 400 });
 
@@ -45,11 +56,14 @@ export async function POST(req: Request) {
         && canonicalUnit(String(price.unite ?? "")) === unite) ?? null;
       current = matchingPrice ? { id: matchingPrice.id, prix_actuel: matchingPrice.prix_actuel } : null;
     }
+    const now = new Date().toISOString();
     const payload = {
       designation, categorie, unite, prix_actuel: prix, prix_entreprise: prix, prix_retenu: prix,
       prix_source: `Saisie manuelle — ${organizationName}`, statut_prix: isIa ? "ia" : "manuel",
       origine_prix: isIa ? "saisie_manuelle_ia" : "saisie_manuelle", fournisseur: fournisseur || null, ville: lieu || null,
-      updated_at: new Date().toISOString(),
+      region: region || null, disponibilite: disponibilite || null, livraison: livraison || null,
+      caracteristiques, date_prix: now,
+      updated_at: now,
       unite_achat: hasPurchaseUnit ? uniteAchat : null,
       quantite_par_unite_achat: hasPurchaseUnit ? quantiteParUniteAchat : null,
       prix_unite_achat: hasPurchaseUnit ? prixUniteAchat : null,
@@ -59,9 +73,8 @@ export async function POST(req: Request) {
       : await supabase.from("price_library").insert({ ...payload, organization_id: member.organization_id }).select("id").single();
     if (error || !saved) return NextResponse.json({ error: error?.message || "Prix non enregistré." }, { status: 500 });
 
-    await supabase.from("price_history").insert({ price_id: saved.id, organization_id: member.organization_id, ancien_prix: current?.prix_actuel ?? null, nouveau_prix: prix, type_variation: current ? "modification_manuelle" : "nouveau", event_type: "manual_price", source_type: "manual_enterprise", created_by: user.id, observed_at: new Date().toISOString() });
+    await supabase.from("price_history").insert({ price_id: saved.id, organization_id: member.organization_id, ancien_prix: current?.prix_actuel ?? null, nouveau_prix: prix, type_variation: current ? "modification_manuelle" : "nouveau", event_type: "manual_price", source_type: "manual_enterprise", created_by: user.id, observed_at: now });
     const sourceLabel = `Saisie manuelle — ${organizationName}`;
-    const now = new Date().toISOString();
     const key = materialKey(designation);
     const { data: existingSharedRows } = await supabase.from("shared_material_prices")
       .select("id,prix_unitaire,unite").eq("designation_key", key);

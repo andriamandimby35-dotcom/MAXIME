@@ -1,6 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { MADAGASCAR_REGIONS } from "@/lib/material-normalization";
+
+type Caracteristique = { label: string; valeur: string };
 
 export default function PriceForm(){
 
@@ -10,6 +13,10 @@ const [unite,setUnite] = useState("");
 const [prix,setPrix] = useState("");
 const [fournisseur,setFournisseur] = useState("");
 const [lieu,setLieu] = useState("");
+const [region,setRegion] = useState("");
+const [disponibilite,setDisponibilite] = useState("");
+const [livraison,setLivraison] = useState("");
+const [caracteristiques,setCaracteristiques] = useState<Caracteristique[]>([]);
 const [source,setSource] = useState("Prix entreprise");
 const [searching,setSearching] = useState(false);
 const [message,setMessage] = useState("");
@@ -26,11 +33,27 @@ setUnite("");
 setPrix("");
 setFournisseur("");
 setLieu("");
+setRegion("");
+setDisponibilite("");
+setLivraison("");
+setCaracteristiques([]);
 setSource("Prix entreprise");
 setVenduParPiece(false);
 setUniteAchat("");
 setQuantiteParPiece("");
 setPrixParPiece("");
+}
+
+function addCaracteristique(){
+setCaracteristiques((current) => [...current, { label: "", valeur: "" }]);
+}
+
+function updateCaracteristique(index:number, field:"label"|"valeur", value:string){
+setCaracteristiques((current) => current.map((item,i) => i === index ? { ...item, [field]: value } : item));
+}
+
+function removeCaracteristique(index:number){
+setCaracteristiques((current) => current.filter((_,i) => i !== index));
 }
 
 async function savePrice(){
@@ -56,6 +79,10 @@ const response = await fetch("/api/prices",{
   prix:Number(prix),
   fournisseur,
   lieu,
+  region,
+  disponibilite,
+  livraison,
+  caracteristiques,
   source,
   ...(venduParPiece ? {
     unite_achat: uniteAchat || "pièce",
@@ -140,12 +167,15 @@ Ajouter un prix
 <div className="formGrid">
 
 <label>
-Désignation
+Nom
 <input
-placeholder="Ex : Ciment CEM II 42.5"
+placeholder="Ex : Fer Turkey Ø12, Ciment Holcim"
 value={designation}
 onChange={(e)=>setDesignation(e.target.value)}
 />
+<small style={{display:"block",marginTop:"4px",color:"#6b776f",fontWeight:400}}>
+Un nom court qui suffit à distinguer ce matériau des autres du même type (marque + diamètre, longueur, ou autre détail utile). L&apos;appellation commerciale complète peut être ajoutée plus bas, dans les caractéristiques.
+</small>
 </label>
 
 <label>
@@ -225,7 +255,7 @@ onChange={(e)=>setFournisseur(e.target.value)}
 </label>
 
 <label>
-Localisation
+Ville
 <input
 placeholder="Ex : Antananarivo"
 value={lieu}
@@ -233,6 +263,63 @@ onChange={(e)=>setLieu(e.target.value)}
 />
 </label>
 
+<label>
+Région
+<select value={region} onChange={(e)=>setRegion(e.target.value)}>
+<option value="">Non renseignée</option>
+{MADAGASCAR_REGIONS.map((name) => <option key={name} value={name}>{name}</option>)}
+</select>
+</label>
+
+</div>
+
+<div className="formGrid mt-2">
+
+<label>
+Disponibilité
+<input
+placeholder="Ex : En stock, sur commande"
+value={disponibilite}
+onChange={(e)=>setDisponibilite(e.target.value)}
+/>
+</label>
+
+<label>
+Livraison
+<input
+placeholder="Ex : 48 h, à retirer sur place"
+value={livraison}
+onChange={(e)=>setLivraison(e.target.value)}
+/>
+</label>
+
+</div>
+
+<div className="mt-3">
+<strong style={{fontSize:"13px"}}>Caractéristiques techniques (optionnel)</strong>
+<p style={{margin:"4px 0 8px",fontSize:"12px",color:"#6b776f"}}>
+Ajoute autant de caractéristiques que nécessaire (origine, norme, diamètre, longueur…) — libre à toi selon le type de matériau.
+</p>
+{caracteristiques.map((item, index) => (
+<div key={index} style={{display:"flex",gap:"8px",marginBottom:"8px"}}>
+<input
+placeholder="Ex : Diamètre"
+value={item.label}
+onChange={(e)=>updateCaracteristique(index,"label",e.target.value)}
+style={{flex:1}}
+/>
+<input
+placeholder="Ex : 12 mm"
+value={item.valeur}
+onChange={(e)=>updateCaracteristique(index,"valeur",e.target.value)}
+style={{flex:1}}
+/>
+<button type="button" className="dangerButton" onClick={()=>removeCaracteristique(index)}>×</button>
+</div>
+))}
+<button type="button" className="ghostButton" onClick={addCaracteristique}>
++ Ajouter une caractéristique
+</button>
 </div>
 
 {message && <p className="notice mt-3" style={{padding:"10px 14px"}}>{message}</p>}

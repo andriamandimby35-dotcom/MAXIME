@@ -553,6 +553,29 @@ table tbody tr:hover { background: #f4fbf6; }
 .variationDown { color: #16834e; font-weight: 750; }
 .dangerButton { border: 0; background: var(--danger); color: #fff; padding: 11px 15px; border-radius: 11px; font-weight: 750; cursor: pointer; }
 
+/* Bibliothèque de prix — bouton de mode (Fournisseur / Région / Nom) */
+.modeRow { display: flex; gap: 8px; margin-top: 14px; }
+.modeBtn { flex: 1; padding: 11px 0; border: 1px solid var(--line); background: #fff; border-radius: 10px; font-weight: 700; font-size: 13.5px; cursor: pointer; color: var(--muted); }
+.modeBtn.active { background: var(--green); color: #fff; border-color: var(--green); }
+.resultsHead { margin-top: 18px; font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+
+/* Bibliothèque de prix — détail d'un matériau (listes d'informations) */
+.sectionLabel { margin-top: 20px; margin-bottom: 2px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.detailList { margin-top: 6px; border-top: 1px solid var(--line); }
+.detailRow { display: flex; justify-content: space-between; gap: 14px; padding: 9px 2px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.detailRow .label { color: var(--muted); }
+.detailRow .value { font-weight: 700; text-align: right; }
+.bottomBlock { border-bottom: 1px solid var(--line); padding-bottom: 16px; }
+.sourceRow { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; }
+.sourceRow .src { font-weight: 700; color: var(--green); }
+.sourceRow .conf { font-weight: 700; color: var(--green2); }
+.priceCompareRow { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; background: #f5f8f5; border-radius: 10px; padding: 10px 14px; }
+.priceCompareRow .newP { color: var(--green); font-weight: 800; font-size: 14px; }
+.priceCompareRow .oldP { color: var(--muted); font-size: 13px; text-decoration: line-through; }
+.priceCompareRow .pct { font-weight: 800; font-size: 13px; }
+.priceCompareRow .pct.up { color: var(--danger); }
+.priceCompareRow .pct.down { color: #1a7a4c; }
+
 /* Prix partagés de référence */
 .sharedPriceBox { margin-top: 24px; border: 1px solid var(--line); border-radius: 16px; background: #eef7f1; padding: 20px; }
 .sharedPriceGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; margin-top: 14px; }

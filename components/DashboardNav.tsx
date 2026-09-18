@@ -82,14 +82,6 @@ export function DashboardNav({
             Dépenses
           </Link>
 
-          <Link href="/suppliers">
-            Fournisseurs
-          </Link>
-
-          <Link href="/prices">
-            Bibliothèque de prix
-          </Link>
-
           <span className="sidebarGroupLabel">Appels d’offres</span>
 
           <Link href="/tenders">

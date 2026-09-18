@@ -43,8 +43,8 @@ console.log(
 
 <div className="pageHead">
 <div>
-<h1>Bibliothèque des prix IA</h1>
-<p>Gestion des prix entreprise, IA et historiques</p>
+<h1>Bibliothèque de prix</h1>
+<p>Tous vos prix, fournisseurs et régions au même endroit.</p>
 </div>
 </div>
 

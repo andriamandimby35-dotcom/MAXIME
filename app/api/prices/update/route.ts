@@ -19,8 +19,20 @@ designation,
 prix,
 unite_achat,
 quantite_par_unite_achat,
-prix_unite_achat
+prix_unite_achat,
+fournisseur,
+ville,
+region,
+disponibilite,
+livraison,
+caracteristiques
 }=body;
+
+const cleanCaracteristiques = Array.isArray(caracteristiques)
+  ? caracteristiques
+      .map((item:any) => ({ label: String(item?.label ?? "").trim(), valeur: String(item?.valeur ?? "").trim() }))
+      .filter((item:{label:string;valeur:string}) => item.label && item.valeur)
+  : undefined;
 
 
 
@@ -152,6 +164,20 @@ unite_achat: unite_achat || null,
 quantite_par_unite_achat: quantite_par_unite_achat ? Number(quantite_par_unite_achat) : null,
 
 prix_unite_achat: prix_unite_achat ? Number(prix_unite_achat) : null,
+
+...(fournisseur !== undefined ? { fournisseur: String(fournisseur || "").trim() || null } : {}),
+
+...(ville !== undefined ? { ville: String(ville || "").trim() || null } : {}),
+
+...(region !== undefined ? { region: String(region || "").trim() || null } : {}),
+
+...(disponibilite !== undefined ? { disponibilite: String(disponibilite || "").trim() || null } : {}),
+
+...(livraison !== undefined ? { livraison: String(livraison || "").trim() || null } : {}),
+
+...(cleanCaracteristiques !== undefined ? { caracteristiques: cleanCaracteristiques } : {}),
+
+date_prix: new Date(),
 
 updated_at:new Date()
 

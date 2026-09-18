@@ -99,3 +99,22 @@ export function materialFamily(value: string) {
   }
   return normalized;
 }
+
+// Les 23 régions officielles de Madagascar, utilisées comme liste fermée
+// dans le formulaire de prix : ça évite les doublons (fautes de frappe,
+// variantes d'écriture) qu'on aurait avec un champ texte libre.
+export const MADAGASCAR_REGIONS = [
+  "Analamanga", "Vakinankaratra", "Itasy", "Bongolava", "Haute Matsiatra",
+  "Amoron'i Mania", "Vatovavy", "Fitovinany", "Atsimo-Atsinanana", "Ihorombe",
+  "Atsinanana", "Analanjirofo", "Alaotra-Mangoro", "Boeny", "Sofia",
+  "Betsiboka", "Melaky", "Atsimo-Andrefana", "Androy", "Anosy", "Menabe",
+  "Diana", "Sava",
+];
+
+// Regroupe les prix par région pour le mode d'affichage "Région" de la
+// bibliothèque de prix (même esprit que supplierGroup ci-dessus, mais plus
+// simple car la région vient d'une liste fermée, sans variantes d'écriture).
+export function regionGroup(region: string) {
+  const label = region.trim();
+  return { label, key: canonicalMaterialKey(label) || "autre" };
+}

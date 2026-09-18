@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<title>Maquette — Bibliothèque de prix</title>
+<style>
+  :root{--bg:#f4f6f3;--card:#fff;--ink:#17251d;--muted:#6b776f;--line:#e2e8e3;--green:#153f2b;--green2:#245e41;--gold:#e7b449;--danger:#a33b3e}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;background:var(--bg);color:var(--ink);padding:28px 20px 80px}
+  .wrap{max-width:920px;margin:0 auto}
+  .noteBanner{background:#fff8e6;border:1px solid #f0d68a;border-radius:12px;padding:14px 18px;margin-bottom:26px;font-size:13px;color:#7a5c12;line-height:1.5}
+  .noteBanner strong{color:#5c4409}
+  h1{margin:0;font-size:2rem}
+  .pageHead p{margin:7px 0 0;color:var(--muted)}
+  .searchBar{width:100%;padding:14px 16px;border:1px solid var(--line);border-radius:12px;font-size:15px;margin-top:22px;background:#fff}
+  .modeRow{display:flex;gap:8px;margin-top:14px}
+  .modeBtn{flex:1;padding:11px 0;border:1px solid var(--line);background:#fff;border-radius:10px;font-weight:700;font-size:13.5px;cursor:pointer;color:var(--muted)}
+  .modeBtn.active{background:var(--green);color:#fff;border-color:var(--green)}
+  .resultsHead{margin-top:22px;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px;margin-top:12px}
+  .tile{position:relative;background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px;cursor:pointer;transition:box-shadow .16s ease,border-color .16s ease;min-height:78px}
+  .tile:hover{border-color:#c2d8c9;box-shadow:0 8px 24px rgba(11,58,38,.08)}
+  .tileName{font-weight:750;font-size:13.5px;line-height:1.35}
+  .tileValue{margin-top:8px;font-weight:800;color:var(--green);font-size:14px}
+  .tileMeta{font-size:11px;color:var(--muted);margin-top:4px}
+  .screen{display:none}
+  .screen.active{display:block}
+  .backLink{display:inline-block;margin-top:16px;color:var(--green2);font-size:13px;font-weight:700;cursor:pointer;text-decoration:none}
+
+  .modalBackdrop{position:fixed;inset:0;background:rgba(15,30,20,.35);backdrop-filter:blur(3px);display:none;align-items:center;justify-content:center;z-index:50;padding:20px}
+  .modalBackdrop.open{display:flex}
+  .modal{background:#fff;border:1px solid #d8e5dd;border-radius:16px;max-width:560px;width:100%;max-height:85vh;overflow-y:auto;padding:26px}
+  .modal h2{margin:0;font-size:1.3rem}
+  .modal .sub{margin:6px 0 0;color:var(--muted);font-size:13px}
+  .sectionLabel{margin-top:20px;margin-bottom:2px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);display:flex;align-items:center;gap:8px}
+  .askBadge{background:#fde8e8;color:#a33b3e;border-radius:6px;padding:2px 7px;font-size:10px;font-weight:700;text-transform:none;letter-spacing:0}
+  .detailList{margin-top:6px;border-top:1px solid var(--line)}
+  .detailRow{display:flex;justify-content:space-between;gap:14px;padding:9px 2px;border-bottom:1px solid var(--line);font-size:13px}
+  .detailRow .label{color:var(--muted)}
+  .detailRow .value{font-weight:700;text-align:right}
+  .detailRow.highlight .value{color:var(--green);font-size:15px}
+
+  .bottomBlock{margin-top:22px;border-top:1px solid var(--line);padding-top:16px}
+  .sourceRow{display:flex;justify-content:space-between;align-items:center;font-size:12.5px}
+  .sourceRow .src{font-weight:700;color:var(--green)}
+  .sourceRow .conf{font-weight:700;color:var(--green2)}
+  .priceCompareRow{display:flex;justify-content:space-between;align-items:center;margin-top:10px;background:#f5f8f5;border-radius:10px;padding:10px 14px}
+  .priceCompareRow .newP{color:var(--green);font-weight:800;font-size:14px}
+  .priceCompareRow .oldP{color:var(--muted);font-size:13px;text-decoration:line-through}
+  .priceCompareRow .pct{font-weight:800;font-size:13px}
+  .pct.up{color:#a33b3e}
+  .pct.down{color:#1a7a4c}
+  .closeBtn{margin-top:20px;width:100%;padding:10px;border:1px solid var(--line);border-radius:10px;background:#f5f8f5;font-weight:700;cursor:pointer}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="noteBanner">
+    <strong>Version 4 de la maquette — rien n'est encore modifié dans l'application.</strong>
+    Le "Nom" sera un simple champ texte libre (comme aujourd'hui) : au moment d'ajouter ou modifier un matériau, on tape directement le nom court qui le distingue des autres — l'appellation commerciale, plus le détail nécessaire (diamètre, longueur, marque…) selon ce qui différencie ce matériau des autres du même type. Pas de formule automatique compliquée : juste une bonne habitude de saisie. L'appellation commerciale complète reste aussi enregistrée dans les caractéristiques techniques, pour référence.
+  </div>
+
+  <div class="pageHead">
+    <h1>Bibliothèque de prix</h1>
+    <p>Fusion de l'ancienne page "Bibliothèque" et de la page "Fournisseurs".</p>
+  </div>
+
+  <input class="searchBar" placeholder="Rechercher : référence, nom, fournisseur, nom technique… (ex : Ø12)" oninput="doSearch(this.value)" />
+
+  <div class="modeRow">
+    <button class="modeBtn" id="btn-fournisseur" onclick="setMode('fournisseur')">Fournisseur</button>
+    <button class="modeBtn" id="btn-region" onclick="setMode('region')">Région</button>
+    <button class="modeBtn active" id="btn-nom" onclick="setMode('nom')">Nom</button>
+  </div>
+
+  <div class="resultsHead" id="resultsHead">Tous les matériaux, par nom</div>
+
+  <div class="screen active" id="screen-nom">
+    <div class="grid">
+      <div class="tile" onclick="openDetail()">
+        <div class="tileName">Fer Turkey Ø12</div>
+        <div class="tileValue">52 800 Ar</div>
+      </div>
+      <div class="tile" onclick="openDetail()">
+        <div class="tileName">Ciment Holcim</div>
+        <div class="tileValue">38 000 Ar</div>
+      </div>
+      <div class="tile" onclick="openDetail()">
+        <div class="tileName">Sable de rivière — Ambohijafy</div>
+        <div class="tileValue">45 000 Ar</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="screen" id="screen-fournisseur">
+    <div class="grid">
+      <div class="tile" onclick="drillDown('fournisseur','Sanifer Antananarivo')"><div class="tileName">Sanifer Antananarivo</div></div>
+      <div class="tile" onclick="drillDown('fournisseur','Ballou')"><div class="tileName">Ballou</div></div>
+      <div class="tile" onclick="drillDown('fournisseur','ABC Bricorama')"><div class="tileName">ABC Bricorama</div></div>
+    </div>
+  </div>
+
+  <div class="screen" id="screen-region">
+    <div class="grid">
+      <div class="tile" onclick="drillDown('région','Analamanga')"><div class="tileName">Analamanga</div></div>
+      <div class="tile" onclick="drillDown('région','Atsinanana')"><div class="tileName">Atsinanana</div></div>
+      <div class="tile" onclick="drillDown('région','Boeny')"><div class="tileName">Boeny</div></div>
+    </div>
+  </div>
+
+  <div class="screen" id="screen-drilldown">
+    <a class="backLink" onclick="setMode(lastMode)">← Retour</a>
+    <div class="resultsHead" id="drillHead" style="margin-top:14px"></div>
+    <div class="grid">
+      <div class="tile" onclick="openDetail()">
+        <div class="tileName">Fer à béton Ø12</div>
+        <div class="tileValue">52 800 Ar</div>
+      </div>
+      <div class="tile" onclick="openDetail()">
+        <div class="tileName">Ciment CEM II 42.5</div>
+        <div class="tileValue">38 000 Ar</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modalBackdrop" id="modalBackdrop" onclick="closeDetail(event)">
+    <div class="modal" onclick="event.stopPropagation()">
+      <h2>Fer Turkey Ø12</h2>
+      <p class="sub">Fer à béton · Aciers / armatures · barre</p>
+
+      <div class="bottomBlock" style="margin-top:14px;border-top:0;border-bottom:1px solid var(--line);padding-top:0;padding-bottom:16px">
+        <div class="sourceRow">
+          <span class="src">Source : Prix entreprise</span>
+          <span class="conf">Confiance IA : 92 %</span>
+        </div>
+        <div class="priceCompareRow">
+          <span class="newP">Nouveau : 52 800 Ar</span>
+          <span class="pct up">+5,6 %</span>
+          <span class="oldP">Ancien : 50 000 Ar</span>
+        </div>
+      </div>
+
+      <div class="sectionLabel">Informations générales</div>
+      <div class="detailList">
+        <div class="detailRow"><span class="label">Catégorie</span><span class="value">Aciers / armatures</span></div>
+        <div class="detailRow"><span class="label">Unité</span><span class="value">kg (vendu par barre)</span></div>
+        <div class="detailRow"><span class="label">Fournisseur</span><span class="value">Sanifer Antananarivo</span></div>
+        <div class="detailRow"><span class="label">Ville</span><span class="value">Antananarivo</span></div>
+        <div class="detailRow"><span class="label">Région</span><span class="value">Analamanga</span></div>
+        <div class="detailRow"><span class="label">Disponibilité</span><span class="value">En stock</span></div>
+        <div class="detailRow"><span class="label">Livraison</span><span class="value">48 h</span></div>
+        <div class="detailRow"><span class="label">Date du prix</span><span class="value">15/09/2026</span></div>
+      </div>
+
+      <div class="sectionLabel">Caractéristiques techniques</div>
+      <div class="detailList">
+        <div class="detailRow"><span class="label">Appellation commerciale complète</span><span class="value">Fer Turkey / Turkey Original</span></div>
+        <div class="detailRow"><span class="label">Origine</span><span class="value">Turquie</span></div>
+        <div class="detailRow"><span class="label">Norme</span><span class="value">ASTM A615 Grade 60</span></div>
+        <div class="detailRow"><span class="label">Nuance</span><span class="value">Grade 60</span></div>
+        <div class="detailRow"><span class="label">Diamètre</span><span class="value">12 mm</span></div>
+        <div class="detailRow"><span class="label">Longueur</span><span class="value">11,80 m</span></div>
+        <div class="detailRow"><span class="label">Masse théorique</span><span class="value">≈ 10,5 kg</span></div>
+        <div class="detailRow"><span class="label">Unité d'achat</span><span class="value">Barre</span></div>
+      </div>
+
+      <p style="font-size:11px;color:var(--muted);margin-top:14px">Toutes ces informations (générales et techniques) sont utilisées par la recherche en haut de page.</p>
+
+      <button class="closeBtn" onclick="closeDetail()">Fermer</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  let lastMode = 'nom';
+  function setMode(mode){
+    document.querySelectorAll('.modeBtn').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+    if(mode==='nom'){
+      document.getElementById('btn-nom').classList.add('active');
+      document.getElementById('screen-nom').classList.add('active');
+      document.getElementById('resultsHead').textContent='Tous les matériaux, par nom';
+    } else if(mode==='fournisseur'){
+      document.getElementById('btn-fournisseur').classList.add('active');
+      document.getElementById('screen-fournisseur').classList.add('active');
+      document.getElementById('resultsHead').textContent='Tous les fournisseurs disponibles';
+    } else if(mode==='region'){
+      document.getElementById('btn-region').classList.add('active');
+      document.getElementById('screen-region').classList.add('active');
+      document.getElementById('resultsHead').textContent='Toutes les régions disponibles';
+    }
+    if(mode!=='drilldown') lastMode = mode;
+  }
+  function drillDown(kind, label){
+    document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+    document.getElementById('screen-drilldown').classList.add('active');
+    document.getElementById('drillHead').textContent = 'Matériaux — ' + label;
+  }
+  function doSearch(value){
+    document.getElementById('resultsHead').textContent = value
+      ? 'Résultats pour « ' + value + ' » (recherche dans nom, fournisseur, référence, description…)'
+      : 'Tous les matériaux, par nom';
+  }
+  function openDetail(){ document.getElementById('modalBackdrop').classList.add('open'); }
+  function closeDetail(e){ if(e) e.stopPropagation(); document.getElementById('modalBackdrop').classList.remove('open'); }
+</script>
+</body>
+</html>

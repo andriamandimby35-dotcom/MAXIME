@@ -2972,6 +2972,12 @@ export default function EstimateBuilder({
                         {String(item.__daoNote)}
                       </small>
                     )}
+                    {/* Diagnostic temporaire : à retirer une fois le bug du choix maçonnerie identifié. */}
+                    {column.name === columnName(daoColumns, ["Désignation", "Designation"]) && masonryChoiceOption(item) !== "" && (
+                      <small style={{ display: "block", marginTop: 4, color: "#b91c1c", fontWeight: 700 }}>
+                        [DIAG] variante={masonryChoiceOption(item)} · __masonryChoice={String(item.__masonryChoice ?? "(vide)")} · __excludedByChoice={String(item.__excludedByChoice ?? "(vide)")} · id={String(item[LINE_ID_KEY] ?? "(aucun)")}
+                      </small>
+                    )}
                   </td>
                 ))}
                 {externalMarginPreview && <>
