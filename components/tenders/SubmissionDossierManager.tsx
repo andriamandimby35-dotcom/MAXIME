@@ -449,42 +449,59 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
 
   function isReadingOnly(item: Item) { return /charte de déontologie|fraude|corruption/i.test(item.title); }
 
+  async function fetchAndValidatePdf(documentUrl: string) {
+    const { data: { session } } = await supabase.auth.getSession();
+    const response = await fetch(documentUrl, {
+      method: "GET",
+      cache: "no-store",
+      headers: session?.access_token ? {
+        Authorization: `Bearer ${session.access_token}`,
+        "X-Supabase-Access-Token": session.access_token,
+        "X-PDF-Client-Fetch": "1",
+      } : undefined,
+    });
+    const contentType = response.headers.get("content-type") || "";
+    const payload = contentType.includes("application/json")
+      ? await response.json().catch(() => null) as { pdfBase64?: string; error?: string; detail?: string } | null
+      : null;
+    if (payload && !payload.pdfBase64) {
+      // Une réponse JSON sans pdfBase64 est une erreur explicite du serveur
+      // (jamais un PDF à moitié lu) : on affiche son vrai détail plutôt
+      // qu'un message générique qui masquait la cause réelle jusqu'ici.
+      throw new Error(payload.detail || payload.error || `Le serveur a répondu avec le statut ${response.status}.`);
+    }
+    const pdf = payload?.pdfBase64
+      ? new Blob([Uint8Array.from(atob(payload.pdfBase64), (character) => character.charCodeAt(0))], { type: "application/pdf" })
+      : await response.blob();
+    // Un vrai PDF commence toujours par la signature "%PDF-". Sans cette
+    // vérification, une réponse imprévue (page d'erreur, redirection de
+    // connexion...) — vue en particulier sur téléphone — était quand même
+    // affichée dans le cadre du PDF : au lieu du document, l'écran montrait
+    // des caractères illisibles au lieu du vrai message d'erreur.
+    const signature = new TextDecoder().decode(new Uint8Array(await pdf.slice(0, 5).arrayBuffer()));
+    if (!response.ok || pdf.size < 5 || signature !== "%PDF-") {
+      const detail = new TextDecoder().decode(new Uint8Array(await pdf.slice(0, 400).arrayBuffer())).replace(/\s+/g, " ").trim();
+      throw new Error(detail || `Le serveur a répondu avec le statut ${response.status}.`);
+    }
+    return pdf;
+  }
+
   async function openPdfDirectly(key: string, title: string, documentUrl: string) {
     setPendingAction(key);
     setMessage("Préparation du PDF…");
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const response = await fetch(documentUrl, {
-        method: "GET",
-        cache: "no-store",
-        headers: session?.access_token ? {
-          Authorization: `Bearer ${session.access_token}`,
-          "X-Supabase-Access-Token": session.access_token,
-          "X-PDF-Client-Fetch": "1",
-        } : undefined,
-      });
-      const contentType = response.headers.get("content-type") || "";
-      const payload = contentType.includes("application/json")
-        ? await response.json().catch(() => null) as { pdfBase64?: string; error?: string; detail?: string } | null
-        : null;
-      if (payload && !payload.pdfBase64) {
-        // Une réponse JSON sans pdfBase64 est une erreur explicite du serveur
-        // (jamais un PDF à moitié lu) : on affiche son vrai détail plutôt
-        // qu'un message générique qui masquait la cause réelle jusqu'ici.
-        throw new Error(payload.detail || payload.error || `Le serveur a répondu avec le statut ${response.status}.`);
-      }
-      const pdf = payload?.pdfBase64
-        ? new Blob([Uint8Array.from(atob(payload.pdfBase64), (character) => character.charCodeAt(0))], { type: "application/pdf" })
-        : await response.blob();
-      // Un vrai PDF commence toujours par la signature "%PDF-". Sans cette
-      // vérification, une réponse imprévue (page d'erreur, redirection de
-      // connexion...) — vue en particulier sur téléphone — était quand même
-      // affichée dans le cadre du PDF : au lieu du document, l'écran montrait
-      // des caractères illisibles au lieu du vrai message d'erreur.
-      const signature = new TextDecoder().decode(new Uint8Array(await pdf.slice(0, 5).arrayBuffer()));
-      if (!response.ok || pdf.size < 5 || signature !== "%PDF-") {
-        const detail = new TextDecoder().decode(new Uint8Array(await pdf.slice(0, 400).arrayBuffer())).replace(/\s+/g, " ").trim();
-        throw new Error(detail || `Le serveur a répondu avec le statut ${response.status}.`);
+      let pdf: Blob;
+      try {
+        pdf = await fetchAndValidatePdf(documentUrl);
+      } catch {
+        // Un premier essai raté vient presque toujours d'une fonction serveur
+        // trop lente à démarrer (surtout après une période sans activité —
+        // un "cold start"), plus visible sur téléphone à cause d'un réseau
+        // moins stable. Un deuxième essai automatique, sans que la personne
+        // ait à retaper sur le bouton, suffit dans la grande majorité des cas.
+        setMessage("Le PDF a mis du temps à répondre, nouvel essai…");
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        pdf = await fetchAndValidatePdf(documentUrl);
       }
       showPdfInModal(title, pdf);
       setMessage("");

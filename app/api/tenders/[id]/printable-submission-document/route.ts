@@ -11,6 +11,14 @@ import { trimToRelevantStart, extractRelevantPageRange } from "@/lib/submission/
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+// Cette route télécharge parfois le DAO ENTIER (plusieurs Mo, jusqu'à des
+// centaines de pages pour les plans) puis le recombine avec pdf-lib : sans
+// cette limite explicite, la fonction serverless peut dépasser le temps
+// d'exécution par défaut (surtout au premier appel après une période
+// d'inactivité, un "cold start") et Vercel renvoie alors sa propre page
+// d'erreur générique au lieu d'un vrai message — vu à l'écran sur téléphone
+// pour un document nécessitant les pages du DAO.
+export const maxDuration = 60;
 
 // L'IA peut se tromper sur les pages d'une pièce sourcée du DAO (une page
 // réellement dédiée à un AUTRE document — personnel, matériel, un autre
