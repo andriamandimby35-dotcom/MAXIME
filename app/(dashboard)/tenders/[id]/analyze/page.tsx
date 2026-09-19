@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useParams, useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
+import { GenerateSubmissionDossierButton } from "@/components/tenders/GenerateSubmissionDossierButton";
 
 
 export default function AnalyzeDAOPage() {
@@ -543,12 +544,15 @@ mb-6
 </h2>
 
 {parsedAnalysis && tender && (
-<button
-  onClick={() => router.push(`/estimates/new?tenderId=${tender.id}`)}
-  className="tenderButton tenderButtonPrimary mb-5"
->
-  📄 Générer le devis IA
-</button>
+<div className="mb-5 flex flex-wrap gap-2">
+  <button
+    onClick={() => router.push(`/estimates/new?tenderId=${tender.id}`)}
+    className="tenderButton tenderButtonPrimary"
+  >
+    📄 Générer le devis IA
+  </button>
+  <GenerateSubmissionDossierButton tenderId={tender.id} />
+</div>
 )}
 
 {loading && (

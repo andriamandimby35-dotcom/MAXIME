@@ -966,3 +966,10 @@ table tbody tr:hover { background: #f4fbf6; }
    déjà .tenderButton en vert plein. */
 .tenderButtonDanger { background: #faeaea; border-color: #e5b6ba; color: var(--danger); }
 .tenderButtonDanger:hover { background: #f6d9da; }
+
+/* État "Dossier non généré" dans la liste des dossiers de soumission :
+   distingue clairement le cas où le dossier maître n'a encore jamais été
+   généré (bouton "Générer le dossier de soumission" jamais cliqué) du cas
+   "Non validé" (dossier généré mais incomplet), pour éviter la confusion
+   d'un nombre de pièces affiché alors qu'aucun dossier n'existe réellement. */
+.submissionStatus.isPending { color: #7a5b00; background: #fff3cd; }

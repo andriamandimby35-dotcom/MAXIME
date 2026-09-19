@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
+import { buildDossierRecordsForInsert } from "@/lib/submission/build-dossier-items";
 
 type Field = { key: string; label: string; required: boolean; description: string };
 type Item = {
@@ -172,27 +174,11 @@ function clearPlaceholderValues(item: Item) {
   return changed ? { ...item, form_data: formData } : item;
 }
 
+// Logique déplacée dans lib/submission/build-dossier-items.ts (partagée avec
+// la page qui affiche le dossier et la route qui le génère explicitement),
+// pour que les trois endroits produisent toujours exactement la même liste.
 function deduplicate(items: TemplateDetectedItem[]): Item[] {
-  const known = new Set<string>();
-  const candidates = [...items];
-  // Le BDQE externe est toujours une pièce à signer et joindre. L'analyse du
-  // DAO peut omettre son intitulé : on le crée donc une seule fois ici.
-  if (!candidates.some((item) => /bdqe|bordereau.*quantitatif|bordereau.*estimatif/i.test(item.title))) {
-    candidates.push({
-      kind: "document_to_provide",
-      title: "BDQE externe signé",
-      source_reference: "Devis externe généré pour ce DAO",
-      instructions: "Imprimez le BDQE externe, signez et paraphez les pages demandées, puis joignez sa version signée.",
-      required: true,
-      fields: [],
-    });
-  }
-  return candidates.filter((item) => {
-    const key = `${item.kind}:${normalize(item.title)}`;
-    if (!item.title.trim() || known.has(key)) return false;
-    known.add(key);
-    return true;
-  }).map((item) => ({ ...item, status: item.kind === "form_to_complete" ? "needs_information" : "missing", form_data: Object.fromEntries((item.prefilled_values ?? []).filter((value) => value.key && value.value).map((value) => [value.key, value.value])) }));
+  return buildDossierRecordsForInsert(items);
 }
 
 function mergeItems(saved: Item[], detected: TemplateDetectedItem[]) {
@@ -231,6 +217,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const uploadingItems = useRef(new Set<number>());
   const supabase = useMemo(() => createClient(), []);
+  const router = useRouter();
   const detected = useMemo(() => deduplicate(detectedItems), [detectedItems]);
 
   useEffect(() => {
@@ -818,13 +805,20 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
 
   // Supprime le dossier actuellement affiché (celui du devis si estimateId
   // est présent, sinon le dossier maître du DAO) — jamais l'analyse IA du
-  // DAO (tenders.ai_analysis), qui reste en cache : au prochain chargement,
-  // la liste des pièces est simplement reconstruite vierge à partir de
-  // celle-ci, sans nouvel appel IA (donc sans coût). Le brouillon local est
-  // aussi effacé pour ne pas faire réapparaître les anciennes réponses.
+  // DAO (tenders.ai_analysis), qui reste en cache. Avant, on reconstruisait
+  // aussitôt une liste de pièces vierge à la place (setItems(detected)) : la
+  // page semblait alors n'avoir rien supprimé puisqu'un dossier vide
+  // réapparaissait immédiatement. Maintenant la suppression est réelle et
+  // visible : on quitte la page vers un endroit qui ne réaffiche pas de
+  // dossier reconstruit automatiquement (le dossier maître doit être
+  // regénéré explicitement avec le bouton "Générer le dossier de
+  // soumission" sur la page du DAO).
   async function deleteDossier() {
     const label = estimateId ? "ce dossier de devis" : "le dossier maître de ce DAO";
-    if (!window.confirm(`Supprimer définitivement ${label} ? Toutes les pièces et informations déjà remplies seront effacées. L’analyse du DAO n’est pas concernée : la liste des pièces sera reconstruite vierge, sans nouvel appel IA.`)) return;
+    const consequence = estimateId
+      ? "Toutes les pièces et informations déjà remplies pour ce devis seront effacées."
+      : "Toutes les pièces et informations déjà remplies seront effacées. Il faudra appuyer sur « Générer le dossier de soumission » sur la page du DAO pour en recréer un.";
+    if (!window.confirm(`Supprimer définitivement ${label} ? ${consequence} L’analyse du DAO n’est pas concernée.`)) return;
     const key = "deleteDossier";
     setPendingAction(key);
     setMessage("Suppression du dossier…");
@@ -841,11 +835,10 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       if (!response.ok) throw new Error(payload.error || "Suppression impossible.");
       window.localStorage.removeItem(storageKey);
       hasLocalDraft.current = false;
-      setItems(detected);
-      setMessage("Dossier supprimé. La liste des pièces a été reconstruite à partir de l’analyse du DAO déjà en cache.");
+      router.push(estimateId ? `/tenders/${tenderId}` : "/submissions");
+      router.refresh();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Suppression impossible.");
-    } finally {
       setPendingAction((current) => current === key ? null : current);
     }
   }
