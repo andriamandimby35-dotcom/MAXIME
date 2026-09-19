@@ -110,6 +110,36 @@ function clearThirdPartySignatureFields(item: Item, profileValues: Record<string
   return changed ? { ...item, form_data: formData } : item;
 }
 
+// Deux champs composés ("Nom, prénom, fonction" du signataire ; "Nom et
+// adresse" de l'entreprise) ne renvoyaient AVANT cette correction qu'UNE
+// seule des deux informations demandées (juste "Gérant", ou juste l'adresse
+// sans la raison sociale) : resolvedFieldValueRaw sait désormais renvoyer les
+// deux ensemble, mais une valeur déjà enregistrée AVANT ce correctif reste
+// bloquée telle quelle (une valeur présente dans form_data n'est jamais
+// recalculée automatiquement). On efface ici cette ancienne valeur
+// incomplète — reconnaissable car elle correspond EXACTEMENT à un seul des
+// deux morceaux attendus — pour que le champ se complète correctement au
+// prochain calcul.
+function clearStaleCompoundFields(item: Item, profileValues: Record<string, string>) {
+  const role = (profileValues.representative_role ?? "").trim();
+  const address = (profileValues.address ?? "").trim();
+  if (!role && !address) return item;
+  let changed = false;
+  const formData = { ...item.form_data };
+  for (const field of item.fields) {
+    const identifier = normalize(`${field.key} ${field.label} ${field.description}`);
+    const saved = formData[field.key]?.trim();
+    if (!saved) continue;
+    const wantsNameAndFunction = /signataire|representant/.test(identifier)
+      && /nom|prenom|identite/.test(identifier) && /fonction|qualite|qualification/.test(identifier);
+    if (wantsNameAndFunction && role && saved === role) { delete formData[field.key]; changed = true; continue; }
+    const wantsNameAndAddress = /soumissionnaire|entreprise|entrepreneur|raisonsociale|nomentreprise|legalname|candidat/.test(identifier)
+      && /nom/.test(identifier) && /adresse|address/.test(identifier);
+    if (wantsNameAndAddress && address && saved === address) { delete formData[field.key]; changed = true; }
+  }
+  return changed ? { ...item, form_data: formData } : item;
+}
+
 function deduplicate(items: TemplateDetectedItem[]): Item[] {
   const known = new Set<string>();
   const candidates = [...items];
@@ -190,7 +220,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
         setProfile((current) => ({ ...payload.profile, ...current }));
         const companyAddress = String(payload.profile?.address ?? "");
         const profileValues = (payload.profile ?? {}) as Record<string, string>;
-        const correctItem = (item: Item) => clearThirdPartySignatureFields(clearCompanyAddressFromBankFields(item, companyAddress), profileValues);
+        const correctItem = (item: Item) => clearStaleCompoundFields(clearThirdPartySignatureFields(clearCompanyAddressFromBankFields(item, companyAddress), profileValues), profileValues);
         const correctedServerItems = mergeItems(payload.items, detected).map(correctItem);
         setItems((current) => mergeItems(hasLocalDraft.current ? current : correctedServerItems, detected).map(correctItem));
         const hadIncorrectBankAddress = (payload.items as Item[]).some((item) => item.fields.some((field) => isBankAgencyAddress(item, field) && item.form_data[field.key]?.trim() === companyAddress.trim()));
@@ -199,7 +229,11 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
           const saved = item.form_data[field.key]?.trim();
           return Boolean(saved) && isThirdPartySignatureField(item, field) && knownProfileValues.has(saved!);
         }));
-        if (hadIncorrectBankAddress || hadIncorrectThirdPartySignature) {
+        const hadStaleCompoundField = (payload.items as Item[]).some((item) => {
+          const cleared = clearStaleCompoundFields(item, profileValues);
+          return cleared !== item;
+        });
+        if (hadIncorrectBankAddress || hadIncorrectThirdPartySignature || hadStaleCompoundField) {
           window.localStorage.setItem(storageKey, JSON.stringify({ profile: payload.profile, items: correctedServerItems }));
           void fetch(`/api/tenders/${tenderId}/submission-dossier`, {
             method: "PUT",
