@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { toFriendlyPdfError } from "@/lib/submission/friendly-pdf-error";
 
 function isLocalDocument(url: string) {
   try {
@@ -79,8 +80,10 @@ function PdfViewerContent() {
         }
       } catch (error) {
         if (active) {
+          const raw = error instanceof Error ? error.message : "Le PDF n’a pas pu être préparé.";
+          if (raw !== "Le PDF n’a pas pu être préparé.") console.error("Échec de préparation du PDF :", raw);
           setViewerUrl("");
-          setMessage(error instanceof Error ? error.message : "Le PDF n’a pas pu être préparé.");
+          setMessage(toFriendlyPdfError(raw));
           setLoading(false);
         }
       }

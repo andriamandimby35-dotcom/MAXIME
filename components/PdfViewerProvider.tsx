@@ -3,6 +3,7 @@
 import { createContext, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
+import { toFriendlyPdfError } from "@/lib/submission/friendly-pdf-error";
 
 // Tous les PDF de l'application (DAO, devis, factures, dossiers de
 // soumission...) s'ouvrent dans cette même carte, jamais dans un nouvel
@@ -78,7 +79,9 @@ export function PdfViewerProvider({ children }: { children: ReactNode }) {
       const objectUrl = isLocal ? URL.createObjectURL(blob) : documentUrl;
       setViewingPdf({ title, objectUrl });
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Le PDF n’a pas pu être préparé.");
+      const raw = error instanceof Error ? error.message : "Le PDF n’a pas pu être préparé.";
+      if (raw !== "Le PDF n’a pas pu être préparé.") console.error("Échec de préparation du PDF :", raw);
+      setErrorMessage(toFriendlyPdfError(raw));
     } finally {
       setLoadingTitle((current) => (current === title ? null : current));
     }

@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
 import { buildDossierRecordsForInsert } from "@/lib/submission/build-dossier-items";
+import { toFriendlyPdfError } from "@/lib/submission/friendly-pdf-error";
 
 type Field = { key: string; label: string; required: boolean; description: string };
 type Item = {
@@ -476,24 +477,33 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   async function openPdfDirectly(key: string, title: string, documentUrl: string) {
     setPendingAction(key);
     setMessage("Préparation du PDF…");
+    // Un premier essai raté vient presque toujours d'une fonction serveur
+    // trop lente à démarrer (surtout après une période sans activité — un
+    // "cold start"), plus visible sur téléphone à cause d'un réseau moins
+    // stable. Plusieurs essais automatiques, sans que la personne ait à
+    // retaper sur le bouton, suffisent dans la grande majorité des cas.
+    const retryDelaysMs = [1500, 3000];
     try {
-      let pdf: Blob;
-      try {
-        pdf = await fetchAndValidatePdf(documentUrl);
-      } catch {
-        // Un premier essai raté vient presque toujours d'une fonction serveur
-        // trop lente à démarrer (surtout après une période sans activité —
-        // un "cold start"), plus visible sur téléphone à cause d'un réseau
-        // moins stable. Un deuxième essai automatique, sans que la personne
-        // ait à retaper sur le bouton, suffit dans la grande majorité des cas.
-        setMessage("Le PDF a mis du temps à répondre, nouvel essai…");
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-        pdf = await fetchAndValidatePdf(documentUrl);
+      let pdf: Blob | null = null;
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
+        try {
+          pdf = await fetchAndValidatePdf(documentUrl);
+          break;
+        } catch (error) {
+          lastError = error;
+          if (attempt === retryDelaysMs.length) break;
+          setMessage("Le PDF a mis du temps à répondre, nouvel essai…");
+          await new Promise((resolve) => setTimeout(resolve, retryDelaysMs[attempt]));
+        }
       }
+      if (!pdf) throw lastError instanceof Error ? lastError : new Error("Le PDF n’a pas pu être préparé.");
       showPdfInModal(title, pdf);
       setMessage("");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Le PDF n’a pas pu être préparé.");
+      const raw = error instanceof Error ? error.message : "Le PDF n’a pas pu être préparé.";
+      if (raw !== "Le PDF n’a pas pu être préparé.") console.error("Échec de préparation du PDF :", raw);
+      setMessage(toFriendlyPdfError(raw));
     } finally {
       setPendingAction((current) => current === key ? null : current);
     }
