@@ -959,3 +959,10 @@ table tbody tr:hover { background: #f4fbf6; }
   .printableExport { padding: 0 !important; }
   .noPrint { display: none !important; }
 }
+
+/* Bouton "Supprimer le dossier" du dossier de soumission : même forme que
+   .tenderButton (bordure, arrondi, taille), mais en rouge pour signaler une
+   action destructive — même principe que .tenderButtonPrimary qui recolore
+   déjà .tenderButton en vert plein. */
+.tenderButtonDanger { background: #faeaea; border-color: #e5b6ba; color: var(--danger); }
+.tenderButtonDanger:hover { background: #f6d9da; }

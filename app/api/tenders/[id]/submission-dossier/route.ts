@@ -154,3 +154,39 @@ export async function PUT(request: Request, context: { params: Promise<{ id: str
   }
   return NextResponse.json({ ok: true });
 }
+
+// Supprime le dossier de soumission affiché (celui du devis précis si
+// estimateId est fourni, sinon le dossier maître du DAO). Ne touche jamais à
+// tenders.ai_analysis (l'analyse IA du DAO, coûteuse) : au prochain
+// chargement de la page, l'appli reconstruit simplement une liste de pièces
+// vierge à partir de cette analyse déjà en cache, sans nouvel appel IA.
+export async function DELETE(request: Request, context: { params: Promise<{ id: string }> }) {
+  const { id } = await context.params;
+  const authorized = await getAuthorizedTender(id);
+  if (authorized.error) return authorized.error;
+  const estimateId = new URL(request.url).searchParams.get("estimateId");
+  if (!await ensureEstimateBelongsToTender(authorized.supabase, authorized.organizationId, authorized.tenderId, estimateId)) {
+    return NextResponse.json({ error: "Ce devis n’est pas lié à ce DAO." }, { status: 404 });
+  }
+
+  if (estimateId) {
+    const result = await authorized.supabase
+      .from("estimate_submission_dossiers")
+      .delete()
+      .eq("organization_id", authorized.organizationId)
+      .eq("tender_id", authorized.tenderId)
+      .eq("estimate_id", estimateId);
+    if (migrationError(result.error)) return NextResponse.json({ error: "La migration du dossier de soumission n’est pas encore appliquée." }, { status: 503 });
+    if (result.error) return NextResponse.json({ error: "Suppression du dossier impossible." }, { status: 500 });
+    return NextResponse.json({ ok: true });
+  }
+
+  const deletionResult = await authorized.supabase
+    .from("tender_submission_items")
+    .delete()
+    .eq("organization_id", authorized.organizationId)
+    .eq("tender_id", authorized.tenderId);
+  if (migrationError(deletionResult.error)) return NextResponse.json({ error: "La migration du dossier de soumission n’est pas encore appliquée." }, { status: 503 });
+  if (deletionResult.error) return NextResponse.json({ error: "Suppression du dossier impossible." }, { status: 500 });
+  return NextResponse.json({ ok: true });
+}

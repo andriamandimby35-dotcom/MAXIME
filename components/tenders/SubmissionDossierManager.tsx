@@ -816,13 +816,47 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     }
   }
 
+  // Supprime le dossier actuellement affiché (celui du devis si estimateId
+  // est présent, sinon le dossier maître du DAO) — jamais l'analyse IA du
+  // DAO (tenders.ai_analysis), qui reste en cache : au prochain chargement,
+  // la liste des pièces est simplement reconstruite vierge à partir de
+  // celle-ci, sans nouvel appel IA (donc sans coût). Le brouillon local est
+  // aussi effacé pour ne pas faire réapparaître les anciennes réponses.
+  async function deleteDossier() {
+    const label = estimateId ? "ce dossier de devis" : "le dossier maître de ce DAO";
+    if (!window.confirm(`Supprimer définitivement ${label} ? Toutes les pièces et informations déjà remplies seront effacées. L’analyse du DAO n’est pas concernée : la liste des pièces sera reconstruite vierge, sans nouvel appel IA.`)) return;
+    const key = "deleteDossier";
+    setPendingAction(key);
+    setMessage("Suppression du dossier…");
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const response = await fetch(`/api/tenders/${tenderId}/submission-dossier${scope}`, {
+        method: "DELETE",
+        headers: session?.access_token ? {
+          Authorization: `Bearer ${session.access_token}`,
+          "X-Supabase-Access-Token": session.access_token,
+        } : undefined,
+      });
+      const payload = await response.json().catch(() => ({}) as { error?: string });
+      if (!response.ok) throw new Error(payload.error || "Suppression impossible.");
+      window.localStorage.removeItem(storageKey);
+      hasLocalDraft.current = false;
+      setItems(detected);
+      setMessage("Dossier supprimé. La liste des pièces a été reconstruite à partir de l’analyse du DAO déjà en cache.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Suppression impossible.");
+    } finally {
+      setPendingAction((current) => current === key ? null : current);
+    }
+  }
+
   return <>
   <main className="submissionDossierPage p-8 max-w-6xl">
     <a className="tenderBackLink" href="/submissions">← Retour aux dossiers de soumission</a>
       <div className="mb-7">
         <h1 className="text-3xl font-bold">{estimateId ? "Dossier du devis" : "Dossier maître du DAO"}</h1>
         <p className="mt-2 text-gray-600">Pièces à fournir et formulaires détectés dans le DAO. Vérifiez toujours le document source avant dépôt.</p>
-        <div className="mt-4 flex flex-wrap gap-2"><button type="button" className="tenderButton" onClick={validateDossier}>Vérifier le dossier</button><button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === "final"} onClick={() => void validateAndGenerateFinalPdf()}><ButtonLabel loading={pendingAction === "final"} label="Valider et générer le PDF final" loadingLabel="Génération…" /></button></div>
+        <div className="mt-4 flex flex-wrap gap-2"><button type="button" className="tenderButton" onClick={validateDossier}>Vérifier le dossier</button><button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === "final"} onClick={() => void validateAndGenerateFinalPdf()}><ButtonLabel loading={pendingAction === "final"} label="Valider et générer le PDF final" loadingLabel="Génération…" /></button><button type="button" className="tenderButton tenderButtonDanger" disabled={pendingAction === "deleteDossier"} onClick={() => void deleteDossier()}><ButtonLabel loading={pendingAction === "deleteDossier"} label="Supprimer le dossier" loadingLabel="Suppression…" /></button></div>
         <p className="mt-3 text-sm font-semibold text-green-800">{message}</p>
     </div>
 
