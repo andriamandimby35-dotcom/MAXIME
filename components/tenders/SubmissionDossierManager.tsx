@@ -120,22 +120,54 @@ function clearThirdPartySignatureFields(item: Item, profileValues: Record<string
 // incomplète — reconnaissable car elle correspond EXACTEMENT à un seul des
 // deux morceaux attendus — pour que le champ se complète correctement au
 // prochain calcul.
-function clearStaleCompoundFields(item: Item, profileValues: Record<string, string>) {
+function clearStaleCompoundFields(item: Item, profileValues: Record<string, string>, tenderReference?: string) {
   const role = (profileValues.representative_role ?? "").trim();
   const address = (profileValues.address ?? "").trim();
-  if (!role && !address) return item;
+  const name = (profileValues.representative_name ?? "").trim();
+  const reference = (tenderReference ?? "").trim();
+  if (!role && !address && !name && !reference) return item;
   let changed = false;
   const formData = { ...item.form_data };
   for (const field of item.fields) {
     const identifier = normalize(`${field.key} ${field.label} ${field.description}`);
     const saved = formData[field.key]?.trim();
     if (!saved) continue;
-    const wantsNameAndFunction = /signataire|representant/.test(identifier)
-      && /nom|prenom|identite/.test(identifier) && /fonction|qualite|qualification/.test(identifier);
+    // Champ composé "nom, prénom, fonction" : une ancienne valeur qui ne
+    // contient QUE la fonction (ex. "GERANT") vient de l'époque où cette
+    // règle ne renvoyait pas encore le nom et la fonction ensemble.
+    const wantsNameAndFunction = /nom|prenom|identite/.test(identifier) && /fonction|qualite|qualification/.test(identifier);
     if (wantsNameAndFunction && role && saved === role) { delete formData[field.key]; changed = true; continue; }
     const wantsNameAndAddress = /soumissionnaire|entreprise|entrepreneur|raisonsociale|nomentreprise|legalname|candidat/.test(identifier)
       && /nom/.test(identifier) && /adresse|address/.test(identifier);
-    if (wantsNameAndAddress && address && saved === address) { delete formData[field.key]; changed = true; }
+    if (wantsNameAndAddress && address && saved === address) { delete formData[field.key]; changed = true; continue; }
+    // "Titre / capacité juridique" demande la FONCTION du signataire (ex.
+    // "Gérant"), pas son nom : une ancienne valeur qui contient le nom vient
+    // du temps où ce champ était mal reconnu.
+    const wantsLegalCapacityRole = /juridique/.test(identifier) && /titre|capacite|qualite/.test(identifier);
+    if (wantsLegalCapacityRole && name && saved === name) { delete formData[field.key]; changed = true; continue; }
+    // Un champ qui demande l'identité d'UNE PERSONNE (nom, prénom, CIN,
+    // signature...) ne doit jamais garder un numéro de référence de marché
+    // resté collé par erreur (bug vu à l'écran : "Nom, Prénom et Signature"
+    // affichait le numéro du contrat).
+    const wantsPersonIdentity = /nometprenom|nomprenom/.test(identifier)
+      || (/nom/.test(identifier) && /signature|paraphe|cin|identite/.test(identifier));
+    if (wantsPersonIdentity && reference && saved === reference) { delete formData[field.key]; changed = true; }
+  }
+  return changed ? { ...item, form_data: formData } : item;
+}
+
+// Certains modèles DAO laissent l'instruction "(à compléter)" ou "à
+// compléter" imprimée juste à côté d'une case vide : si l'ancien algorithme
+// de remplissage l'a par erreur recopiée comme si c'était une vraie valeur,
+// elle reste ensuite bloquée dans form_data et s'affiche telle quelle dans le
+// PDF final, alors que ce n'est qu'un texte d'instruction, pas une donnée.
+const PLACEHOLDER_VALUES = new Set(["acompleter", "neant", "sansobjet", "xxx"]);
+function clearPlaceholderValues(item: Item) {
+  let changed = false;
+  const formData = { ...item.form_data };
+  for (const field of item.fields) {
+    const saved = formData[field.key]?.trim();
+    if (saved && PLACEHOLDER_VALUES.has(normalize(saved))) { delete formData[field.key]; changed = true; }
   }
   return changed ? { ...item, form_data: formData } : item;
 }
@@ -220,7 +252,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
         setProfile((current) => ({ ...payload.profile, ...current }));
         const companyAddress = String(payload.profile?.address ?? "");
         const profileValues = (payload.profile ?? {}) as Record<string, string>;
-        const correctItem = (item: Item) => clearStaleCompoundFields(clearThirdPartySignatureFields(clearCompanyAddressFromBankFields(item, companyAddress), profileValues), profileValues);
+        const correctItem = (item: Item) => clearPlaceholderValues(clearStaleCompoundFields(clearThirdPartySignatureFields(clearCompanyAddressFromBankFields(item, companyAddress), profileValues), profileValues, tenderReference));
         const correctedServerItems = mergeItems(payload.items, detected).map(correctItem);
         setItems((current) => mergeItems(hasLocalDraft.current ? current : correctedServerItems, detected).map(correctItem));
         const hadIncorrectBankAddress = (payload.items as Item[]).some((item) => item.fields.some((field) => isBankAgencyAddress(item, field) && item.form_data[field.key]?.trim() === companyAddress.trim()));
@@ -230,10 +262,11 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
           return Boolean(saved) && isThirdPartySignatureField(item, field) && knownProfileValues.has(saved!);
         }));
         const hadStaleCompoundField = (payload.items as Item[]).some((item) => {
-          const cleared = clearStaleCompoundFields(item, profileValues);
+          const cleared = clearStaleCompoundFields(item, profileValues, tenderReference);
           return cleared !== item;
         });
-        if (hadIncorrectBankAddress || hadIncorrectThirdPartySignature || hadStaleCompoundField) {
+        const hadPlaceholderValue = (payload.items as Item[]).some((item) => clearPlaceholderValues(item) !== item);
+        if (hadIncorrectBankAddress || hadIncorrectThirdPartySignature || hadStaleCompoundField || hadPlaceholderValue) {
           window.localStorage.setItem(storageKey, JSON.stringify({ profile: payload.profile, items: correctedServerItems }));
           void fetch(`/api/tenders/${tenderId}/submission-dossier`, {
             method: "PUT",
@@ -251,7 +284,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       .then(({ response, payload }) => { if (response.ok) setLinkedDocuments(payload.estimates ?? []); })
       .catch(() => undefined);
     return () => window.clearTimeout(restoreTimer);
-  }, [detected, estimateId, scope, storageKey, tenderId]);
+  }, [detected, estimateId, scope, storageKey, tenderId, tenderReference]);
 
   function scheduleSave(nextProfile: Record<string, string>, nextItems: Item[]) {
     window.localStorage.setItem(storageKey, JSON.stringify({ profile: nextProfile, items: nextItems }));
@@ -443,8 +476,15 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       const pdf = payload?.pdfBase64
         ? new Blob([Uint8Array.from(atob(payload.pdfBase64), (character) => character.charCodeAt(0))], { type: "application/pdf" })
         : await response.blob();
-      if (!response.ok || pdf.size < 5) {
-        throw new Error(!payload ? await pdf.text().catch(() => "") : `Le serveur a répondu avec le statut ${response.status}.`);
+      // Un vrai PDF commence toujours par la signature "%PDF-". Sans cette
+      // vérification, une réponse imprévue (page d'erreur, redirection de
+      // connexion...) — vue en particulier sur téléphone — était quand même
+      // affichée dans le cadre du PDF : au lieu du document, l'écran montrait
+      // des caractères illisibles au lieu du vrai message d'erreur.
+      const signature = new TextDecoder().decode(new Uint8Array(await pdf.slice(0, 5).arrayBuffer()));
+      if (!response.ok || pdf.size < 5 || signature !== "%PDF-") {
+        const detail = new TextDecoder().decode(new Uint8Array(await pdf.slice(0, 400).arrayBuffer())).replace(/\s+/g, " ").trim();
+        throw new Error(detail || `Le serveur a répondu avec le statut ${response.status}.`);
       }
       showPdfInModal(title, pdf);
       setMessage("");
@@ -562,11 +602,35 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       const companyName = profile.legal_name || profile.trade_name || "";
       return [companyName, profile.address ?? ""].filter((part) => part.trim()).join(", ");
     }
+    // Les règles d'IDENTITÉ (nom/fonction du signataire) doivent passer AVANT
+    // les cas génériques ci-dessous (adresse, contrat/référence, date...),
+    // sinon un champ qui mentionne aussi "contrat" ou "adresse" en passant
+    // dans sa description tombe dans la mauvaise règle générique (bugs vus à
+    // l'écran : "Titre/capacité juridique" affichait un nom, "Nom, Prénom et
+    // Signature" affichait un numéro de contrat).
+    // "Titre / capacité juridique (du signataire)" : demande la FONCTION,
+    // jamais le nom.
+    if (/juridique/.test(identifier) && /titre|capacite|qualite/.test(identifier)) return profile.representative_role ?? "";
+    // "Nom, prénom, fonction" (ou "Nom et qualité") du signataire veut
+    // l'identité ET la fonction ensemble — sinon on n'affiche que "Gérant"
+    // sans dire de qui il s'agit, comme vu à l'écran. Cette règle ne dépend
+    // plus du mot "signataire"/"représentant" pour s'appliquer : un champ qui
+    // demande simplement "nom" + "fonction" ensemble suffit.
+    if (/nom|prenom|identite/.test(identifier) && /fonction|qualite|qualification/.test(identifier)) {
+      return [profile.representative_name, profile.representative_role].filter((part) => (part ?? "").trim()).join(", ");
+    }
+    if (/fonction.*signataire|fonction.*representant|qualite.*signataire|qualite.*representant|representativerole/.test(identifier)) return profile.representative_role ?? "";
+    if (/signataire|representant/.test(identifier)) return profile.representative_name ?? "";
     // L'adresse et le numéro DE LA BANQUE de l'entreprise (RIB) sont
     // distincts de l'adresse de l'entreprise elle-même : à vérifier avant le
     // cas générique "adresse" ci-dessous, sinon ce dernier gagnerait toujours.
     if (!isGuaranteeBankIdentity(item) && /banque/.test(identifier) && /adresse|address/.test(identifier)) return profile.bank_address ?? "";
     if (!isGuaranteeBankIdentity(item) && /banque/.test(identifier) && /telephone|tel|phone/.test(identifier)) return profile.bank_phone ?? "";
+    // "Adresse électronique" est le terme administratif pour "e-mail" — sans
+    // ce cas, le mot "adresse" qu'il contient aussi le faisait tomber dans la
+    // règle générique juste en dessous, qui renvoie l'adresse POSTALE de
+    // l'entreprise à la place d'un e-mail.
+    if (/electronique/.test(identifier) && /adresse|address/.test(identifier)) return profile.email ?? "";
     if (/adresse|address/.test(identifier)) return profile.address ?? "";
     if (/nif/.test(identifier)) return profile.nif ?? "";
     if (/stat/.test(identifier)) return profile.stat ?? "";
@@ -613,15 +677,9 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     // main avec la vraie date lue sur le DAO.
     const isNonSignatureDate = /recepisse|lancement|limite|echeance|publication|ouverture|cloture|depot|validite|achat|livraison|remise/.test(identifier);
     if (/date|signaturedate/.test(identifier) && !isNonSignatureDate) return today;
-    // Idem pour le signataire : "Nom, prénom, fonction" (ou "Nom et qualité
-    // du signataire") veut l'identité ET la fonction ensemble — sinon on
-    // n'affiche que "Gérant" sans dire de qui il s'agit, comme vu à l'écran.
-    if (/signataire|representant/.test(identifier) && /nom|prenom|identite/.test(identifier)
-        && /fonction|qualite|qualification/.test(identifier)) {
-      return [profile.representative_name, profile.representative_role].filter((part) => (part ?? "").trim()).join(", ");
-    }
-    if (/fonction.*signataire|fonction.*representant|qualite.*signataire|qualite.*representant|representativerole/.test(identifier)) return profile.representative_role ?? "";
-    if (/signataire|representant/.test(identifier)) return profile.representative_name ?? "";
+    // (Les règles d'identité du signataire — nom+fonction, titre/capacité
+    // juridique, signataire seul — sont vérifiées PLUS HAUT, avant les cas
+    // génériques adresse/contrat/date : voir le commentaire à cet endroit.)
     if (/soumissionnaire|entreprise|entrepreneur|raisonsociale|nomentreprise|legalname|candidat/.test(identifier)) return profile.legal_name || profile.trade_name || "";
     return "";
   }
