@@ -88,7 +88,7 @@ export default function PriceSearch({ prices }: { prices: any[] }) {
       for (const offer of offersOf(price)) {
         const raw = String(offer.fournisseur || "").trim();
         if (!raw) continue;
-        const { key, label } = supplierGroup(raw, offer.ville, offer.region);
+        const { key, label } = supplierGroup(raw, String(offer.ville || ""), String(offer.region || ""));
         if (!groups.has(key)) groups.set(key, { key, label });
       }
     }
@@ -117,7 +117,7 @@ export default function PriceSearch({ prices }: { prices: any[] }) {
       return sortByDesignation(prices.filter((price) =>
         offersOf(price).some((offer) => {
           const raw = String(offer.fournisseur || "").trim();
-          return raw && supplierGroup(raw, offer.ville, offer.region).key === drill.key;
+          return raw && supplierGroup(raw, String(offer.ville || ""), String(offer.region || "")).key === drill.key;
         }),
       ));
     }
