@@ -9,6 +9,10 @@ import { usePdfViewer } from "@/components/PdfViewerProvider";
 type Project = { id: string; project_code: string | null; name: string; location: string | null; budget_amount: number | string | null; status: string | null; source_estimate_id: string | null; manual_margin_percent: number | string | null };
 type Payment = { id: string; progress_claim_id: string | null; payment_date: string; amount: number | string; method: string; reference: string | null; payment_type: string };
 type Claim = { id: string; claim_number: string; issue_date: string; status: string; gross_amount: number | string; retention_amount: number | string; tax_amount: number | string; net_amount: number | string };
+// Le chantier facturé peut provenir d'un appel d'offres remporté (source_tender_id) :
+// on rappelle alors ici de quel DAO il s'agit, purement informatif — le calcul
+// du client de la facture continue de se faire côté serveur (generate-situation.ts).
+type Tender = { client_name: string | null; reference: string | null; title: string | null };
 
 type DraftLine = {
   kind: "devis" | "depense";
@@ -51,7 +55,7 @@ const today = new Date().toISOString().slice(0, 10);
 const paymentTypeLabel: Record<string, string> = { avancement: "Avancement", attachement: "Attachement", solde: "Solde de fin de travaux" };
 const claimStatusLabel: Record<string, string> = { draft: "Brouillon", submitted: "Envoyée", approved: "Approuvée", partially_paid: "Partiellement payée", paid: "Payée", rejected: "Refusée" };
 
-export function BillingProjectDetail({ project, payments, claims }: { project: Project; payments: Payment[]; claims: Claim[] }) {
+export function BillingProjectDetail({ project, tender, payments, claims }: { project: Project; tender: Tender | null; payments: Payment[]; claims: Claim[] }) {
   const router = useRouter();
   const { openPdf } = usePdfViewer();
   const [busy, setBusy] = useState(false);
@@ -199,7 +203,16 @@ export function BillingProjectDetail({ project, payments, claims }: { project: P
       <Link href="/billing" className="tenderBackLink">← Retour aux chantiers</Link>
 
       <div className="pageHead">
-        <div><h1>{project.project_code ? `${project.project_code} — ` : ""}{project.name}</h1><p>Facturation et suivi des paiements de ce chantier.</p></div>
+        <div>
+          <h1>{project.project_code ? `${project.project_code} — ` : ""}{project.name}</h1>
+          <p>Facturation et suivi des paiements de ce chantier.</p>
+          {tender && (
+            <p style={{ fontSize: ".85rem", color: "#666" }}>
+              Issu de l'appel d'offres {tender.reference ? `${tender.reference} — ` : ""}{tender.title ?? ""}
+              {tender.client_name ? ` (client : ${tender.client_name})` : ""}
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="stats billingStats">

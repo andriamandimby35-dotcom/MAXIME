@@ -36,6 +36,24 @@ function bestFieldMatch(text: string, fields: FieldTarget[], excluded: Set<strin
   return best;
 }
 
+// Un DAO justifie souvent son texte : la ligne visuelle juste avant un blanc
+// (points de suite, ou ":" en fin de ligne) peut alors ne contenir que la fin
+// du libellé ("...estimé à :........"), le début ("un montant total") ayant
+// débordé sur la ligne précédente à cause du retour à la ligne automatique du
+// PDF — pas d'un vrai changement de paragraphe. Si la ligne associée au blanc
+// n'a presque pas de mot-clé exploitable, on élargit donc la recherche au
+// texte qui précède (sans franchir une vraie coupure de paragraphe) pour ne
+// pas perdre ces mots-clés "débordés" en amont. Ce filet est générique : il
+// ne dépend d'aucun intitulé particulier et s'applique à n'importe quel DAO.
+function widenLabel(resolved: string, offset: number, labelPart: string) {
+  if (significantWords(labelPart).size >= 2) return labelPart;
+  const searchStart = Math.max(0, offset - 220);
+  let context = resolved.slice(searchStart, offset);
+  const paragraphBreak = context.lastIndexOf("\n\n");
+  if (paragraphBreak >= 0) context = context.slice(paragraphBreak + 2);
+  return `${context.replace(/\n/g, " ")} ${labelPart}`.trim();
+}
+
 // Une note instructive du DAO n'est pas toujours entre crochets (ex. "Note :
 // le texte en italiques... devra être supprimé de la version officielle
 // finale") : ce genre de phrase qui s'auto-désigne comme à retirer avant
@@ -145,7 +163,7 @@ export async function rebuildTemplatePages(pdfBytes: Uint8Array, pageNumbers: nu
     // dernier retour à la ligne), pas tout ce qui précède sur la page.
     resolved = resolved.replace(/([:.]?\s*)([.…_]{5,})/g, (whole, sep: string, _dots: string, offset: number) => {
       const lineStart = resolved.lastIndexOf("\n", offset) + 1;
-      const labelPart = resolved.slice(lineStart, offset);
+      const labelPart = widenLabel(resolved, offset, resolved.slice(lineStart, offset));
       const match = bestFieldMatch(labelPart, fields, usedForBlanks, 0.5);
       const value = match ? values[match.field_key]?.trim() : "";
       if (match && value) { usedForBlanks.add(match.field_key); return `${sep} ${value} `; }
@@ -156,8 +174,9 @@ export async function rebuildTemplatePages(pdfBytes: Uint8Array, pageNumbers: nu
     // d'un ":" et d'une case vide sans aucun caractère de remplissage. Toute
     // ligne qui se termine par ":" (rien après, ou seulement des espaces)
     // reçoit donc directement la valeur du champ reconnu.
-    resolved = resolved.replace(/^([^\n]*?:)[ \t]*$/gm, (whole, labelWithColon: string) => {
-      const match = bestFieldMatch(labelWithColon.slice(0, -1), fields, usedForBlanks, 0.5);
+    resolved = resolved.replace(/^([^\n]*?:)[ \t]*$/gm, (whole, labelWithColon: string, offset: number) => {
+      const labelPart = widenLabel(resolved, offset, labelWithColon.slice(0, -1));
+      const match = bestFieldMatch(labelPart, fields, usedForBlanks, 0.5);
       const value = match ? values[match.field_key]?.trim() : "";
       if (match && value) { usedForBlanks.add(match.field_key); return `${labelWithColon} ${value}`; }
       return whole;
