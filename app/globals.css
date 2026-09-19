@@ -609,6 +609,20 @@ table tbody tr:hover { background: #f4fbf6; }
 .billingProjectStats b { font-size: 13px; color: var(--ink); }
 .billingProjectCard small { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; }
 .billingGrid { display: grid; grid-template-columns: 360px 1fr; gap: 24px; align-items: start; }
+/* Un tableau (paiements, factures) peut être plus large que son panneau :
+   il défile alors horizontalement à l'intérieur, plutôt que d'élargir toute
+   la page (et forcer tout l'écran à défiler sur mobile). */
+.panel.table { overflow-x: auto; }
+/* Téléphone en portrait : la colonne "Paiement entrant" (largeur fixe) et le
+   tableau des paiements ne rentrent plus côte à côte, donc ils se placent
+   l'un sous l'autre ; les 4 chiffres-clés du chantier passent en 2 colonnes
+   plus compactes pour que les montants ne débordent plus de leur case. */
+@media (max-width: 640px) {
+  .billingGrid { grid-template-columns: 1fr; }
+  .billingStats { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .billingStats article { padding: 14px; }
+  .billingStats strong { font-size: 18px; margin: 6px 0 2px; }
+}
 .businessForm { display: flex; flex-direction: column; gap: 12px; }
 .businessForm label { display: grid; gap: 6px; font-size: 12px; font-weight: 700; }
 .businessForm h3 { margin: 0 0 4px; }
