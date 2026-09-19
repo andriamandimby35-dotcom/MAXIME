@@ -25,6 +25,7 @@ export async function POST(req: Request) {
 
   const result = await searchExistingPrice({
     designation: body.designation,
+    categorie: body.categorie,
     unite: body.unite,
     region: body.region,
     organizationId: member.organization_id,
