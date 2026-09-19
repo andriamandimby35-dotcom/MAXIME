@@ -51,7 +51,7 @@ export async function POST(request: Request) {
       .maybeSingle();
 
     if (!claim) {
-      return NextResponse.json({ error: "Situation introuvable dans votre organisation." }, { status: 404 });
+      return NextResponse.json({ error: "Facture introuvable dans votre organisation." }, { status: 404 });
     }
 
     progressClaimId = claim.id;

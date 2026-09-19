@@ -51,7 +51,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     "", "Pièces incluses :",
     ...items.map((item) => `• ${item.title} — ${generated(item.title) ? "PDF généré" : readingOnly(item.title) ? "lecture confirmée" : item.form_data?.__attachmentName || "document joint"}`),
   ];
-  const pdf = createPrintableSubmissionPdf("Dossier de soumission final — vérification", (profileResult.data?.profile_data ?? {}) as Record<string, unknown>, lines);
+  const pdf = await createPrintableSubmissionPdf("Dossier de soumission final — vérification", (profileResult.data?.profile_data ?? {}) as Record<string, unknown>, lines);
   const path = `${member.organization_id}/submission/${id}/${estimateId ?? "master"}/dossier-soumission-final.pdf`;
   const upload = await supabase.storage.from("btp-documents").upload(path, pdf, { contentType: "application/pdf", upsert: true });
   if (upload.error) return NextResponse.json({ error: `Enregistrement du PDF final impossible : ${upload.error.message}` }, { status: 500 });

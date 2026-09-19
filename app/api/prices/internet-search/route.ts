@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { canonicalMaterialKey, canonicalUnit, materialFamily } from "@/lib/material-normalization";
+import { usefulTokens, priceSearchableText, cheapestOf } from "@/lib/price-engine/search-price";
 
 type SearchRequest = {
   action?: "search" | "save_manual_composite" | "resolve_component_prices";
@@ -190,6 +191,24 @@ export async function POST(request: Request) {
     .from("price_library")
     .select("*")
     .eq("organization_id", organizationId);
+
+  // Utilisé pour les composants d'un matériau composé (ex : ciment, sable,
+  // gravillon, eau pour un béton 350) : parmi tous les prix déjà enregistrés
+  // qui correspondent à la même famille de matériau et dont l'unité peut être
+  // convertie vers celle demandée, on ne devine pas lequel utiliser — on
+  // prend le moins cher.
+  function bestSavedComponentPrice(componentDesignation: string, requestedUnit: string) {
+    const family = materialFamily(componentDesignation);
+    const candidates = (organizationPrices ?? []).filter(
+      (price) => materialFamily(String(price.designation)) === family
+        && savedPriceForRequestedUnit(price, requestedUnit) !== null,
+    );
+    if (candidates.length === 0) return null;
+    return candidates.reduce((best, price) =>
+      (savedPriceForRequestedUnit(price, requestedUnit)! < savedPriceForRequestedUnit(best, requestedUnit)!) ? price : best,
+    );
+  }
+
   // Le catalogue partagé est un cache commun : les devis et les ajustements
   // propres à l'entreprise restent prioritaires et privés.
   const { data: sharedPriceRows } = await supabase
@@ -205,13 +224,44 @@ export async function POST(request: Request) {
   // sur la même famille de matériau pour réutiliser le prix déjà connu au
   // lieu de relancer inutilement une recherche.
   const requestedFamily = materialFamily(designation);
-  const existingPrice = organizationPrices?.find(
-    (price) => normalizeMaterialName(String(price.designation)) === designationKey
-      && canonicalUnit(String(price.unite ?? "")) === unite,
-  ) ?? organizationPrices?.find(
-    (price) => materialFamily(String(price.designation)) === requestedFamily
-      && canonicalUnit(String(price.unite ?? "")) === unite,
-  ) ?? null;
+  // Le DAO ne donne parfois que l'appellation technique, la norme ou la
+  // nuance (sans le nom commercial déjà enregistré) : si le nom exact et la
+  // famille (dosage béton, diamètre acier...) ne suffisent pas, on vérifie
+  // aussi TOUTES les caractéristiques techniques enregistrées du matériau
+  // avant de considérer qu'il n'existe vraiment pas — sinon on relancerait
+  // une recherche IA payante pour un matériau déjà connu.
+  const requestedTokens = usefulTokens(designation);
+  // Si plusieurs matériaux enregistrés correspondent tous à la même
+  // description (même nom, même famille, ou mêmes mots-clés techniques), on
+  // ne devine pas lequel choisir : on prend le moins cher plutôt qu'un
+  // matériau pris au hasard (ou le premier de la base).
+  const sameUnit = (price: any) => canonicalUnit(String(price.unite ?? "")) === unite;
+  const exactMatches = (organizationPrices ?? []).filter(
+    (price) => normalizeMaterialName(String(price.designation)) === designationKey && sameUnit(price),
+  );
+  const familyMatches = (organizationPrices ?? []).filter(
+    (price) => materialFamily(String(price.designation)) === requestedFamily && sameUnit(price),
+  );
+  const detailMatches = requestedTokens.length > 0
+    ? (organizationPrices ?? []).filter(
+        (price) => sameUnit(price) && requestedTokens.every((word) => priceSearchableText(price).includes(word)),
+      )
+    : [];
+  // La famille seule (même dosage béton, même diamètre acier...) peut
+  // regrouper trop de matériaux différents ("Fer D8" et "Fer D6" partagent
+  // parfois la même famille "acier" si le diamètre n'est pas dans le nom
+  // détecté) : quand on a des mots-clés utiles, on ne garde d'abord QUE ceux
+  // de la même famille qui contiennent AUSSI tous ces mots-clés — plus
+  // précis que la famille seule, sans rien retirer des autres repli déjà en
+  // place si cette combinaison ne trouve rien.
+  const familyAndDetailMatches = requestedTokens.length > 0
+    ? familyMatches.filter((price) => requestedTokens.every((word) => priceSearchableText(price).includes(word)))
+    : [];
+  const existingPrice = exactMatches.length > 0 ? cheapestOf(exactMatches)
+    : familyAndDetailMatches.length > 0 ? cheapestOf(familyAndDetailMatches)
+    : familyMatches.length > 0 ? cheapestOf(familyMatches)
+    : detailMatches.length > 0 ? cheapestOf(detailMatches)
+    : null;
 
   async function cacheSharedPrice(price: number, source: { label: string; url?: string; supplier?: string; city?: string; region?: string; confidence?: number }) {
     const { data: organization } = await supabase.from("organizations").select("name").eq("id", organizationId).maybeSingle();
@@ -254,11 +304,7 @@ export async function POST(request: Request) {
   if (body?.action === "resolve_component_prices") {
     const components = body.manualComponents ?? [];
     const resolved = await Promise.all(components.map(async (component) => {
-      const family = materialFamily(component.designation);
-      const enterprisePrice = organizationPrices?.find((price) =>
-        materialFamily(String(price.designation)) === family
-        && savedPriceForRequestedUnit(price, component.unit) !== null,
-      );
+      const enterprisePrice = bestSavedComponentPrice(component.designation, component.unit);
       const { data: sharedComponents } = await supabase.from("shared_material_prices")
         .select("designation,unite,prix_unitaire,provenance_label,contributor_organization_name,supplier_name")
         .eq("designation_key", normalizeMaterialName(component.designation))
@@ -273,7 +319,7 @@ export async function POST(request: Request) {
           .select("designation,unite,prix_unitaire,provenance_label,contributor_organization_name,supplier_name")
           .order("prix_unitaire", { ascending: true }).limit(200);
         sharedComponent = familyComponents?.find((price) =>
-          materialFamily(String(price.designation)) === family
+          materialFamily(String(price.designation)) === materialFamily(component.designation)
           && canonicalUnit(String(price.unite ?? "")) === canonicalUnit(component.unit),
         ) ?? null;
       }
@@ -621,11 +667,7 @@ export async function POST(request: Request) {
   }
 
   let manualPriceInputs = (parsed.manual_price_inputs ?? []).map((item) => {
-    const requestedFamily = materialFamily(item.designation);
-    const savedPrice = organizationPrices?.find((price) =>
-      materialFamily(String(price.designation)) === requestedFamily
-      && savedPriceForRequestedUnit(price, item.unit) !== null,
-    );
+    const savedPrice = bestSavedComponentPrice(item.designation, item.unit);
     const savedUnitPrice = savedPrice ? savedPriceForRequestedUnit(savedPrice, item.unit) : null;
     return {
       ...item,

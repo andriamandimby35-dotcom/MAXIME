@@ -43,12 +43,19 @@ export async function createOrSyncProjectFromEstimate(
 
   const { data: estimate, error: estimateError } = await supabase
     .from("estimates")
-    .select("id,organization_id,source_tender_id,client_name")
+    .select("id,organization_id,source_tender_id,client_name,profit_margin_percent")
     .eq("id", estimateId)
     .eq("organization_id", organizationId)
     .maybeSingle();
   if (estimateError) return { error: estimateError.message };
   if (!estimate) return { error: "Devis introuvable pour votre organisation." };
+
+  // La marge du devis externe (voir EstimateBuilder) n'est jamais recopiée
+  // dans le bordereau du chantier : on la retrouve ici pour figer, une bonne
+  // fois pour toutes, le prix externe déjà montré au client sur son PDF
+  // (external_unit_price), séparément du prix interne (unit_price) qui,
+  // lui, reste le coût réel. Sert notamment à la facturation à l'avancement.
+  const marginPercent = Number(estimate.profit_margin_percent) || 0;
 
   let tender: { title?: string; reference?: string; ai_analysis?: unknown } | null = null;
   if (estimate.source_tender_id) {
@@ -116,6 +123,7 @@ export async function createOrSyncProjectFromEstimate(
       const quantity = numberFrom(line, ["Quantité", "Quantite"]);
       const unitPrice = numberFrom(line, ["Prix unitaire"]);
       const total = numberFrom(line, ["Total"]) || quantity * unitPrice;
+      const lineIsInternal = isInternal(line);
       return {
         organization_id: organizationId,
         project_id: projectId as string,
@@ -124,8 +132,13 @@ export async function createOrSyncProjectFromEstimate(
         unit: textFrom(line, ["Unité", "Unite"]) || null,
         quantity: quantity || null,
         unit_price: unitPrice || null,
+        // Prix déjà donné au client sur le devis externe (coût + marge),
+        // figé ici plutôt que recalculé plus tard : sert de référence stable
+        // pour la facturation, même si la marge du devis change ensuite.
+        // Sans objet pour une ligne interne (jamais montrée au client).
+        external_unit_price: lineIsInternal ? null : Math.round(unitPrice * (1 + marginPercent / 100) * 100) / 100,
         total: total || null,
-        is_internal: isInternal(line),
+        is_internal: lineIsInternal,
       };
     });
 

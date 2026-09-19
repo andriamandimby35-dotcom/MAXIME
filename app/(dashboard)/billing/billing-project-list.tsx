@@ -1,9 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { certifiedAmount } from "@/lib/billing";
 
-type Project = { id: string; project_code: string | null; name: string; budget_amount: number | string | null; received: number };
+type Project = { id: string; project_code: string | null; name: string; budget_amount: number | string | null; received: number; certified: number };
 
 const ariary = new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 0 });
 
@@ -11,13 +10,13 @@ export function BillingProjectList({ projects }: { projects: Project[] }) {
   return (
     <section>
       <div className="pageHead">
-        <div><h1>Situations & paiements</h1><p>Facturation des travaux et suivi des encaissements, chantier par chantier.</p></div>
+        <div><h1>Factures & paiements</h1><p>Facturation des travaux et suivi des encaissements, chantier par chantier.</p></div>
       </div>
 
       {projects.length ? (
         <div className="billingProjectGrid">
           {projects.map((project) => {
-            const certified = certifiedAmount(Number(project.budget_amount) || 0);
+            const certified = project.certified;
             const received = project.received;
             const outstanding = Math.max(0, certified - received);
             const percent = certified > 0 ? Math.min(100, Math.round((received / certified) * 100)) : 0;

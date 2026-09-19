@@ -23,6 +23,8 @@ const existingPrice = await searchExistingPrice({
 
 designation,
 
+categorie,
+
 unite,
 
 region,

@@ -1,9 +1,19 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { canonicalMaterialKey, canonicalUnit } from "@/lib/material-normalization";
+import { buildDesignationWithOrigin, canonicalMaterialKey, canonicalUnit, originFromCaracteristiques } from "@/lib/material-normalization";
 
 function materialKey(value: string) {
   return canonicalMaterialKey(value);
+}
+
+// Même normalisation que la protection anti-doublon de la base (colonne
+// générée "designation_norm" de price_library, voir migration SQL) : on ne
+// compare que le nom, sans l'unité, pour ne jamais tenter de créer un
+// doublon que la base refuserait de toute façon (erreur 23505). Le
+// formulaire (PriceForm) a déjà demandé confirmation à l'utilisateur avant
+// d'arriver ici si un matériau du même nom existait.
+function designationNormKey(value: string) {
+  return canonicalMaterialKey(value).replace(/\s+/g, "");
 }
 
 export async function POST(req: Request) {
@@ -44,25 +54,65 @@ export async function POST(req: Request) {
       && Number.isFinite(prixUniteAchat) && prixUniteAchat > 0;
 
     const organizationName = (member.organizations as unknown as { name?: string } | null)?.name || "Entreprise non nommée";
-    let current: { id: string; prix_actuel: number | null } | null = null;
+    let current: { id: string; prix_actuel: number | null; fournisseurs: unknown; caracteristiques: unknown } | null = null;
     if (body.id) {
       const { data } = await supabase.from("price_library")
-        .select("id,prix_actuel").eq("id", body.id).eq("organization_id", member.organization_id).maybeSingle();
+        .select("id,prix_actuel,fournisseurs,caracteristiques").eq("id", body.id).eq("organization_id", member.organization_id).maybeSingle();
       current = data;
     } else {
       const { data } = await supabase.from("price_library")
-        .select("id,prix_actuel,designation,unite").eq("organization_id", member.organization_id);
-      const matchingPrice = data?.find((price) => materialKey(String(price.designation ?? "")) === materialKey(designation)
-        && canonicalUnit(String(price.unite ?? "")) === unite) ?? null;
-      current = matchingPrice ? { id: matchingPrice.id, prix_actuel: matchingPrice.prix_actuel } : null;
+        .select("id,prix_actuel,designation,fournisseurs,caracteristiques").eq("organization_id", member.organization_id);
+      const targetKey = designationNormKey(designation);
+      const matchingPrice = data?.find((price) => designationNormKey(String(price.designation ?? "")) === targetKey) ?? null;
+      current = matchingPrice;
     }
     const now = new Date().toISOString();
+
+    // Un même matériau peut avoir plusieurs fournisseurs/régions : au lieu
+    // d'écraser la ligne existante avec cette seule saisie, on ajoute (ou on
+    // met à jour) une offre dans sa liste "fournisseurs", puis on recalcule
+    // le prix retenu comme le moins cher de toutes les offres.
+    const offerKey = (offer: { fournisseur?: string; ville?: string; region?: string }) =>
+      `${materialKey(String(offer.fournisseur ?? ""))}|${materialKey(String(offer.ville || offer.region || ""))}`;
+    const newOffer = {
+      fournisseur: fournisseur || "",
+      ville: lieu || "",
+      region: region || "",
+      prix,
+      disponibilite: disponibilite || "",
+      livraison: livraison || "",
+      date_prix: now,
+    };
+    const existingOffers = Array.isArray(current?.fournisseurs) ? (current!.fournisseurs as typeof newOffer[]) : [];
+    const matchIndex = existingOffers.findIndex((offer) => offerKey(offer) === offerKey(newOffer));
+    const mergedOffers = matchIndex >= 0
+      ? existingOffers.map((offer, index) => (index === matchIndex ? newOffer : offer))
+      : [...existingOffers, newOffer];
+    const cheapestOffer = mergedOffers.reduce((best, offer) => (Number(offer.prix) < Number(best.prix) ? offer : best), mergedOffers[0]);
+
+    // Si le formulaire n'a pas de caractéristiques (cas d'une confirmation de
+    // doublon sans ressaisir les détails techniques), on garde celles déjà
+    // enregistrées plutôt que de les effacer.
+    const mergedCaracteristiques = caracteristiques.length > 0
+      ? caracteristiques
+      : (Array.isArray(current?.caracteristiques) ? current!.caracteristiques : caracteristiques);
+
+    // Le nom enregistré doit toujours être nom + dimension (déjà dans le nom
+    // tapé) + origine SEULEMENT si elle est connue (caractéristique
+    // "origine") — jamais le fournisseur, qui vit dans "fournisseurs"
+    // ci-dessus. Deux origines différentes (ex: Turquie / Inde) donnent donc
+    // deux noms différents, et restent deux fiches séparées.
+    const finalDesignation = buildDesignationWithOrigin(designation, originFromCaracteristiques(mergedCaracteristiques));
+
     const payload = {
-      designation, categorie, unite, prix_actuel: prix, prix_entreprise: prix, prix_retenu: prix,
+      designation: finalDesignation, categorie, unite,
+      prix_actuel: cheapestOffer.prix, prix_entreprise: cheapestOffer.prix, prix_retenu: cheapestOffer.prix,
       prix_source: `Saisie manuelle — ${organizationName}`, statut_prix: isIa ? "ia" : "manuel",
-      origine_prix: isIa ? "saisie_manuelle_ia" : "saisie_manuelle", fournisseur: fournisseur || null, ville: lieu || null,
-      region: region || null, disponibilite: disponibilite || null, livraison: livraison || null,
-      caracteristiques, date_prix: now,
+      origine_prix: isIa ? "saisie_manuelle_ia" : "saisie_manuelle",
+      fournisseur: cheapestOffer.fournisseur || null, ville: cheapestOffer.ville || null,
+      region: cheapestOffer.region || null, disponibilite: cheapestOffer.disponibilite || null, livraison: cheapestOffer.livraison || null,
+      fournisseurs: mergedOffers,
+      caracteristiques: mergedCaracteristiques, date_prix: cheapestOffer.date_prix || now,
       updated_at: now,
       unite_achat: hasPurchaseUnit ? uniteAchat : null,
       quantite_par_unite_achat: hasPurchaseUnit ? quantiteParUniteAchat : null,
@@ -73,17 +123,17 @@ export async function POST(req: Request) {
       : await supabase.from("price_library").insert({ ...payload, organization_id: member.organization_id }).select("id").single();
     if (error || !saved) return NextResponse.json({ error: error?.message || "Prix non enregistré." }, { status: 500 });
 
-    await supabase.from("price_history").insert({ price_id: saved.id, organization_id: member.organization_id, ancien_prix: current?.prix_actuel ?? null, nouveau_prix: prix, type_variation: current ? "modification_manuelle" : "nouveau", event_type: "manual_price", source_type: "manual_enterprise", created_by: user.id, observed_at: now });
+    await supabase.from("price_history").insert({ price_id: saved.id, organization_id: member.organization_id, ancien_prix: current?.prix_actuel ?? null, nouveau_prix: cheapestOffer.prix, type_variation: current ? "modification_manuelle" : "nouveau", event_type: "manual_price", source_type: "manual_enterprise", created_by: user.id, observed_at: now });
     const sourceLabel = `Saisie manuelle — ${organizationName}`;
-    const key = materialKey(designation);
+    const key = materialKey(finalDesignation);
     const { data: existingSharedRows } = await supabase.from("shared_material_prices")
       .select("id,prix_unitaire,unite").eq("designation_key", key);
     const existingShared = existingSharedRows?.find((price) => canonicalUnit(String(price.unite ?? "")) === unite) ?? null;
-    const common = { designation_key: key, designation, categorie, unite, prix_unitaire: prix, currency: "MGA", provenance_label: sourceLabel, contributor_organization_id: member.organization_id, contributor_organization_name: organizationName, last_checked_at: now, updated_at: now };
+    const common = { designation_key: key, designation: finalDesignation, categorie, unite, prix_unitaire: cheapestOffer.prix, currency: "MGA", provenance_label: sourceLabel, contributor_organization_id: member.organization_id, contributor_organization_name: organizationName, last_checked_at: now, updated_at: now };
     const { data: sharedMaterial, error: sharedError } = existingShared?.id
-      ? await supabase.from("shared_material_prices").update(Number(existingShared.prix_unitaire) > prix ? common : { last_checked_at: now, updated_at: now }).eq("id", existingShared.id).select("id").single()
+      ? await supabase.from("shared_material_prices").update(Number(existingShared.prix_unitaire) > cheapestOffer.prix ? common : { last_checked_at: now, updated_at: now }).eq("id", existingShared.id).select("id").single()
       : await supabase.from("shared_material_prices").insert({ ...common, created_by: user.id }).select("id").single();
-    if (sharedMaterial?.id) await supabase.from("shared_material_price_observations").insert({ material_id: sharedMaterial.id, prix_unitaire: prix, provenance_type: "saisie_manuelle_entreprise", provenance_label: sourceLabel, contributor_organization_id: member.organization_id, contributor_organization_name: organizationName, observed_at: now, created_by: user.id });
+    if (sharedMaterial?.id) await supabase.from("shared_material_price_observations").insert({ material_id: sharedMaterial.id, prix_unitaire: cheapestOffer.prix, provenance_type: "saisie_manuelle_entreprise", provenance_label: sourceLabel, contributor_organization_id: member.organization_id, contributor_organization_name: organizationName, observed_at: now, created_by: user.id });
     if (sharedError) console.warn("Shared manual price not published", sharedError.message);
     return NextResponse.json({ success: true, id: saved.id, shared: Boolean(sharedMaterial?.id), provenance: sourceLabel });
   } catch (error: unknown) {

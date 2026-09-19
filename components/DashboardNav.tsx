@@ -97,11 +97,17 @@ export function DashboardNav({
           </Link>
 
           <Link href="/billing">
-            Situations & paiements
+            Factures & paiements
           </Link>
 
           <Link href="/prices">
             Bibliothèque de prix
+          </Link>
+
+          <span className="sidebarGroupLabel">Paramètres</span>
+
+          <Link href="/company-profile">
+            Profil entreprise
           </Link>
 
           </> : isWorksManager ? <>

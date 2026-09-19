@@ -1,8 +1,9 @@
 import "@/lib/submission/pdfjs-worker-setup";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { PDFDocument, rgb } from "pdf-lib";
 import { significantWords } from "@/lib/submission/title-match";
 import { sanitizeForPdf } from "@/lib/submission/dao-template-pdf";
+import { embedUnicodeFonts } from "@/lib/submission/pdf-font";
 
 // Écrire une valeur PAR-DESSUS la page originale du DAO dépend de la mise en
 // page exacte du PDF source (polices, calques, structure interne) — un DAO
@@ -191,8 +192,7 @@ function wrapLine(value: string, maximum: number) {
 /** Dessine les pages reconstruites dans un nouveau PDF, indépendant du fichier source. */
 export async function renderRebuiltPages(pages: string[][]): Promise<Buffer> {
   const doc = await PDFDocument.create();
-  const font = await doc.embedFont(StandardFonts.Helvetica);
-  const boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
+  const { font, boldFont } = await embedUnicodeFonts(doc);
   const pageWidth = 595;
   const pageHeight = 842;
   const marginX = 50;

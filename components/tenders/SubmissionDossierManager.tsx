@@ -31,7 +31,8 @@ const profileFields = [
   ["representative_name", "Représentant légal"], ["representative_role", "Fonction du représentant"],
   ["address", "Adresse"], ["phone", "Téléphone"], ["email", "E-mail"],
   ["nif", "NIF"], ["stat", "STAT"], ["rcs", "RCS / registre de commerce"],
-  ["bank_name", "Banque"], ["bank_agency", "Agence"], ["bank_account", "N° Compte bancaire"],
+  ["bank_name", "Banque"], ["bank_agency", "Agence bancaire"], ["bank_phone", "Téléphone de la banque"],
+  ["bank_address", "Adresse de la banque"], ["bank_account", "IBAN"],
 ] as const;
 
 /** Bouton avec petit indicateur de chargement — remplace le libellé par un
@@ -48,7 +49,7 @@ function normalize(value: string) {
 
 function isBankAgencyAddress(item: Item, field: Field) {
   const context = normalize(`${item.title} ${field.key} ${field.label} ${field.description}`);
-  return /garantiebancaire|banque|agenceemetrice|agenceemission/.test(context)
+  return /garantiebancaire|banque|agenceemetrice|agence[a-z]*emission/.test(context)
     && /adresse|address|agence/.test(context);
 }
 
@@ -64,6 +65,44 @@ function clearCompanyAddressFromBankFields(item: Item, companyAddress: string) {
   const formData = { ...item.form_data };
   for (const field of item.fields) {
     if (isBankAgencyAddress(item, field) && formData[field.key]?.trim() === companyAddress.trim()) {
+      delete formData[field.key];
+      changed = true;
+    }
+  }
+  return changed ? { ...item, form_data: formData } : item;
+}
+
+// Un champ "Nom, Prénom et Signature" (ou équivalent) sur une pièce destinée
+// À CHAQUE PERSONNEL OU PARTENAIRE (code de conduite, règlement de chantier,
+// engagement individuel...) désigne une personne DIFFÉRENTE à chaque
+// signature — jamais l'entreprise elle-même. Le préremplir avec un champ du
+// PROFIL DE L'ENTREPRISE (téléphone, adresse, banque...) est toujours une
+// erreur, exactement comme pour la liste du personnel ou du matériel : ce
+// filtre s'applique à N'IMPORTE QUEL DAO, pas seulement à celui-ci. Seul le
+// signataire légal de l'entreprise (repéré par "signataire"/"représentant"/
+// "gérant") reste concerné par le profil.
+function isThirdPartySignatureField(item: Item, field: Field) {
+  const identifier = normalize(`${item.title} ${field.key} ${field.label} ${field.description}`);
+  const asksForAPerson = /nometprenom|nomprenom/.test(identifier)
+    || (/nom/.test(identifier) && /signature|paraphe|cin|identite/.test(identifier));
+  const isCompanyRepresentative = /signataire|representant|gerant|legal/.test(identifier);
+  return asksForAPerson && !isCompanyRepresentative;
+}
+
+// Une valeur déjà enregistrée (avant que ce filtre existe) peut être restée
+// collée dans form_data — resolvedFieldValue ne l'écraserait jamais toute
+// seule, puisqu'une valeur déjà présente est normalement respectée comme une
+// correction manuelle de l'utilisateur. Ici, elle correspond en réalité à une
+// case du profil de l'entreprise recopiée par erreur sur un champ qui
+// concerne un tiers : on la retire pour laisser la case redevenir blanche.
+function clearThirdPartySignatureFields(item: Item, profileValues: Record<string, string>) {
+  const knownProfileValues = new Set(Object.values(profileValues).map((value) => String(value ?? "").trim()).filter(Boolean));
+  if (!knownProfileValues.size) return item;
+  let changed = false;
+  const formData = { ...item.form_data };
+  for (const field of item.fields) {
+    const saved = formData[field.key]?.trim();
+    if (saved && isThirdPartySignatureField(item, field) && knownProfileValues.has(saved)) {
       delete formData[field.key];
       changed = true;
     }
@@ -150,10 +189,17 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
         if (!response.ok) throw new Error(payload.error || "Chargement impossible");
         setProfile((current) => ({ ...payload.profile, ...current }));
         const companyAddress = String(payload.profile?.address ?? "");
-        const correctedServerItems = mergeItems(payload.items, detected).map((item) => clearCompanyAddressFromBankFields(item, companyAddress));
-        setItems((current) => mergeItems(hasLocalDraft.current ? current : correctedServerItems, detected).map((item) => clearCompanyAddressFromBankFields(item, companyAddress)));
+        const profileValues = (payload.profile ?? {}) as Record<string, string>;
+        const correctItem = (item: Item) => clearThirdPartySignatureFields(clearCompanyAddressFromBankFields(item, companyAddress), profileValues);
+        const correctedServerItems = mergeItems(payload.items, detected).map(correctItem);
+        setItems((current) => mergeItems(hasLocalDraft.current ? current : correctedServerItems, detected).map(correctItem));
         const hadIncorrectBankAddress = (payload.items as Item[]).some((item) => item.fields.some((field) => isBankAgencyAddress(item, field) && item.form_data[field.key]?.trim() === companyAddress.trim()));
-        if (hadIncorrectBankAddress) {
+        const knownProfileValues = new Set(Object.values(profileValues).map((value) => String(value ?? "").trim()).filter(Boolean));
+        const hadIncorrectThirdPartySignature = (payload.items as Item[]).some((item) => item.fields.some((field) => {
+          const saved = item.form_data[field.key]?.trim();
+          return Boolean(saved) && isThirdPartySignatureField(item, field) && knownProfileValues.has(saved!);
+        }));
+        if (hadIncorrectBankAddress || hadIncorrectThirdPartySignature) {
           window.localStorage.setItem(storageKey, JSON.stringify({ profile: payload.profile, items: correctedServerItems }));
           void fetch(`/api/tenders/${tenderId}/submission-dossier`, {
             method: "PUT",
@@ -406,14 +452,15 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   }
 
   function openPrintableVersion(item: Item) {
-    // Le PDF ne doit jamais sortir avec un blanc : si une info obligatoire
-    // manque encore, on demande d'abord de la compléter dans le champ
-    // correspondant (déjà visible juste au-dessus) plutôt que de générer un
-    // document troué.
+    // Le PDF s'ouvre toujours, même si une information obligatoire n'est pas
+    // encore complétée : la case correspondante reste alors simplement
+    // blanche dans le document (le générateur ne remplit jamais une case
+    // avec du texte inventé). Bloquer complètement l'ouverture donnait
+    // l'impression que le document restait "vide", alors qu'il suffit de
+    // compléter le champ puis de rouvrir le PDF pour le voir mis à jour.
     const missing = item.fields.filter((field) => field.required && !resolvedFieldValue(item, field).trim());
     if (missing.length) {
-      setMessage(`Complétez d’abord dans le formulaire : ${missing.map((field) => field.label).join(", ")}.`);
-      return;
+      setMessage(`Le PDF s’ouvre avec des cases encore blanches : ${missing.map((field) => field.label).join(", ")}. Complétez-les puis rouvrez le PDF pour les voir mises à jour.`);
     }
     const query = new URLSearchParams({ title: item.title, kind: item.kind, sourceReference: item.source_reference || "" });
     if (estimateId) query.set("estimateId", estimateId);
@@ -445,10 +492,22 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     }
   }
 
+  // Certains modèles DAO précisent explicitement "(en majuscules)" à côté
+  // d'un intitulé (nom, raison sociale...) : une valeur reprise telle quelle
+  // depuis le profil (souvent en casse normale) déforme alors visuellement
+  // le rendu par rapport au modèle attendu. On met en majuscules uniquement
+  // quand le champ le demande lui-même, jamais par défaut sur les autres.
   function resolvedFieldValue(item: Item, field: Field) {
+    const value = resolvedFieldValueRaw(item, field);
+    const wantsUppercase = /majuscule/.test(normalize(`${field.label} ${field.description}`));
+    return wantsUppercase ? value.toLocaleUpperCase("fr-FR") : value;
+  }
+
+  function resolvedFieldValueRaw(item: Item, field: Field) {
     const identifier = normalize(`${field.key} ${field.label} ${field.description}`);
     if (isPersonnelList(item) && /nom|prenom|personnel|attribution|fonction|diplome|experience/.test(identifier)) return "";
     if (isMaterialList(item) && /nom|designation|description|materiel|materiel|statut|fonction|capacite|quantite/.test(identifier)) return "";
+    if (isThirdPartySignatureField(item, field)) return "";
     // Une garantie bancaire appartient à la banque : son agence ne doit jamais
     // récupérer par défaut l'adresse de l'entreprise soumissionnaire.
     if (isBankAgencyAddress(item, field)) {
@@ -457,10 +516,31 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     }
     const direct = item.form_data[field.key] ?? profile[field.key];
     if (direct?.trim()) return direct;
+    // Un champ qui demande le NOM ET l'ADRESSE de l'entreprise en même temps
+    // (ex. "Nom et adresse de l'Entrepreneur") ne doit jamais s'arrêter à un
+    // seul des deux, sinon la raison sociale disparaît derrière la seule
+    // adresse (ou l'inverse) : c'était le bug vu à l'écran, où seule
+    // l'adresse apparaissait. "Entrepreneur" et "candidat" désignent ici
+    // l'entreprise candidate elle-même (vocabulaire courant des DAO
+    // malgaches), jamais un tiers.
+    if (/soumissionnaire|entreprise|entrepreneur|raisonsociale|nomentreprise|legalname|candidat/.test(identifier)
+        && /nom/.test(identifier) && /adresse|address/.test(identifier)) {
+      const companyName = profile.legal_name || profile.trade_name || "";
+      return [companyName, profile.address ?? ""].filter((part) => part.trim()).join(", ");
+    }
+    // L'adresse et le numéro DE LA BANQUE de l'entreprise (RIB) sont
+    // distincts de l'adresse de l'entreprise elle-même : à vérifier avant le
+    // cas générique "adresse" ci-dessous, sinon ce dernier gagnerait toujours.
+    if (!isGuaranteeBankIdentity(item) && /banque/.test(identifier) && /adresse|address/.test(identifier)) return profile.bank_address ?? "";
+    if (!isGuaranteeBankIdentity(item) && /banque/.test(identifier) && /telephone|tel|phone/.test(identifier)) return profile.bank_phone ?? "";
     if (/adresse|address/.test(identifier)) return profile.address ?? "";
     if (/nif/.test(identifier)) return profile.nif ?? "";
     if (/stat/.test(identifier)) return profile.stat ?? "";
-    if (/rcs|registrecommerce/.test(identifier)) return profile.rcs ?? "";
+    // "Registre du commerce" contient "du" entre les deux mots : après
+    // normalisation (espaces supprimés) cela donne "registreducommerce",
+    // que l'ancien test "registrecommerce" (sans "du") ne reconnaissait pas
+    // — la valeur déjà connue du profil restait donc invisible.
+    if (/rcs|registre[a-z]*commerce/.test(identifier)) return profile.rcs ?? "";
     if (/formejuridique/.test(identifier)) return profile.legal_form ?? "";
     if (/telephone|phone/.test(identifier)) return profile.phone ?? "";
     if (/email/.test(identifier)) return profile.email ?? "";
@@ -471,7 +551,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     if (!isGuaranteeBankIdentity(item)) {
       if (/banque/.test(identifier)) return profile.bank_name ?? "";
       if (/agence/.test(identifier)) return profile.bank_agency ?? "";
-      if (/compte/.test(identifier)) return profile.bank_account ?? "";
+      if (/compte|iban/.test(identifier)) return profile.bank_account ?? "";
     }
     // Le "bénéficiaire" d'une garantie/caution est l'autorité contractante du
     // DAO (le maître d'ouvrage), jamais l'entreprise candidate elle-même.
@@ -479,18 +559,36 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     // Le délai d'exécution des travaux est déjà fixé par le DAO (extrait dans
     // execution_period_days) : à ne pas confondre avec un délai de validité
     // de l'offre, qui est une notion différente.
-    if (/delai.*execution|dureedesitravaux|dureedestravaux|delaicontractuel|delaidexecution/.test(identifier) && tenderExecutionPeriodDays != null) return `${tenderExecutionPeriodDays} jours`;
+    if (/delai.*execution|dureedestravaux|delaicontractuel|delaidexecution/.test(identifier) && tenderExecutionPeriodDays != null) return `${tenderExecutionPeriodDays} jours`;
     // Le montant ESTIMÉ du marché est saisi une fois à la création de l'appel
     // d'offres ; ne jamais l'utiliser pour le montant d'UNE GARANTIE (qui est
     // un pourcentage calculé, une valeur différente), seulement pour un champ
     // qui demande explicitement le montant estimé/prévisionnel du marché.
     if (/montantestime|montantdumarche|montantprevisionnel|montantducontrat|montantdeloffre/.test(identifier) && tenderEstimatedAmount != null) return `${tenderEstimatedAmount.toLocaleString("fr-FR")} Ar`;
     if (/contrat|reference|marche/.test(identifier)) return tenderReference;
-    if (/localisation|lieuchantier|sitechantier|emplacementchantier/.test(identifier)) return tenderLocation;
-    if (/date|signaturedate/.test(identifier)) return today;
+    // "Lieu DU chantier" / "Site DU chantier" : même souci que "registre du
+    // commerce" plus haut, le mot de liaison ("du") empêchait la
+    // correspondance exacte.
+    if (/localisation|lieu[a-z]*chantier|site[a-z]*chantier|emplacement[a-z]*chantier/.test(identifier)) return tenderLocation;
+    // La date du jour ne convient qu'à une VRAIE date de signature ("Fait à
+    // ..., le ..."). Un champ "date" qui désigne en réalité un fait précis du
+    // DAO (date du récépissé d'achat, date de lancement de l'AOL, date
+    // limite, date de publication...) a sa propre date, différente
+    // d'aujourd'hui : la deviner comme si elle était déjà connue induirait le
+    // candidat en erreur. On laisse alors le champ vide, à compléter à la
+    // main avec la vraie date lue sur le DAO.
+    const isNonSignatureDate = /recepisse|lancement|limite|echeance|publication|ouverture|cloture|depot|validite|achat|livraison|remise/.test(identifier);
+    if (/date|signaturedate/.test(identifier) && !isNonSignatureDate) return today;
+    // Idem pour le signataire : "Nom, prénom, fonction" (ou "Nom et qualité
+    // du signataire") veut l'identité ET la fonction ensemble — sinon on
+    // n'affiche que "Gérant" sans dire de qui il s'agit, comme vu à l'écran.
+    if (/signataire|representant/.test(identifier) && /nom|prenom|identite/.test(identifier)
+        && /fonction|qualite|qualification/.test(identifier)) {
+      return [profile.representative_name, profile.representative_role].filter((part) => (part ?? "").trim()).join(", ");
+    }
     if (/fonction.*signataire|fonction.*representant|qualite.*signataire|qualite.*representant|representativerole/.test(identifier)) return profile.representative_role ?? "";
     if (/signataire|representant/.test(identifier)) return profile.representative_name ?? "";
-    if (/soumissionnaire|entreprise|raisonsociale|nomentreprise|legalname/.test(identifier)) return profile.legal_name || profile.trade_name || "";
+    if (/soumissionnaire|entreprise|entrepreneur|raisonsociale|nomentreprise|legalname|candidat/.test(identifier)) return profile.legal_name || profile.trade_name || "";
     return "";
   }
 

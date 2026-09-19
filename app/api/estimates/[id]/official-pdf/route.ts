@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { companyProfile } from "@/lib/company";
+import { getCompanyProfileForPdf } from "@/lib/organization-profile";
 import { generateOfficialEstimatePdf, type OfficialPdfRow } from "@/lib/estimates/official-pdf";
 import { createOrSyncProjectFromEstimate } from "@/lib/projects/create-project-from-estimate";
 import { createServerClient } from "@/lib/supabase/server";
@@ -195,12 +195,13 @@ async function generateOfficialPdfResponse(
     };
 
   const organization = Array.isArray(member.organizations) ? member.organizations[0] : member.organizations;
+  const profile = await getCompanyProfileForPdf(supabase, member.organization_id, organization?.name);
   const pdf = generateOfficialEstimatePdf({
-    companyName: organization?.name || "Sébastien BTP",
+    companyName: profile.companyName,
     companyDetails: [
-      companyProfile.ownerName,
-      `${companyProfile.address} — ${companyProfile.phone}`,
-      `NIF ${companyProfile.nif} — STAT ${companyProfile.stat}`,
+      profile.ownerName,
+      `${profile.address} — ${profile.phone}`,
+      `NIF ${profile.nif} — STAT ${profile.stat}`,
     ],
     daoTitle: `${mode === "internal" ? "DEVIS INTERNE — " : ""}${tender?.title || "DAO"}`,
     daoReference: tender?.reference || "",

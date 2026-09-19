@@ -406,7 +406,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
               ...table,
               column_ratios: (await measureTableColumnRatios(bytes, verifiedPages, table.columns)) ?? undefined,
             })));
-            const tablesPdfBytes = createPrintableSubmissionPdf(title, profileData, [], measuredTables);
+            const tablesPdfBytes = await createPrintableSubmissionPdf(title, profileData, [], measuredTables);
             const tablesDoc = await PDFDocument.load(tablesPdfBytes);
             const mainDoc = await PDFDocument.load(pdf);
             const copiedPages = await mainDoc.copyPages(tablesDoc, tablesDoc.getPageIndices());
@@ -457,7 +457,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   const planTables = /\bplans?\b/i.test(title) && hasPlanRegister && planRegister
     ? [{ title: planRegister.title || title, columns: planRegister.columns || [], rows: planRegister.rows || [] }]
     : [];
-  let pdf = createPrintableSubmissionPdf(title, profileData, [...formLines, ...extraLines], isExecutionPlanning && executionPlanningTable ? [executionPlanningTable] : templateTables.length ? templateTables : transportTables.length ? transportTables : planTables.length ? planTables : rosterTable);
+  let pdf = await createPrintableSubmissionPdf(title, profileData, [...formLines, ...extraLines], isExecutionPlanning && executionPlanningTable ? [executionPlanningTable] : templateTables.length ? templateTables : transportTables.length ? transportTables : planTables.length ? planTables : rosterTable);
   // planRegister.page_numbers ne liste que quelques pages éparses au lieu de
   // la vraie plage complète des planches (vérifié : sur un DAO réel, les
   // plans couvraient ~110 pages consécutives alors que l'IA n'en avait cité

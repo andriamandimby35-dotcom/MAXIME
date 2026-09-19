@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Aperçu — cartes Bibliothèque de prix</title>
+<style>
+:root{--bg:#f4f6f3;--card:#fff;--ink:#17251d;--muted:#6b776f;--line:#e2e8e3;--green:#153f2b;--green2:#245e41;--gold:#e7b449;--danger:#a33b3e}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;background:var(--bg);color:var(--ink)}
+.page{max-width:900px;margin:0 auto;padding:36px 20px 60px}
+.pageHead{margin-bottom:6px}
+.pageHead h1{margin:0;font-size:22px}
+.pageHead p{margin:6px 0 0;color:var(--muted);font-size:13px}
+.note{margin:16px 0 26px;padding:12px 14px;border-radius:11px;background:#edf4ef;font-size:12.5px;color:var(--green2);border:1px solid var(--line)}
+
+/* --- copié tel quel depuis app/globals.css --- */
+.priceGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
+.priceTile { position: relative; background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 14px; padding-bottom: 56px; cursor: pointer; transition: box-shadow .16s ease, border-color .16s ease; min-height: 130px; }
+.priceTile:hover { box-shadow: 0 10px 26px rgba(20,50,30,.08); border-color: #cfe0d4; }
+.pill{font-size:11px;padding:5px 8px;border-radius:99px;background:#edf4ef;color:var(--green);font-weight:800}
+.pillIa { background: #eaf1fb; color: #1d4ed8; }
+.priceTileTitle { margin-top: 8px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 13px; font-weight: 750; min-height: 34px; }
+.priceTileValue { margin-top: 8px; font-weight: 800; color: var(--green); font-size: 15px; }
+.priceTileMeta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.priceTileActions { position: absolute; left: 14px; right: 14px; bottom: 10px; display: flex; gap: 6px; opacity: 0; pointer-events: none; transition: opacity .16s ease; }
+.priceTile:hover .priceTileActions, .priceTile:focus-within .priceTileActions { opacity: 1; pointer-events: auto; }
+.ghost,.ghostButton{border:1px solid var(--line);background:#fff;color:var(--green);padding:10px 14px;border-radius:11px;font-weight:700;cursor:pointer;font-size:12px}
+.dangerButton { border: 0; background: var(--danger); color: #fff; padding: 8px 12px; border-radius: 9px; font-weight: 750; cursor: pointer; font-size:12px; }
+.modalBackdrop{position:fixed;inset:0;background:rgba(10,25,16,.48);display:none;place-items:center;z-index:50;padding:16px;backdrop-filter:blur(3px)}
+.modalBackdrop.open{display:grid}
+.modal{width:min(680px,100%);background:#fff;border-radius:20px;padding:22px;box-shadow:0 25px 80px rgba(0,0,0,.25);max-height:85vh;overflow-y:auto;overflow-x:hidden}
+.modal h2{font-weight:800;font-size:19px;margin:0}
+.modal>p.subtitle{margin:4px 0 0;color:var(--muted);font-size:13px}
+.bottomBlock { border-bottom: 1px solid var(--line); padding-bottom: 16px; margin-top:14px; }
+.sourceRow { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; }
+.sourceRow .src { font-weight: 700; color: var(--green); }
+.sourceRow .conf { font-weight: 700; color: var(--green2); }
+.sectionLabel { margin-top: 20px; margin-bottom: 2px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.detailList { margin-top: 6px; border-top: 1px solid var(--line); }
+.detailRow { display: flex; justify-content: space-between; gap: 14px; padding: 9px 2px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.detailRow .label { color: var(--muted); }
+.foot{font-size:11px;color:var(--muted);margin-top:14px}
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <div class="pageHead">
+    <h1>Bibliothèque de prix</h1>
+    <p>Tous vos prix, fournisseurs et régions au même endroit.</p>
+  </div>
+
+  <div class="note">Aperçu uniquement — 2 exemples pris parmi les 269 matériaux, avec le design actuel exact (carte + fiche détail). Cliquez sur une carte pour ouvrir la fiche.</div>
+
+  <div class="priceGrid">
+
+    <div class="priceTile" onclick="document.getElementById('modal1').classList.add('open')">
+      <span class="pill">Prix entreprise</span>
+      <div class="priceTileTitle">Tube PPR D20 PN20</div>
+      <div class="priceTileValue">11 305 Ar</div>
+      <div class="priceTileMeta">Antananarivo</div>
+      <div class="priceTileActions" onclick="event.stopPropagation()">
+        <button class="ghostButton">Modifier</button>
+        <button class="dangerButton">Suppr.</button>
+      </div>
+    </div>
+
+    <div class="priceTile" onclick="document.getElementById('modal2').classList.add('open')">
+      <span class="pill">Prix entreprise</span>
+      <div class="priceTileTitle">Casque de chantier blanc Delta Plus</div>
+      <div class="priceTileValue">73 830 Ar</div>
+      <div class="priceTileMeta">Antananarivo</div>
+      <div class="priceTileActions" onclick="event.stopPropagation()">
+        <button class="ghostButton">Modifier</button>
+        <button class="dangerButton">Suppr.</button>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+
+<!-- Modal 1 : Tube PPR D20 PN20 (Plomberie) -->
+<div class="modalBackdrop" id="modal1" onclick="this.classList.remove('open')">
+  <div class="modal" onclick="event.stopPropagation()">
+    <h2>Tube PPR D20 PN20</h2>
+    <p class="subtitle">Plomberie · barre</p>
+
+    <div class="bottomBlock">
+      <div class="sourceRow">
+        <span class="src">Source : Prix entreprise</span>
+        <span class="conf">Confiance IA : 0 %</span>
+      </div>
+    </div>
+
+    <div class="sectionLabel">Informations générales</div>
+    <div class="detailList">
+      <div class="detailRow"><span class="label">Catégorie</span><span>Plomberie</span></div>
+      <div class="detailRow"><span class="label">Unité</span><span>barre</span></div>
+      <div class="detailRow"><span class="label">Fournisseur</span><span>Sanifer</span></div>
+      <div class="detailRow"><span class="label">Ville</span><span>Antananarivo</span></div>
+      <div class="detailRow"><span class="label">Région</span><span>Analamanga</span></div>
+      <div class="detailRow"><span class="label">Disponibilité</span><span>Prix web -5%</span></div>
+      <div class="detailRow"><span class="label">Livraison</span><span>—</span></div>
+      <div class="detailRow"><span class="label">Date du prix</span><span>18/09/2026</span></div>
+    </div>
+
+    <div class="sectionLabel">Caractéristiques techniques</div>
+    <div class="detailList">
+      <div class="detailRow"><span class="label">Appellation commerciale</span><span>Tube PPR gris</span></div>
+      <div class="detailRow"><span class="label">Origine</span><span>Import</span></div>
+      <div class="detailRow"><span class="label">Désignation technique</span><span>Tube polypropylène random pour eau sous pression</span></div>
+      <div class="detailRow"><span class="label">Norme / classe</span><span>ISO 15874-2 / DIN 8077</span></div>
+      <div class="detailRow"><span class="label">Dimensions / section</span><span>Ø20 mm, épaisseur PN20 ≈ 3.4 mm</span></div>
+      <div class="detailRow"><span class="label">Longueur</span><span>4 m</span></div>
+      <div class="detailRow"><span class="label">Poids théorique</span><span>À calculer selon longueur et densité du PP-R; masse fournisseur non publiée</span></div>
+      <div class="detailRow"><span class="label">Source de la donnée</span><span>ISO 15874-2 / DIN 8077-8078</span></div>
+      <div class="detailRow"><span class="label">Fiabilité de la donnée</span><span>Caractéristique normalisée</span></div>
+    </div>
+
+    <p class="foot">Toutes ces informations (générales et techniques) sont utilisées par la recherche en haut de la bibliothèque.</p>
+    <button class="ghostButton" style="margin-top:16px" onclick="document.getElementById('modal1').classList.remove('open')">Fermer</button>
+  </div>
+</div>
+
+<!-- Modal 2 : Casque de chantier Delta Plus (EPI) -->
+<div class="modalBackdrop" id="modal2" onclick="this.classList.remove('open')">
+  <div class="modal" onclick="event.stopPropagation()">
+    <h2>Casque de chantier blanc Delta Plus</h2>
+    <p class="subtitle">EPI / sécurité · pièce</p>
+
+    <div class="bottomBlock">
+      <div class="sourceRow">
+        <span class="src">Source : Prix entreprise</span>
+        <span class="conf">Confiance IA : 0 %</span>
+      </div>
+    </div>
+
+    <div class="sectionLabel">Informations générales</div>
+    <div class="detailList">
+      <div class="detailRow"><span class="label">Catégorie</span><span>EPI / sécurité</span></div>
+      <div class="detailRow"><span class="label">Unité</span><span>pièce</span></div>
+      <div class="detailRow"><span class="label">Fournisseur</span><span>ABC/Bricorama</span></div>
+      <div class="detailRow"><span class="label">Ville</span><span>Antananarivo</span></div>
+      <div class="detailRow"><span class="label">Région</span><span>Analamanga</span></div>
+      <div class="detailRow"><span class="label">Disponibilité</span><span>En stock</span></div>
+      <div class="detailRow"><span class="label">Livraison</span><span>—</span></div>
+      <div class="detailRow"><span class="label">Date du prix</span><span>18/09/2026</span></div>
+    </div>
+
+    <div class="sectionLabel">Caractéristiques techniques</div>
+    <div class="detailList">
+      <div class="detailRow"><span class="label">Marque</span><span>Delta Plus</span></div>
+      <div class="detailRow"><span class="label">Norme</span><span>EN 397</span></div>
+      <div class="detailRow"><span class="label">Couleur</span><span>Blanc</span></div>
+      <div class="detailRow"><span class="label">Matière</span><span>ABS</span></div>
+      <div class="detailRow"><span class="label">Jugulaire</span><span>Réglable</span></div>
+      <div class="detailRow"><span class="label">Source de la donnée</span><span>https://www.abc.mg/product/98436</span></div>
+    </div>
+
+    <p class="foot">Toutes ces informations (générales et techniques) sont utilisées par la recherche en haut de la bibliothèque.</p>
+    <button class="ghostButton" style="margin-top:16px" onclick="document.getElementById('modal2').classList.remove('open')">Fermer</button>
+  </div>
+</div>
+
+</body>
+</html>

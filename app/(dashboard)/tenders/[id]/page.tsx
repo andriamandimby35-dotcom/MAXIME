@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getContext } from "@/lib/organization";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
+import { OpenPdfButton } from "@/components/OpenPdfButton";
 
 export default async function TenderPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -21,7 +22,7 @@ export default async function TenderPage({ params }: { params: Promise<{ id: str
       <dl><div><dt>Client</dt><dd>{tender.client_name || "—"}</dd></div><div><dt>Date limite</dt><dd>{tender.deadline || "—"}</dd></div><div><dt>Montant estimé</dt><dd>{Number(tender.estimated_amount || 0).toLocaleString("fr-FR")} Ar</dd></div><div><dt>Statut</dt><dd>{statusLabel(tender.status)}</dd></div></dl>
       {tender.description && <p className="tenderDescription">{tender.description}</p>}
     </section>
-    <section className="tenderDaoCard"><div><h2>Document DAO</h2><p>Après l’analyse, le dossier apparaît dans « Dossiers de soumission ».</p></div>{tender.document_url ? <a href={`/pdf-viewer?url=${encodeURIComponent(tender.document_url)}`} target="_blank" rel="noreferrer" className="tenderButton">Ouvrir le PDF</a> : <span>PDF indisponible</span>}</section>
+    <section className="tenderDaoCard"><div><h2>Document DAO</h2><p>Après l’analyse, le dossier apparaît dans « Dossiers de soumission ».</p></div>{tender.document_url ? <OpenPdfButton title="Document DAO" url={tender.document_url} className="tenderButton">Ouvrir le PDF</OpenPdfButton> : <span>PDF indisponible</span>}</section>
   </main>;
 }
 

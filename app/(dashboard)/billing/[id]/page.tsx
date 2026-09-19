@@ -24,13 +24,13 @@ export default async function BillingProjectPage({ params }: { params: Promise<{
 
   const { data: project } = await supabase
     .from("projects")
-    .select("id,project_code,name,location,budget_amount,status,source_tender_id")
+    .select("id,project_code,name,location,budget_amount,status,source_tender_id,source_estimate_id,manual_margin_percent")
     .eq("id", id)
     .eq("organization_id", organizationId)
     .maybeSingle();
   if (!project) notFound();
 
-  const [tenderResult, paymentsResult] = await Promise.all([
+  const [tenderResult, paymentsResult, claimsResult] = await Promise.all([
     project.source_tender_id
       ? supabase.from("tenders").select("client_name,reference,title").eq("id", project.source_tender_id).maybeSingle()
       : Promise.resolve({ data: null }),
@@ -40,15 +40,27 @@ export default async function BillingProjectPage({ params }: { params: Promise<{
       .eq("organization_id", organizationId)
       .eq("project_id", id)
       .order("payment_date", { ascending: false }),
+    supabase
+      .from("progress_claims")
+      .select("id,claim_number,issue_date,status,gross_amount,retention_amount,tax_amount,net_amount")
+      .eq("organization_id", organizationId)
+      .eq("project_id", id)
+      .order("issue_date", { ascending: false })
+      .order("created_at", { ascending: false }),
   ]);
 
   return (
     <>
-      <RealtimeRefresh channelName={`billing-${id}`} tables={[{ table: "payments", filter: `project_id=eq.${id}` }, { table: "projects", filter: `id=eq.${id}` }]} />
+      <RealtimeRefresh channelName={`billing-${id}`} tables={[
+        { table: "payments", filter: `project_id=eq.${id}` },
+        { table: "projects", filter: `id=eq.${id}` },
+        { table: "progress_claims", filter: `project_id=eq.${id}` },
+      ]} />
       <BillingProjectDetail
         project={project}
         tender={tenderResult.data ?? null}
         payments={paymentsResult.data ?? []}
+        claims={claimsResult.data ?? []}
       />
     </>
   );

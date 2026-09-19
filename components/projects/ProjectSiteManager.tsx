@@ -5,6 +5,7 @@ import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 import { deleteOfflinePhoto, loadOfflinePhoto, saveOfflinePhoto } from "@/lib/offline-photos";
+import { canonicalCityName, canonicalMaterialKey } from "@/lib/material-normalization";
 
 type Project = { id: string; project_code?: string | null; name: string; location?: string | null; budget_amount?: number | string | null; progress_percent?: number | string | null; status?: string | null; planned_end_date?: string | null; source_tender_id?: string | null; source_estimate_id?: string | null; closed_at?: string | null };
 type PriceItem = { id: string; project_id: string; position?: string | null; designation: string; unit?: string | null; quantity?: number | string | null; unit_price?: number | string | null; total?: number | string | null; is_internal?: boolean };
@@ -46,6 +47,7 @@ type QueuedPurchasePayload = {
   photoId: string;
   transportMode: string | null;
   transportPrice: number | null;
+  fournisseur?: string | null;
 };
 type ProjectAccessRole = "admin" | "works_manager" | "site_manager" | "viewer";
 type Assignment = { id: string; user_id: string; role: string; active: boolean; permissions?: Record<string, boolean> | null; parent_assignment_id?: string | null; created_at?: string; email?: string | null; displayName?: string | null; access_password?: string | null; phone_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; revoked_at?: string | null };
@@ -60,6 +62,26 @@ const date = new Intl.DateTimeFormat("fr-FR");
 const dateTime = new Intl.DateTimeFormat("fr-FR", { dateStyle: "short", timeStyle: "short" });
 const isLocked = (createdAt?: string) => Boolean(createdAt && !createdAt.startsWith(new Date().toISOString().slice(0, 10)));
 const materialKey = (value: string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+// M\u00eame normalisation que la protection anti-doublon de la base (colonne
+// g\u00e9n\u00e9r\u00e9e "designation_norm" de price_library) : sert \u00e0 d\u00e9tecter si un
+// mat\u00e9riau existe d\u00e9j\u00e0 avant d'ins\u00e9rer, pour ne jamais d\u00e9clencher l'erreur
+// d'unicit\u00e9 et surtout pour fusionner au lieu de dupliquer (voir
+// addMaterialToLibrary / saveLibraryMaterialEdit ci-dessous).
+const designationNormKey = (value: string) => String(value ?? "").toLowerCase().replace(/[^a-zA-Z0-9]/g, "");
+// Identifiant d'une offre (fournisseur + lieu) dans la liste "fournisseurs"
+// d'un mat\u00e9riau : deux offres du m\u00eame fournisseur au m\u00eame endroit sont mises
+// \u00e0 jour l'une sur l'autre, sinon une nouvelle offre est ajout\u00e9e \u00e0 la liste.
+type PriceOfferEntry = { fournisseur?: string | null; ville?: string | null; region?: string | null; prix?: number | string | null; disponibilite?: string | null; livraison?: string | null; date_prix?: string | null };
+const offerKey = (offer: PriceOfferEntry) => `${materialKey(String(offer.fournisseur ?? ""))}|${materialKey(String(offer.ville || offer.region || ""))}`;
+function mergeOffer(existingOffers: PriceOfferEntry[] | null | undefined, newOffer: PriceOfferEntry) {
+  const offers = Array.isArray(existingOffers) ? existingOffers : [];
+  const matchIndex = offers.findIndex((offer) => offerKey(offer) === offerKey(newOffer));
+  const merged = matchIndex >= 0
+    ? offers.map((offer, index) => (index === matchIndex ? newOffer : offer))
+    : [...offers, newOffer];
+  const cheapest = merged.reduce((best, offer) => (Number(offer.prix) < Number(best.prix) ? offer : best), merged[0]);
+  return { merged, cheapest };
+}
 function phoneLink(phone?: string | null) {
   if (!phone) return null;
   return <a className="projectPhoneLink" href={`tel:${phone.replace(/\s+/g, "")}`} onClick={(event) => event.stopPropagation()}>{phone}</a>;
@@ -111,7 +133,8 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [revealedKey]);
-  type PriceLibraryOption = { id: string; designation: string; unite: string; prix_retenu: number | string | null; prix_actuel: number | string | null; prix_ia: number | string | null; statut_prix?: string | null; ville?: string | null; fournisseur?: string | null };
+  type PriceOffer = { fournisseur?: string | null; ville?: string | null; region?: string | null; prix?: number | string | null; disponibilite?: string | null; livraison?: string | null; date_prix?: string | null };
+  type PriceLibraryOption = { id: string; designation: string; unite: string; prix_retenu: number | string | null; prix_actuel: number | string | null; prix_ia: number | string | null; statut_prix?: string | null; ville?: string | null; fournisseur?: string | null; fournisseurs?: PriceOffer[] | null };
   const [priceLibraryOptions, setPriceLibraryOptions] = useState<PriceLibraryOption[]>([]);
   // Demande de matériaux : petit assistant à sélection cliquée (matériau,
   // quantité, besoin), envoyée directement — plus d'étape « brouillon ».
@@ -120,6 +143,12 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   const [requestMaterialSearch, setRequestMaterialSearch] = useState("");
   const [requestStatus, setRequestStatus] = useState<{ kind: "info" | "success" | "error"; text: string } | null>(null);
   const [viewingOrder, setViewingOrder] = useState<MaterialOrder | null>(null);
+  // Quand un matériau a des offres dans plusieurs régions, on propose
+  // automatiquement celle du chantier (voir matchedRegionGroup) — sauf si
+  // l'utilisateur clique sur "changer" (forceRegionChoice), auquel cas un
+  // simple choix de région s'affiche avant de valider l'achat.
+  const [selectedPurchaseOffer, setSelectedPurchaseOffer] = useState<PriceOfferEntry | null>(null);
+  const [forceRegionChoice, setForceRegionChoice] = useState(false);
   const [viewingRequestDetail, setViewingRequestDetail] = useState<MaterialOrder | null>(null);
   const [purchaseStatus, setPurchaseStatus] = useState<{ kind: "info" | "success" | "error"; text: string } | null>(null);
   const [transportChoiceOpen, setTransportChoiceOpen] = useState(false);
@@ -253,9 +282,66 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   const averageProgress = projectTasks.length ? Math.round(projectTasks.reduce((sum, item) => sum + number(item.progress_percent), 0) / projectTasks.length) : number(project?.progress_percent);
   const lowStock = projectMaterials.filter((item) => number(item.on_site_quantity) < Math.max(number(item.minimum_stock), number(item.required_tomorrow)));
   const priceLibraryPrice = (option: PriceLibraryOption) => number(option.prix_retenu) || number(option.prix_actuel) || number(option.prix_ia);
+  // Retrouve la fiche de la bibliothèque de prix correspondant à une demande
+  // de matériau (par nom, comme le reste du fichier), pour savoir si elle a
+  // plusieurs fournisseurs enregistrés et proposer le choix avant l'achat.
+  const priceOptionForOrder = (order: MaterialOrder) => {
+    const key = order.material_key || materialKey(order.material_name);
+    return priceLibraryOptions.find((option) => materialKey(option.designation) === key) || null;
+  };
+  const offersForOrder = (order: MaterialOrder): PriceOfferEntry[] => {
+    const option = priceOptionForOrder(order);
+    return Array.isArray(option?.fournisseurs) ? (option!.fournisseurs as PriceOfferEntry[]) : [];
+  };
+  const viewingOrderOffers = viewingOrder ? offersForOrder(viewingOrder) : [];
+  // Un même matériau peut avoir des offres dans plusieurs régions : on
+  // regroupe par région/ville (pas fournisseur par fournisseur, pas de fiche
+  // détaillée) pour rester simple — juste un choix de région si besoin.
+  type RegionOfferGroup = { key: string; label: string; offers: PriceOfferEntry[] };
+  const viewingOrderRegionGroups: RegionOfferGroup[] = (() => {
+    const groups = new Map<string, RegionOfferGroup>();
+    for (const offer of viewingOrderOffers) {
+      const label = (offer.region || offer.ville || "Non précisé").trim() || "Non précisé";
+      const key = materialKey(label) || "autre";
+      if (!groups.has(key)) groups.set(key, { key, label, offers: [] });
+      groups.get(key)!.offers.push(offer);
+    }
+    return [...groups.values()];
+  })();
+  const cheapestInRegionGroup = (group: RegionOfferGroup) => group.offers.reduce((best, offer) => (Number(offer.prix) < Number(best.prix) ? offer : best), group.offers[0]);
+  // La localisation du chantier (renseignée à sa création) est comparée aux
+  // régions/villes des offres : si l'une correspond, on la propose
+  // automatiquement au lieu de demander — sinon un simple choix de région
+  // s'affiche (voir plus bas).
+  const matchedRegionGroup = (() => {
+    const chantierLocation = (project?.location || "").trim();
+    if (!chantierLocation || viewingOrderRegionGroups.length <= 1) return null;
+    const locationKey = materialKey(chantierLocation);
+    const locationCityKey = canonicalCityName(chantierLocation);
+    return viewingOrderRegionGroups.find((group) => {
+      if (!group.key) return false;
+      const groupCityKey = canonicalCityName(group.label);
+      return locationKey.includes(group.key) || group.key.includes(locationKey) || locationCityKey === groupCityKey;
+    }) || null;
+  })();
+  const viewingOrderNeedsRegionChoice = Boolean(
+    viewingOrder && viewingOrder.status !== "covered_by_stock" && viewingOrderRegionGroups.length > 1
+      && !selectedPurchaseOffer && (!matchedRegionGroup || forceRegionChoice),
+  );
+  const effectiveOffer = selectedPurchaseOffer || (matchedRegionGroup && !forceRegionChoice ? cheapestInRegionGroup(matchedRegionGroup) : null);
   const requestMaterialMatches = useMemo(() => {
-    const query = requestMaterialSearch.trim().toLowerCase();
-    const base = query ? priceLibraryOptions.filter((option) => option.designation.toLowerCase().includes(query)) : priceLibraryOptions;
+    // Recherche par mots-clés (même principe que la bibliothèque de prix) :
+    // "fer d8" ou "fer 8" ne montre que les matériaux qui contiennent TOUS
+    // ces mots (peu importe l'ordre), pas juste ceux qui contiennent la
+    // phrase exacte. canonicalMaterialKey garde aussi les équivalences déjà
+    // en place (Ø = D, mm/cm/kg/t, accents, majuscules...) des deux côtés.
+    const tokens = canonicalMaterialKey(requestMaterialSearch).split(" ").filter(Boolean);
+    const base = tokens.length
+      ? priceLibraryOptions.filter((option) => {
+          const designationKey = canonicalMaterialKey(option.designation);
+          return tokens.every((token) => designationKey.includes(token));
+        })
+      : priceLibraryOptions;
     return base.slice(0, 60);
   }, [requestMaterialSearch, priceLibraryOptions]);
   const TIMING_LABELS: Record<string, string> = { now: "Maintenant", tomorrow: "Demain", week: "Dans la semaine" };
@@ -302,7 +388,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
 
   async function refreshPriceLibrary() {
     if (!organizationId || !online) return;
-    const { data } = await supabase.from("price_library").select("id,designation,unite,prix_retenu,prix_actuel,prix_ia,statut_prix,ville,fournisseur").eq("organization_id", organizationId);
+    const { data } = await supabase.from("price_library").select("id,designation,unite,prix_retenu,prix_actuel,prix_ia,statut_prix,ville,fournisseur,fournisseurs").eq("organization_id", organizationId);
     if (data) setPriceLibraryOptions(data);
   }
 
@@ -799,7 +885,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     const order = materialOrders.find((item) => item.id === queued.orderId);
     const stored = await loadOfflinePhoto(queued.photoId);
     if (!order || !stored) return { ok: false, entry };
-    const result = await performPurchaseValidation(order, { purchasedQuantity: queued.purchasedQuantity, unitPrice: queued.unitPrice, photo: stored, transportMode: queued.transportMode, transportPrice: queued.transportPrice });
+    const result = await performPurchaseValidation(order, { purchasedQuantity: queued.purchasedQuantity, unitPrice: queued.unitPrice, photo: stored, transportMode: queued.transportMode, transportPrice: queued.transportPrice, fournisseur: queued.fournisseur || null });
     if (!result.ok) return { ok: false, entry };
     await deleteOfflinePhoto(queued.photoId);
     return { ok: true };
@@ -1329,19 +1415,38 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     if (!designation.trim()) { setNewLibraryStatus({ kind: "error", text: "Indiquez le nom commercial du matériau." }); return; }
     if (price <= 0) { setNewLibraryStatus({ kind: "error", text: "Indiquez un prix supérieur à zéro." }); return; }
     setNewLibraryStatus({ kind: "info", text: "Ajout en cours…" });
-    const { error } = await supabase.from("price_library").insert({
-      organization_id: organizationId,
-      designation: designation.trim(),
-      unite: unite.trim() || "U",
-      fournisseur: fournisseur.trim() || null,
-      ville: ville.trim() || null,
-      prix_retenu: price,
-      prix_entreprise: price,
-      statut_prix: "entreprise",
-      origine_prix: "manuel",
-    });
-    if (error) { setNewLibraryStatus({ kind: "error", text: `Ajout impossible : ${error.message}` }); return; }
-    setNewLibraryStatus({ kind: "success", text: "Matériau ajouté à la bibliothèque." });
+    const now = new Date().toISOString();
+    const newOffer: PriceOfferEntry = { fournisseur: fournisseur.trim() || "", ville: ville.trim() || "", region: "", prix: price, disponibilite: "", livraison: "", date_prix: now };
+    // Ce matériau existe peut-être déjà (même dans une autre région) : au lieu
+    // de créer un doublon (refusé par la base de toute façon), on ajoute cette
+    // offre à la fiche existante.
+    const targetKey = designationNormKey(designation);
+    const existing = priceLibraryOptions.find((option) => designationNormKey(option.designation) === targetKey) || null;
+    if (existing) {
+      const { merged, cheapest } = mergeOffer(existing.fournisseurs, newOffer);
+      const { error } = await supabase.from("price_library").update({
+        fournisseurs: merged,
+        prix_retenu: cheapest.prix, prix_actuel: cheapest.prix, prix_entreprise: cheapest.prix,
+        fournisseur: cheapest.fournisseur || null, ville: cheapest.ville || null, region: cheapest.region || null,
+      }).eq("id", existing.id);
+      if (error) { setNewLibraryStatus({ kind: "error", text: `Ajout impossible : ${error.message}` }); return; }
+      setNewLibraryStatus({ kind: "success", text: "Ce matériau existait déjà : cette offre a été ajoutée à sa fiche." });
+    } else {
+      const { error } = await supabase.from("price_library").insert({
+        organization_id: organizationId,
+        designation: designation.trim(),
+        unite: unite.trim() || "U",
+        fournisseur: fournisseur.trim() || null,
+        ville: ville.trim() || null,
+        prix_retenu: price,
+        prix_entreprise: price,
+        statut_prix: "entreprise",
+        origine_prix: "manuel",
+        fournisseurs: [newOffer],
+      });
+      if (error) { setNewLibraryStatus({ kind: "error", text: `Ajout impossible : ${error.message}` }); return; }
+      setNewLibraryStatus({ kind: "success", text: "Matériau ajouté à la bibliothèque." });
+    }
     setNewLibraryMaterial({ designation: "", unite: "U", fournisseur: "", ville: "", prix: "" });
     void refreshPriceLibrary();
   }
@@ -1372,27 +1477,25 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     const newVille = editingLibraryVille.trim();
     const originalVille = (editingLibraryMaterial.ville || "").trim();
     setEditingLibraryStatus({ kind: "info", text: "Enregistrement…" });
-    // Une localisation différente correspond à un autre fournisseur/prix réel :
-    // on crée une nouvelle entrée au lieu d'écraser l'existante.
-    if (newVille && newVille.toLowerCase() !== originalVille.toLowerCase()) {
-      const { error } = await supabase.from("price_library").insert({
-        organization_id: organizationId,
-        designation: editingLibraryMaterial.designation,
-        unite: editingLibraryMaterial.unite,
-        fournisseur: editingLibraryMaterial.fournisseur || null,
-        ville: newVille,
-        prix_retenu: price,
-        prix_entreprise: price,
-        statut_prix: "entreprise",
-        origine_prix: "manuel",
-      });
-      if (error) { setEditingLibraryStatus({ kind: "error", text: `Erreur : ${error.message}` }); return; }
-      setEditingLibraryStatus({ kind: "success", text: "Nouvelle variante créée pour cette localisation." });
-    } else {
-      const { error } = await supabase.from("price_library").update({ prix_retenu: price, prix_entreprise: price }).eq("id", editingLibraryMaterial.id);
-      if (error) { setEditingLibraryStatus({ kind: "error", text: `Erreur : ${error.message}` }); return; }
-      setEditingLibraryStatus({ kind: "success", text: "Prix mis à jour." });
-    }
+    // Une localisation différente correspond à un autre fournisseur/prix réel,
+    // mais reste le MÊME matériau : on ajoute (ou on met à jour) cette offre
+    // dans sa liste "fournisseurs" au lieu de créer une nouvelle fiche — ça
+    // évite les doublons (ex: 5 fiches "Fer D6", une par région).
+    const now = new Date().toISOString();
+    const newOffer: PriceOfferEntry = { fournisseur: editingLibraryMaterial.fournisseur || "", ville: newVille || originalVille, region: "", prix: price, disponibilite: "", livraison: "", date_prix: now };
+    const { merged, cheapest } = mergeOffer(editingLibraryMaterial.fournisseurs, newOffer);
+    const { error } = await supabase.from("price_library").update({
+      fournisseurs: merged,
+      prix_retenu: cheapest.prix, prix_actuel: cheapest.prix, prix_entreprise: cheapest.prix,
+      fournisseur: cheapest.fournisseur || null, ville: cheapest.ville || null, region: cheapest.region || null,
+    }).eq("id", editingLibraryMaterial.id);
+    if (error) { setEditingLibraryStatus({ kind: "error", text: `Erreur : ${error.message}` }); return; }
+    setEditingLibraryStatus({
+      kind: "success",
+      text: newVille && newVille.toLowerCase() !== originalVille.toLowerCase()
+        ? "Cette localisation a été ajoutée aux offres de ce matériau."
+        : "Prix mis à jour.",
+    });
     void refreshPriceLibrary();
   }
 
@@ -1432,7 +1535,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   // utilisé à la fois en ligne (tout de suite) et hors ligne (rejoué plus
   // tard avec la photo gardée sur l'appareil), pour ne jamais avoir deux
   // versions différentes de ce calcul sensible (stock, dépenses).
-  async function performPurchaseValidation(order: MaterialOrder, input: { purchasedQuantity: number; unitPrice: number; photo: { blob: Blob; name: string; type: string }; transportMode: string | null; transportPrice: number | null }): Promise<{ ok: boolean; message: string }> {
+  async function performPurchaseValidation(order: MaterialOrder, input: { purchasedQuantity: number; unitPrice: number; photo: { blob: Blob; name: string; type: string }; transportMode: string | null; transportPrice: number | null; fournisseur?: string | null }): Promise<{ ok: boolean; message: string }> {
     if (!organizationId || !selectedId) return { ok: false, message: "Chantier introuvable." };
     // La liste affichée peut être périmée (onglet resté ouvert, ou longue
     // absence de réseau) : on revérifie l'état réel de la commande avant de
@@ -1448,7 +1551,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     const path = `${organizationId}/${selectedId}/purchase-archives/${currentOrder.id}-${Date.now()}-${safeName}`;
     const { error: uploadError } = await supabase.storage.from("btp-documents").upload(path, input.photo.blob, { upsert: false, contentType: input.photo.type || "image/jpeg" });
     if (uploadError) return { ok: false, message: `Photo non envoyée : ${uploadError.message}` };
-    const caption = `Achat — ${currentOrder.material_name} · ${input.purchasedQuantity} ${currentOrder.unit} · ${input.unitPrice.toLocaleString("fr-FR")} Ar`;
+    const caption = `Achat — ${currentOrder.material_name} · ${input.purchasedQuantity} ${currentOrder.unit} · ${input.unitPrice.toLocaleString("fr-FR")} Ar${input.fournisseur ? ` · ${input.fournisseur}` : ""}`;
     const { data: photo, error: photoError } = await supabase.from("project_photos").insert({ organization_id: organizationId, project_id: selectedId, storage_path: path, caption, photo_type: "delivery", created_by: userId }).select().single();
     if (photoError) return { ok: false, message: `Archive photo non enregistrée : ${photoError.message}` };
     const values = { status: "paid", paid_at: new Date().toISOString(), validated_by: userId || null, purchased_quantity: input.purchasedQuantity, unit_price: input.unitPrice, purchase_photo_path: path, purchase_photo_caption: caption };
@@ -1526,10 +1629,10 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
       try {
         const photoId = crypto.randomUUID();
         await saveOfflinePhoto(photoId, file);
-        const queued: QueuedPurchasePayload = { orderId: order.id, purchasedQuantity, unitPrice, photoId, transportMode: selectedTransportMode, transportPrice: selectedTransportPrice };
+        const queued: QueuedPurchasePayload = { orderId: order.id, purchasedQuantity, unitPrice, photoId, transportMode: selectedTransportMode, transportPrice: selectedTransportPrice, fournisseur: effectiveOffer?.fournisseur || null };
         queueForSync(`Validation d’achat — ${order.material_name}`, "purchase", "project_material_orders", queued as unknown as Record<string, unknown>);
         setMaterialOrders((rows) => rows.map((row) => row.id === order.id ? { ...row, status: "paid", paid_at: new Date().toISOString(), validated_by: userId || null, purchased_quantity: purchasedQuantity, unit_price: unitPrice } : row));
-        setSelectedTransportMode(null); setSelectedTransportPrice(null); setTransportPriceDraft("");
+        setSelectedTransportMode(null); setSelectedTransportPrice(null); setTransportPriceDraft(""); setSelectedPurchaseOffer(null);
         setPurchaseStatus({ kind: "success", text: "Achat enregistré hors ligne avec sa photo : il sera validé et le stock mis à jour automatiquement dès la reconnexion." });
         formElement.reset();
         return true;
@@ -1542,9 +1645,9 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     setPurchaseStatus({ kind: "info", text: "Vérification de la demande…" });
     try {
       setPurchaseStatus({ kind: "info", text: "Envoi de la photo et validation…" });
-      const result = await performPurchaseValidation(order, { purchasedQuantity, unitPrice, photo: { blob: file, name: file.name, type: file.type }, transportMode: selectedTransportMode, transportPrice: selectedTransportPrice });
+      const result = await performPurchaseValidation(order, { purchasedQuantity, unitPrice, photo: { blob: file, name: file.name, type: file.type }, transportMode: selectedTransportMode, transportPrice: selectedTransportPrice, fournisseur: effectiveOffer?.fournisseur || null });
       setPurchaseStatus({ kind: result.ok ? "success" : "error", text: result.message });
-      if (result.ok) { setSelectedTransportMode(null); setSelectedTransportPrice(null); setTransportPriceDraft(""); formElement.reset(); }
+      if (result.ok) { setSelectedTransportMode(null); setSelectedTransportPrice(null); setTransportPriceDraft(""); setSelectedPurchaseOffer(null); formElement.reset(); }
       return result.ok;
     } finally { setBusy(false); }
   }
@@ -2307,7 +2410,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
         {(isAdmin || canUploadPurchaseEvidence) && <section className={`projectSiteCard projectExpenseWorkflow${isAdmin ? " mobAdminOrder2" : ""}`}>
           <div className="projectCardHead"><div><p className="projectEyebrow">ACHATS</p><h2>Matériaux validés</h2></div><span className={validatedOrdersToPurchase.length ? "projectAlert" : "projectOk"}>{validatedOrdersToPurchase.length} validé(s) à acheter</span></div>
           <p className="projectHint">Dès qu’une demande est validée, elle apparaît ici : achetez le matériau, prenez-en la photo, et le stock ainsi que les dépenses se mettent à jour automatiquement.</p>
-          <div className="projectNoteList">{validatedOrdersToPurchase.length ? validatedOrdersToPurchase.map((order) => <article key={order.id} className="projectTeamMember" style={{ cursor: "pointer" }} onClick={() => setViewingOrder(order)}><strong>{order.material_name}</strong><span>{number(order.quantity)} {order.unit} · {(number(order.quantity) * number(order.unit_price)).toLocaleString("fr-FR")} Ar</span></article>) : <p className="projectEmptyText">Aucun matériau en attente d’achat.</p>}</div>
+          <div className="projectNoteList">{validatedOrdersToPurchase.length ? validatedOrdersToPurchase.map((order) => <article key={order.id} className="projectTeamMember" style={{ cursor: "pointer" }} onClick={() => { setViewingOrder(order); setSelectedPurchaseOffer(null); setForceRegionChoice(false); }}><strong>{order.material_name}</strong><span>{number(order.quantity)} {order.unit} · {(number(order.quantity) * number(order.unit_price)).toLocaleString("fr-FR")} Ar</span></article>) : <p className="projectEmptyText">Aucun matériau en attente d’achat.</p>}</div>
           <button type="button" className="secondary projectHistoryButton" onClick={() => setViewingAchats(true)}>Voir l’historique</button>
         </section>}
         {canOperate && <section className={`projectSiteCard projectMiscExpenseCard${isAdmin ? " mobAdminOrder12" : ""}`}>
@@ -2334,18 +2437,31 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
           </div>
         </div></div>, document.body)}
         {viewingOrder && typeof document !== "undefined" && createPortal(
-<div className="modalBackdrop" onClick={() => { setViewingOrder(null); setSelectedTransportMode(null); setSelectedTransportPrice(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
+<div className="modalBackdrop" onClick={() => { setViewingOrder(null); setSelectedTransportMode(null); setSelectedTransportPrice(null); setSelectedPurchaseOffer(null); setForceRegionChoice(false); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(480px,100%)" }}>
           <h2 className="font-bold text-xl mb-4">{viewingOrder.material_name}</h2>
           <p className="projectHint">{number(viewingOrder.quantity)} {viewingOrder.unit} · {(number(viewingOrder.quantity) * number(viewingOrder.unit_price)).toLocaleString("fr-FR")} Ar · demandé par {readerName(viewingOrder.requested_by || "")}</p>
-          {viewingOrder.status === "covered_by_stock" ? <p className="projectOk" style={{ padding: "10px", borderRadius: "10px" }}>Couvert par le stock disponible — aucun achat nécessaire.</p> : <form className="projectPurchaseForm" onSubmit={(event) => { void uploadPurchaseEvidence(event, viewingOrder).then((success) => { if (success) setViewingOrder(null); }); }}>
+          {viewingOrder.status === "covered_by_stock" ? <p className="projectOk" style={{ padding: "10px", borderRadius: "10px" }}>Couvert par le stock disponible — aucun achat nécessaire.</p> : viewingOrderNeedsRegionChoice ? <>
+            {/* Contrairement au devis (toujours le moins cher automatiquement),
+                ce matériau a des offres dans plusieurs régions : on demande
+                juste laquelle, sans détailler chaque fournisseur. */}
+            <p className="projectHint">Ce matériau a des offres dans plusieurs régions — laquelle a été utilisée ?</p>
+            <div className="projectChipChoices">
+              {viewingOrderRegionGroups.map((group) => (
+                <button type="button" key={group.key} onClick={() => { setSelectedPurchaseOffer(cheapestInRegionGroup(group)); setForceRegionChoice(false); }}>{group.label}</button>
+              ))}
+            </div>
+            <button type="button" className="ghostButton mt-3" onClick={() => { setViewingOrder(null); setPurchaseStatus(null); }}>Annuler</button>
+          </> : <form className="projectPurchaseForm" onSubmit={(event) => { void uploadPurchaseEvidence(event, viewingOrder).then((success) => { if (success) setViewingOrder(null); }); }}>
+            {matchedRegionGroup && !forceRegionChoice && !selectedPurchaseOffer && <p className="projectHint">Région la plus proche du chantier : <strong>{matchedRegionGroup.label}</strong> — <button type="button" onClick={(event) => { event.preventDefault(); setForceRegionChoice(true); }} style={{ border: "none", background: "none", padding: 0, minHeight: 0, color: "#0f6b34", fontWeight: 800, textDecoration: "underline", cursor: "pointer" }}>changer</button></p>}
+            {selectedPurchaseOffer && viewingOrderRegionGroups.length > 1 && <p className="projectHint">Région choisie : <strong>{selectedPurchaseOffer.region || selectedPurchaseOffer.ville || "Non précisé"}</strong> — <button type="button" onClick={(event) => { event.preventDefault(); setSelectedPurchaseOffer(null); setForceRegionChoice(true); }} style={{ border: "none", background: "none", padding: 0, minHeight: 0, color: "#0f6b34", fontWeight: 800, textDecoration: "underline", cursor: "pointer" }}>changer</button></p>}
             <input name="purchased_quantity" type="number" min="0.001" step="any" required defaultValue={number(viewingOrder.quantity_to_purchase || viewingOrder.quantity)} placeholder="Quantité achetée" />
-            <input name="unit_price" type="number" min="0" step="any" required defaultValue={number(viewingOrder.unit_price)} placeholder="Prix payé (Ar)" />
+            <input name="unit_price" type="number" min="0" step="any" required defaultValue={effectiveOffer ? number(effectiveOffer.prix) : number(viewingOrder.unit_price)} placeholder="Prix payé (Ar)" />
             <label className="projectPhotoButton">📷 Photo de l’achat<input name="purchase_photo" type="file" accept="image/*" capture="environment" style={{ display: "none" }} /></label>
             <button type="button" className="secondary" onClick={(event) => { event.preventDefault(); setTransportChoiceOpen(true); }}>🚚 Transport{selectedTransportMode ? ` — ${TRANSPORT_MODE_LABELS[selectedTransportMode]}${selectedTransportPrice ? ` (${selectedTransportPrice.toLocaleString("fr-FR")} Ar)` : ""}` : ""}</button>
             <button disabled={busy || !canUploadPurchaseEvidence}>Valider l’achat</button>
           </form>}
           {purchaseStatus && <p className={`projectAccessStatus ${purchaseStatus.kind}`} role="status" aria-live="polite">{purchaseStatus.text}</p>}
-          <button type="button" className="ghostButton mt-3" onClick={() => { setViewingOrder(null); setPurchaseStatus(null); setSelectedTransportMode(null); setSelectedTransportPrice(null); }}>Fermer</button>
+          {!viewingOrderNeedsRegionChoice && <button type="button" className="ghostButton mt-3" onClick={() => { setViewingOrder(null); setPurchaseStatus(null); setSelectedTransportMode(null); setSelectedTransportPrice(null); setSelectedPurchaseOffer(null); setForceRegionChoice(false); }}>Fermer</button>}
         </div></div>, document.body)}
         {transportChoiceOpen && typeof document !== "undefined" && createPortal(
 <div className="modalBackdrop" onClick={() => setTransportChoiceOpen(false)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(360px,100%)" }}>

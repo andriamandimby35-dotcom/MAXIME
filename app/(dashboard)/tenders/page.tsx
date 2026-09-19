@@ -2,6 +2,7 @@ import Link from "next/link";
 import { getContext } from "@/lib/organization";
 import DeleteTenderButton from "@/components/tenders/DeleteTenderButton";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
+import { OpenPdfButton } from "@/components/OpenPdfButton";
 
 function statusLabel(status?: string | null) {
   const labels: Record<string, string> = {
@@ -194,14 +195,13 @@ export default async function TendersPage() {
 
                 <td className="p-4 tenderRowActions" data-label="Actions">
                   {tender.document_url ? (
-                    <a
-                      href={`/pdf-viewer?document=${encodeURIComponent(`/api/tenders/${tender.id}/document`)}`}
-                      target="_blank"
-                      rel="noreferrer"
+                    <OpenPdfButton
+                      title={`DAO — ${tender.title}`}
+                      url={`/api/tenders/${tender.id}/document`}
                       className="tenderButton"
                     >
                       Ouvrir le DAO
-                    </a>
+                    </OpenPdfButton>
                   ) : (
                     <button type="button" disabled className="tenderButton submissionPdfDisabled">
                       DAO indisponible

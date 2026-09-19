@@ -1,23 +1,26 @@
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { PDFDocument, rgb } from "pdf-lib";
+import { embedUnicodeFonts } from "./pdf-font";
 
 type FillPosition = { page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number };
 type RedactionZone = { page: number; field_key: string | null; x_percent: number; y_percent: number; width_percent: number; height_percent: number };
 
-// La police standard WinAnsi utilisée par drawText ne sait pas encoder
-// certains caractères Unicode pourtant courants dans nos propres valeurs —
-// notamment l'espace fine insécable U+202F que toLocaleString("fr-FR")
-// insère entre les milliers d'un montant. Sans ce nettoyage, drawText lève
-// une exception qui fait échouer TOUT le PDF en silence (repli sur un
-// résumé générique, sans page réelle) dès qu'un montant est à écrire — un
-// bug qui touchait donc chaque formulaire affichant un montant, pas un cas
-// isolé. On remplace d'abord les espaces Unicode par un espace normal, puis
-// tout caractère restant hors de la plage encodable par "?".
-const UNICODE_SPACES = /[  -   　]/g;
-const WINANSI_EXTRAS = "‘’‚“”„–—†‡•…‹›™";
-const NON_WINANSI = new RegExp("[^\x20-\x7e -ÿ" + WINANSI_EXTRAS + "]", "g");
+// drawText lève une exception (qui fait échouer TOUT le PDF en silence,
+// repli sur un résumé générique sans page réelle) dès qu'un caractère n'est
+// pas encodable par la police utilisée — notamment l'espace fine insécable
+// U+202F que toLocaleString("fr-FR") insère entre les milliers d'un montant.
+// On remplace d'abord les espaces Unicode par un espace normal.
+const UNICODE_SPACES = /[\u00a0\u2000-\u200a\u202f\u205f\u3000]/g;
+// Depuis l'usage d'une police DejaVu Sans embarquee (voir pdf-font.ts), la
+// couverture Unicode est bien plus large que l'ancien encodage WinAnsi :
+// alphabet latin etendu (oe, Y tremas, S caron...), grec, cyrillique,
+// armenien, une bonne partie des symboles et de la ponctuation technique. On
+// ne bloque donc plus que les blocs que cette police ne couvre vraiment pas
+// (ideogrammes CJK, hangul, emojis...), pour que le repli "?" ne serve plus
+// qu'en dernier recours au lieu d'etre la norme.
+const UNSUPPORTED_BLOCKS = /[\u2E80-\uA4CF\uAC00-\uD7FF\uF900-\uFFFF\u{1F000}-\u{1FFFF}]/gu;
 
 export function sanitizeForPdf(value: string) {
-  return value.replace(UNICODE_SPACES, " ").replace(NON_WINANSI, "?");
+  return value.replace(UNICODE_SPACES, " ").replace(UNSUPPORTED_BLOCKS, "?");
 }
 
 function compact(value: string, maximum: number) {
@@ -33,7 +36,7 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
   const result = await PDFDocument.create();
   const pages = await result.copyPages(sourcePdf, validPages.map((page) => page - 1));
   pages.forEach((page) => result.addPage(page));
-  const font = await result.embedFont(StandardFonts.Helvetica);
+  const { font } = await embedUnicodeFonts(result);
   // Une instruction entre crochets du DAO ("[insérer nom de la banque]") est
   // d'abord effacée par un rectangle blanc, puis remplacée par la vraie
   // valeur si un champ correspond — sinon elle reste simplement blanche,
@@ -84,8 +87,7 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
 export async function appendFilledFieldsSummaryPage(pdf: Uint8Array, title: string, lines: string[]) {
   if (!lines.length) return Buffer.from(pdf);
   const doc = await PDFDocument.load(pdf);
-  const font = await doc.embedFont(StandardFonts.Helvetica);
-  const boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
+  const { font, boldFont } = await embedUnicodeFonts(doc);
   let page = doc.addPage();
   const { width, height } = page.getSize();
   let y = height - 60;

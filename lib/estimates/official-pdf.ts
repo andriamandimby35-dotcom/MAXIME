@@ -55,6 +55,8 @@ function pdfText(value: string) {
     .replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)")
     .replace(/[–—]/g, "-").replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
     .replace(/œ/g, "oe").replace(/Œ/g, "OE")
+    .replace(/\u2022/g, "-").replace(/\u2026/g, "...")
+    .replace(/\u2039/g, "<").replace(/\u203a/g, ">").replace(/\u2122/g, "(TM)").replace(/[\u2020\u2021]/g, "")
     .replace(/[^\x20-\x7e\u00a0-\u00ff]/g, "?");
 }
 

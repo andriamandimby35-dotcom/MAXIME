@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { createServerClient } from "@/lib/supabase/server";
 import { DashboardNav } from "@/components/DashboardNav";
+import { PdfViewerProvider } from "@/components/PdfViewerProvider";
 
 
 export default async function DashboardLayout({
@@ -82,7 +83,7 @@ export default async function DashboardLayout({
 
       <main className="mainContent">
 
-        {children}
+        <PdfViewerProvider>{children}</PdfViewerProvider>
 
       </main>
 

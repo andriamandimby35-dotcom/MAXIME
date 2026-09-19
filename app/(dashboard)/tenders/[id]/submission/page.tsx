@@ -58,7 +58,22 @@ export default async function SubmissionPage({ params, searchParams }: { params:
   // dès qu'un équivalent réel existe, on ne garde que celui-ci, avec ses
   // vraies pages/son vrai modèle. L'élément générique ne reste que pour ce
   // que l'IA n'a réellement pas trouvé dans ce DAO.
-  const genericItemsWithoutRealMatch = standardSubmissionItems.filter((item) => !findBestTitleMatch(item.title, aiItems));
+  // Certains de ces éléments génériques ("Garantie bancaire de soumission
+  // B1", "Caution personnelle", "Liste des travaux similaires déjà
+  // exécutés") n'ont aucun champ à remplir ET aucune donnée que l'application
+  // calcule elle-même (contrairement au planning, à la liste des matériaux à
+  // transporter ou à la liste des plans, qui ont leur propre tableau calculé
+  // à partir du DAO). Sans le vrai modèle du DAO, les générer en PDF revient
+  // à inventer un faux document vide ("FORMULAIRE À SIGNER OU PARAPHER") : on
+  // demande alors directement d'insérer le modèle DAO rempli à la main,
+  // comme pour n'importe quelle autre pièce à joindre.
+  const hasAppComputedContent = (title: string) => /planning.*ex.cution/i.test(title)
+    || /mat.riaux.*transport/i.test(title) || /\bplans?\b/i.test(title) || /personnel/i.test(title);
+  const genericItemsWithoutRealMatch = standardSubmissionItems
+    .filter((item) => !findBestTitleMatch(item.title, aiItems))
+    .map((item) => (item.kind === "form_to_complete" && item.fields.length === 0 && !hasAppComputedContent(item.title)
+      ? { ...item, kind: "document_to_provide" as const, instructions: "Récupérez le modèle correspondant dans le DAO, complétez-le à la main avec vos informations, faites-le signer si nécessaire, puis joignez la version scannée." }
+      : item));
   const detectedItems = [...genericItemsWithoutRealMatch, ...aiItems];
 
   const estimatedAmount = typeof tender.estimated_amount === "number" ? tender.estimated_amount : Number(tender.estimated_amount) || null;

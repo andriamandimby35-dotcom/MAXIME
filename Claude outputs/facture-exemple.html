@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<title>Exemple — Situation de travaux</title>
+<style>
+  body { font-family: Helvetica, Arial, sans-serif; background:#e9ebe9; margin:0; padding:24px; }
+  .sheet { background:#fff; max-width:1050px; margin:0 auto; padding:34px 38px; box-shadow:0 2px 10px rgba(0,0,0,.15); font-size:12px; color:#111; }
+  .top { display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1.5px solid #111; padding-bottom:10px; margin-bottom:10px; }
+  .company { font-size:19px; font-weight:800; }
+  .company small { display:block; font-size:10.5px; font-weight:400; margin-top:4px; line-height:1.5; color:#333; }
+  .doctitle { text-align:right; font-size:16px; font-weight:800; }
+  .meta { display:flex; justify-content:space-between; margin-bottom:16px; font-size:11px; }
+  .meta div { line-height:1.7; }
+  .meta b { color:#111; }
+  table { width:100%; border-collapse:collapse; font-size:10.3px; }
+  th, td { border:0.7px solid #999; padding:5px 6px; }
+  th { background:#e3e6e2; text-align:left; font-size:9px; text-transform:uppercase; }
+  td.num, th.num { text-align:right; }
+  tr.section td { background:#d6dad5; font-weight:700; text-transform:uppercase; font-size:9.5px; }
+  tr.total-row td { background:#cfd4cd; font-weight:800; font-size:11.5px; }
+  .footer-summary { width:340px; margin-left:auto; margin-top:14px; font-size:11px; }
+  .footer-summary div { display:flex; justify-content:space-between; padding:4px 0; border-bottom:0.5px solid #ddd; }
+  .footer-summary .net { background:#111; color:#fff; font-weight:800; font-size:13px; padding:8px 6px; margin-top:6px; border:none; }
+  .note { margin-top:22px; font-size:9.5px; color:#666; font-style:italic; }
+  .badge { display:inline-block; background:#fff3cd; border:1px solid #e0c26a; color:#7a5b00; font-size:9.5px; padding:6px 10px; margin-top:14px; }
+</style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="top">
+      <div class="company">
+        May&amp;Lanah
+        <small>
+          ANDRIAMANDIMBY Maxime<br/>
+          Lot VR 53 RU Bis, Mahazoarivo, Antananarivo — 038 52 050 00<br/>
+          NIF 30119171124 — STAT 41001 11 2022 0 06440
+        </small>
+      </div>
+      <div class="doctitle">SITUATION DE TRAVAUX N° SIT-CHT01-02</div>
+    </div>
+
+    <div class="meta">
+      <div>
+        <div>Chantier : <b>Construction villa R+1 — Ivato</b></div>
+        <div>Client : <b>Mme RAKOTO Hery</b></div>
+      </div>
+      <div style="text-align:right;">
+        <div>Date d'émission : <b>19/09/2026</b></div>
+        <div>Avancement du chantier : <b>42 %</b></div>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>N°</th>
+          <th>Désignation</th>
+          <th>Unité</th>
+          <th class="num">Qté marché</th>
+          <th class="num">Prix unitaire</th>
+          <th class="num">Qté réalisée cumulée</th>
+          <th class="num">Montant cumulé</th>
+          <th class="num">Déjà facturé</th>
+          <th class="num">À facturer</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>1</td><td>Fouille en pleine masse</td><td>m3</td>
+          <td class="num">120,000</td><td class="num">18 500 Ar</td>
+          <td class="num">120,000</td><td class="num">2 220 000 Ar</td>
+          <td class="num">2 220 000 Ar</td><td class="num">0 Ar</td>
+        </tr>
+        <tr>
+          <td>2</td><td>Béton de propreté 150 kg/m3</td><td>m3</td>
+          <td class="num">14,000</td><td class="num">210 000 Ar</td>
+          <td class="num">14,000</td><td class="num">2 940 000 Ar</td>
+          <td class="num">2 940 000 Ar</td><td class="num">0 Ar</td>
+        </tr>
+        <tr>
+          <td>3</td><td>Mur en parpaing 15x20x50</td><td>m2</td>
+          <td class="num">380,000</td><td class="num">32 000 Ar</td>
+          <td class="num">159,600</td><td class="num">5 107 200 Ar</td>
+          <td class="num">2 553 600 Ar</td><td class="num">2 553 600 Ar</td>
+        </tr>
+        <tr>
+          <td>4</td><td>Enduit ciment intérieur/extérieur</td><td>m2</td>
+          <td class="num">640,000</td><td class="num">9 800 Ar</td>
+          <td class="num">0,000</td><td class="num">0 Ar</td>
+          <td class="num">0 Ar</td><td class="num">0 Ar</td>
+        </tr>
+
+        <tr class="section"><td colspan="9">Dépenses diverses</td></tr>
+        <tr>
+          <td>—</td><td>Transport (réellement effectué)</td><td>forfait</td>
+          <td class="num">—</td><td class="num">—</td>
+          <td class="num">—</td><td class="num">1 380 000 Ar</td>
+          <td class="num">960 000 Ar</td><td class="num">420 000 Ar</td>
+        </tr>
+        <tr>
+          <td>—</td><td>Main d'œuvre (salaires réellement payés)</td><td>forfait</td>
+          <td class="num">—</td><td class="num">—</td>
+          <td class="num">—</td><td class="num">4 250 000 Ar</td>
+          <td class="num">3 100 000 Ar</td><td class="num">1 150 000 Ar</td>
+        </tr>
+        <tr>
+          <td>—</td><td>Autre (dépenses payées hors devis/planning)</td><td>forfait</td>
+          <td class="num">—</td><td class="num">—</td>
+          <td class="num">—</td><td class="num">210 000 Ar</td>
+          <td class="num">0 Ar</td><td class="num">210 000 Ar</td>
+        </tr>
+
+        <tr class="total-row">
+          <td colspan="8">TOTAL À FACTURER SUR CETTE SITUATION</td>
+          <td class="num">4 333 600 Ar</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="footer-summary">
+      <div><span>Montant brut de cette situation</span><b>4 333 600 Ar</b></div>
+      <div><span>Retenue de garantie (5,0 %)</span><b>- 216 680 Ar</b></div>
+      <div><span>Taxe de l'État (8,0 %)</span><b>+ 329 354 Ar</b></div>
+      <div class="net"><span>NET À PAYER SUR CETTE SITUATION</span><span>4 446 274 Ar</span></div>
+    </div>
+
+    <div class="badge">⚠ Exemple avec des chiffres inventés, uniquement pour valider la mise en page avant de coder le vrai PDF.</div>
+
+    <p class="note">
+      Les lignes 1 à 4 viennent du devis externe (facturées selon leur avancement réel, ligne par ligne).
+      Les 3 lignes "Dépenses diverses" viennent des dépenses réellement payées sur le chantier (transport, salaires, autres),
+      majorées de la marge du chantier, et suivent la même règle de cumul (jamais deux fois la même chose).
+    </p>
+  </div>
+</body>
+</html>
