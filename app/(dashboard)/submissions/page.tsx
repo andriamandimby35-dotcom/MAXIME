@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getContext } from "@/lib/organization";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
+import { DeleteSubmissionDossierButton } from "@/components/tenders/DeleteSubmissionDossierButton";
 
 type Analysis = { submission_items?: unknown[] };
 type StoredItem = { title: string; required: boolean; form_data: Record<string, string> };
@@ -22,7 +23,7 @@ export default async function SubmissionsPage() {
     const finalReady = Boolean(listed.data?.some((file) => file.name === "dossier-soumission-final.pdf"));
     let analysis: Analysis | null = null;
     try { analysis = typeof tender.ai_analysis === "string" ? JSON.parse(tender.ai_analysis) as Analysis : tender.ai_analysis as Analysis | null; } catch { analysis = null; }
-    return { tender, count: items.length || (Array.isArray(analysis?.submission_items) ? analysis.submission_items.length : 0), finalReady, valid: finalReady && !missing.length };
+    return { tender, count: items.length || (Array.isArray(analysis?.submission_items) ? analysis.submission_items.length : 0), finalReady, valid: finalReady && !missing.length, hasStoredItems: items.length > 0 };
   }));
   return <main className="submissionPage p-8 max-w-7xl">
     {organizationId && <RealtimeRefresh channelName="submissions-list" tables={[
@@ -33,7 +34,7 @@ export default async function SubmissionsPage() {
     <p className="mt-2 text-gray-600">Un dossier maître par DAO, avec vérification finale et PDF enregistré.</p>
     <section className="submissionTable mt-6 overflow-hidden rounded-2xl border bg-white">
       <table className="w-full"><thead><tr><th className="text-left p-4">DAO / chantier</th><th className="text-left p-4">Échéance</th><th className="text-left p-4">Pièces trouvées</th><th className="text-left p-4">État</th><th className="text-left p-4">Dossier</th><th className="text-left p-4">PDF final</th></tr></thead>
-        <tbody>{rows.map(({ tender, count, finalReady, valid }) => <tr key={tender.id} className="submissionRow"><td className="p-4 font-semibold" data-label="DAO / chantier">{tender.reference ? `${tender.reference} — ` : ""}{tender.title}</td><td className="p-4" data-label="Échéance">{tender.deadline ? new Date(tender.deadline).toLocaleDateString("fr-FR") : "—"}</td><td className="p-4" data-label="Pièces trouvées"><span className="submissionCount">{count || "À analyser"}</span></td><td className="p-4" data-label="État"><span className={`submissionStatus ${valid ? "isValid" : "isInvalid"}`}>{valid ? "Validé — prêt à imprimer" : "Non validé"}</span></td><td className="p-4" data-label="Dossier"><Link className="tenderButton submissionOpenLink" href={`/tenders/${tender.id}/submission`}>Ouvrir</Link></td><td className="p-4 submissionPdfCell" data-label="PDF final">{finalReady ? <a className="tenderButton submissionPdfReady" href={`/pdf-viewer?document=${encodeURIComponent(`/api/tenders/${tender.id}/final-submission-pdf`)}`} target="_blank" rel="noreferrer">Ouvrir le PDF final</a> : <button type="button" disabled className="tenderButton submissionPdfDisabled">PDF final à générer</button>}</td></tr>)}</tbody>
+        <tbody>{rows.map(({ tender, count, finalReady, valid, hasStoredItems }) => <tr key={tender.id} className="submissionRow"><td className="p-4 font-semibold" data-label="DAO / chantier">{tender.reference ? `${tender.reference} — ` : ""}{tender.title}</td><td className="p-4" data-label="Échéance">{tender.deadline ? new Date(tender.deadline).toLocaleDateString("fr-FR") : "—"}</td><td className="p-4" data-label="Pièces trouvées"><span className="submissionCount">{count || "À analyser"}</span></td><td className="p-4" data-label="État"><span className={`submissionStatus ${valid ? "isValid" : "isInvalid"}`}>{valid ? "Validé — prêt à imprimer" : "Non validé"}</span></td><td className="p-4" data-label="Dossier"><div className="flex flex-wrap gap-2"><Link className="tenderButton submissionOpenLink" href={`/tenders/${tender.id}/submission`}>Ouvrir</Link>{hasStoredItems && <DeleteSubmissionDossierButton tenderId={tender.id} />}</div></td><td className="p-4 submissionPdfCell" data-label="PDF final">{finalReady ? <a className="tenderButton submissionPdfReady" href={`/pdf-viewer?document=${encodeURIComponent(`/api/tenders/${tender.id}/final-submission-pdf`)}`} target="_blank" rel="noreferrer">Ouvrir le PDF final</a> : <button type="button" disabled className="tenderButton submissionPdfDisabled">PDF final à générer</button>}</td></tr>)}</tbody>
       </table>
       {!tenders?.length && <p className="p-6 text-gray-600">Aucun DAO enregistré.</p>}
     </section>
