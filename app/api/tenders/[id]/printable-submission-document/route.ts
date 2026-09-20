@@ -495,12 +495,22 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       }
     }
   }
-  // Repli : l'IA n'a pas forcément créé d'entrée dédiée dans submission_items
-  // pour cette pièce précise (ex. CCAP), mais sa référence affichée ("Pages
-  // 31-46, Partie III") indique déjà où elle se trouve dans le DAO. Plutôt
-  // que de rester bloqué sur du texte générique, on lit directement cette
-  // référence — toujours avec la même vérification anti-chevauchement.
-  if (!isExecutionPlanning && !detectedTemplate && tender.document_url) {
+  // Repli général : que la pièce détectée par similarité de titre n'ait en
+  // fait AUCUNE page connue (analyse mal étiquetée ou incomplète pour CETTE
+  // pièce précise), OU qu'aucune pièce ne corresponde du tout dans l'analyse
+  // IA, on ne doit JAMAIS abandonner tout de suite sur la feuille générique —
+  // deux autres façons de retrouver la vraie page restent à essayer. D'abord
+  // la référence affichée par la pièce elle-même (ex. "Pages 31-46, Partie
+  // III"), toujours avec la même vérification anti-chevauchement. On tente
+  // aussi ici le même remplissage fidèle (page DAO intacte + repérage
+  // automatique des positions) qu'utilise la branche ci-dessus — pas
+  // seulement l'extraction de page nue — en s'appuyant sur les champs déjà
+  // connus pour cette pièce (ceux de l'IA si elle en a, sinon ceux déjà
+  // enregistrés côté dossier).
+  if (!isExecutionPlanning && !detectedTemplateKnownPages.length && tender.document_url) {
+    const fieldTargets = (detectedTemplate?.fields?.length ? detectedTemplate.fields : fields)
+      .map((field) => ({ field_key: field.key, label: field.label, description: (field as { description?: string }).description }))
+      .filter((field): field is { field_key: string; label: string; description: string | undefined } => Boolean(field.field_key && field.label));
     const referencedPages = parsePageNumbersFromReference(clientSourceReference);
     const notClaimedByOthers = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], title, referencedPages);
     if (notClaimedByOthers.length) {
@@ -513,7 +523,11 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           // localisation du site AVANT le CCAP) : on recadre sur la première
           // page qui mentionne vraiment le sujet demandé.
           const verifiedPages = await trimToRelevantStart(bytes, notClaimedByOthers, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title));
-          const pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [], templateValues);
+          const [positions, redactions] = await Promise.all([
+            locateFieldPositions(bytes, verifiedPages, fieldTargets),
+            locateBracketPlaceholders(bytes, verifiedPages, fieldTargets),
+          ]);
+          const pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, templateValues, redactions);
           return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
         }
       } catch (error) {
@@ -533,7 +547,11 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           const bytes = new Uint8Array(await source.arrayBuffer());
           const locatedPages = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], title, await locateTitleInFullDocument(bytes, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title)));
           if (locatedPages.length) {
-            const pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, [], templateValues);
+            const [positions, redactions] = await Promise.all([
+              locateFieldPositions(bytes, locatedPages, fieldTargets),
+              locateBracketPlaceholders(bytes, locatedPages, fieldTargets),
+            ]);
+            const pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, positions, templateValues, redactions);
             return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
           }
         }
