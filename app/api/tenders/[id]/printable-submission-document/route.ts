@@ -415,7 +415,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // correcte, mais origin pas "dao", donc cette branche était sautée
   // entièrement malgré une page connue et fiable). Une page/référence connue
   // est un signal plus sûr que ce classement : dès qu'on en a une, on l'utilise.
-  if (!isExecutionPlanning && tender.document_url && detectedTemplateKnownPages.length) {
+  if (!isExecutionPlanning && detectedTemplate && tender.document_url && detectedTemplateKnownPages.length) {
     const notClaimedByOthers = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], detectedTemplate.title ?? title, detectedTemplateKnownPages);
     if (notClaimedByOthers.length) {
       try {
