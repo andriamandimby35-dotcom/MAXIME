@@ -230,6 +230,10 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   const [today, setToday] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [viewingPdf, setViewingPdf] = useState<{ title: string; objectUrl: string } | null>(null);
+  // Date à laquelle l'utilisateur a cliqué sur "Valider la complétion" — null
+  // si le dossier n'est pas (ou plus) marqué comme complet. Remplace
+  // l'ancienne génération d'un PDF fusionné : voir toggleDossierLock.
+  const [lockedAt, setLockedAt] = useState<string | null>(null);
   // Identifie l'action en cours (ouverture PDF, envoi de fichier...) pour
   // afficher un indicateur directement sur le bouton cliqué — auparavant rien
   // ne montrait qu'une action était en cours pendant l'attente.
@@ -237,7 +241,6 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   const pdfIframeRef = useRef<HTMLIFrameElement>(null);
   const hasLocalDraft = useRef(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const uploadingItems = useRef(new Set<number>());
   const supabase = useMemo(() => createClient(), []);
   const router = useRouter();
   const detected = useMemo(() => deduplicate(detectedItems), [detectedItems]);
@@ -259,6 +262,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       .then(({ response, payload }) => {
         if (!response.ok) throw new Error(payload.error || "Chargement impossible");
         setProfile((current) => ({ ...payload.profile, ...current }));
+        setLockedAt(payload.lockedAt ?? null);
         const companyAddress = String(payload.profile?.address ?? "");
         const profileValues = (payload.profile ?? {}) as Record<string, string>;
         const correctItem = (item: Item) => clearPlaceholderValues(clearStaleCompoundFields(clearThirdPartySignatureFields(clearCompanyAddressFromBankFields(item, companyAddress), profileValues), profileValues, tenderReference));
@@ -338,32 +342,6 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     scheduleSave(profile, next);
   }
 
-  async function insertFile(index: number, file: File) {
-    const item = items[index];
-    if (!item) return;
-    if (item.form_data.__attachmentPath || uploadingItems.current.has(index)) {
-      setMessage("Cette pièce est déjà jointe. Supprimez-la d’abord si vous souhaitez la remplacer.");
-      return;
-    }
-    uploadingItems.current.add(index);
-    const key = `upload:${index}`;
-    setPendingAction(key);
-    setMessage("Insertion du fichier…");
-    try {
-      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const path = `${organizationId}/submission/${tenderId}/${crypto.randomUUID()}-${safeName}`;
-      const upload = await supabase.storage.from("btp-documents").upload(path, file, { upsert: false });
-      if (upload.error) { setMessage(`Insertion impossible : ${upload.error.message}`); return; }
-      const nextItems = items.map((current, currentIndex) => currentIndex === index ? { ...current, status: "uploaded" as const, form_data: { ...current.form_data, __attachmentPath: path, __attachmentName: file.name } } : current);
-      setItems(nextItems);
-      try { await saveImmediately(profile, nextItems); setMessage("Fichier joint et enregistré."); }
-      catch (error) { setMessage(`${error instanceof Error ? error.message : "Enregistrement impossible"} Le fichier reste conservé localement.`); }
-    } finally {
-      uploadingItems.current.delete(index);
-      setPendingAction((current) => current === key ? null : current);
-    }
-  }
-
   // Tous les PDF du dossier (fichier joint, document généré, BDQE, contrat…)
   // s'ouvrent dans cette même carte au lieu d'une nouvelle fenêtre : défilement
   // continu, sans la barre d'outils du lecteur natif (donc sans le numéro de
@@ -392,48 +370,6 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   function printViewingPdf() {
     try { pdfIframeRef.current?.contentWindow?.print(); }
     catch { setMessage("Impression impossible depuis cet aperçu."); }
-  }
-
-  async function viewFile(item: Item) {
-    const path = item.form_data.__attachmentPath;
-    if (!path) return;
-    const key = `view:${item.title}`;
-    setPendingAction(key);
-    setMessage("Ouverture du fichier…");
-    const nativeTab = isPhoneDevice() ? window.open("", "_blank") : null;
-    try {
-      const signed = await supabase.storage.from("btp-documents").createSignedUrl(path, 300);
-      if (signed.error || !signed.data?.signedUrl) { nativeTab?.close(); setMessage("Ouverture du fichier impossible."); return; }
-      const response = await fetch(signed.data.signedUrl);
-      if (!response.ok) throw new Error(`Le serveur a répondu avec le statut ${response.status}.`);
-      openPdfPreferringNativeTab(nativeTab, item.form_data.__attachmentName || item.title, await response.blob());
-      setMessage("");
-    } catch (error) {
-      nativeTab?.close();
-      setMessage(error instanceof Error ? error.message : "Ouverture du fichier impossible.");
-    } finally {
-      setPendingAction((current) => current === key ? null : current);
-    }
-  }
-
-  async function removeFile(index: number) {
-    const item = items[index];
-    const path = item?.form_data.__attachmentPath;
-    if (!item || !path) return;
-    const key = `remove:${index}`;
-    setPendingAction(key);
-    setMessage("Suppression du fichier…");
-    try {
-      const removal = await supabase.storage.from("btp-documents").remove([path]);
-      if (removal.error) { setMessage(`Suppression impossible : ${removal.error.message}`); return; }
-      const { __attachmentPath: _path, __attachmentName: _name, ...formData } = item.form_data;
-      const nextItems = items.map((current, currentIndex) => currentIndex === index ? { ...current, status: current.kind === "form_to_complete" ? "needs_information" as const : "missing" as const, form_data: formData } : current);
-      setItems(nextItems);
-      try { await saveImmediately(profile, nextItems); setMessage("Fichier supprimé. Vous pouvez en choisir un autre."); }
-      catch (error) { setMessage(`${error instanceof Error ? error.message : "Enregistrement impossible"} Brouillon local conservé.`); }
-    } finally {
-      setPendingAction((current) => current === key ? null : current);
-    }
   }
 
   function needsPrintableVersion(item: Item) {
@@ -1063,14 +999,13 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     </article>;
   }
 
-  const incompleteItems = items.filter((item) => {
-    if (isAiGenerated(item)) return false;
-    if (isPersonnelList(item) && !rosterFor(item, "__personnel").length) return true;
-    if (isMaterialList(item) && !rosterFor(item, "__materiel").length) return true;
-    if (isWorkerContract(item) && !items.some((candidate) => isPersonnelList(candidate) && rosterFor(candidate, "__personnel").length)) return true;
-    if (item.required && !["ready", "uploaded"].includes(item.status)) return true;
-    return item.fields.some((field) => field.required && !resolvedFieldValue(item, field).trim());
-  });
+  // Le bouton "Vérifier le dossier" ne regarde plus que le bouton rouge/vert
+  // de chaque pièce obligatoire : c'est l'utilisateur qui juge lui-même,
+  // physiquement, qu'une pièce est prête, donc c'est cette seule bascule qui
+  // compte désormais (plus de vérification automatique des champs remplis
+  // ou du nombre de lignes des tableaux, qui ne reflétait plus la réalité
+  // depuis que rien n'est saisi ni joint depuis l'application).
+  const incompleteItems = items.filter((item) => item.required && !isItemReady(item));
 
   function validateDossier() {
     if (incompleteItems.length) {
@@ -1080,38 +1015,35 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     setMessage("Dossier complet et validé. Vérifiez une dernière fois les signatures avant dépôt.");
   }
 
-  async function validateAndGenerateFinalPdf() {
-    const key = "final";
+  // "Valider la complétion" — remplace l'ancienne génération d'un PDF
+  // fusionné : l'appli ne sert qu'à préparer le dossier physique, il n'y a
+  // donc plus rien à générer. On exige d'abord que toutes les pièces
+  // obligatoires soient au vert (comme "Vérifier le dossier"), puis on
+  // enregistre juste la date de validation. Réversible : cliquer à nouveau
+  // retire la validation, exactement comme le bouton rouge/vert de chaque
+  // pièce.
+  async function toggleDossierLock() {
+    const locking = !lockedAt;
+    if (locking && incompleteItems.length) {
+      setMessage(`${incompleteItems.length} élément(s) obligatoire(s) restent à compléter ou à marquer comme prêts avant de valider la complétion.`);
+      return;
+    }
+    const key = "lock";
     setPendingAction(key);
-    setMessage("Vérification finale du dossier…");
-    const nativeTab = isPhoneDevice() ? window.open("", "_blank") : null;
+    setMessage(locking ? "Validation du dossier…" : "Annulation de la validation…");
     try {
       await saveImmediately(profile, items);
-      const { data: { session } } = await supabase.auth.getSession();
-      const response = await fetch(`/api/tenders/${tenderId}/final-submission-pdf${scope}`, {
+      const response = await fetch(`/api/tenders/${tenderId}/submission-dossier/lock`, {
         method: "POST",
-        headers: session?.access_token ? {
-          Authorization: `Bearer ${session.access_token}`,
-          "X-Supabase-Access-Token": session.access_token,
-        } : undefined,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ estimateId, locked: locking }),
       });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "Génération finale impossible.");
-      const documentUrl = `/api/tenders/${tenderId}/final-submission-pdf${scope}`;
-      const getResponse = await fetch(documentUrl, {
-        cache: "no-store",
-        headers: session?.access_token ? {
-          Authorization: `Bearer ${session.access_token}`,
-          "X-Supabase-Access-Token": session.access_token,
-        } : undefined,
-      });
-      const pdf = await getResponse.blob();
-      if (!getResponse.ok || !pdf.type.includes("pdf") || pdf.size < 5) throw new Error("Le PDF final a été enregistré mais ne peut pas être ouvert.");
-      openPdfPreferringNativeTab(nativeTab, "Dossier de soumission — PDF final", pdf);
-      setMessage("Dossier validé et PDF final enregistré.");
+      if (!response.ok) throw new Error(payload.error || "Enregistrement impossible.");
+      setLockedAt(payload.lockedAt ?? null);
+      setMessage(locking ? "Dossier validé comme complet et prêt à être déposé." : "Validation retirée. Vous pouvez modifier le dossier.");
     } catch (error) {
-      nativeTab?.close();
-      setMessage(error instanceof Error ? error.message : "Génération finale impossible.");
+      setMessage(error instanceof Error ? error.message : "Enregistrement impossible.");
     } finally {
       setPendingAction((current) => current === key ? null : current);
     }
@@ -1163,7 +1095,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       <div className="mb-7">
         <h1 className="text-3xl font-bold">{estimateId ? "Dossier du devis" : "Dossier maître du DAO"}</h1>
         <p className="mt-2 text-gray-600">Pièces à fournir et formulaires détectés dans le DAO. Vérifiez toujours le document source avant dépôt.</p>
-        <div className="mt-4 flex flex-wrap gap-2"><button type="button" className="tenderButton" onClick={validateDossier}>Vérifier le dossier</button><button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === "final"} onClick={() => void validateAndGenerateFinalPdf()}><ButtonLabel loading={pendingAction === "final"} label="Valider et générer le PDF final" loadingLabel="Génération…" /></button><button type="button" className="tenderButton tenderButtonDanger" disabled={pendingAction === "deleteDossier"} onClick={() => void deleteDossier()}><ButtonLabel loading={pendingAction === "deleteDossier"} label="Supprimer le dossier" loadingLabel="Suppression…" /></button></div>
+        <div className="mt-4 flex flex-wrap gap-2"><button type="button" className="tenderButton" onClick={validateDossier}>Vérifier le dossier</button><button type="button" className={`tenderButton ${lockedAt ? "acknowledgedButton" : "tenderButtonPrimary"}`} disabled={pendingAction === "lock"} onClick={() => void toggleDossierLock()}><ButtonLabel loading={pendingAction === "lock"} label={lockedAt ? "Dossier validé ✓ (annuler)" : "Valider la complétion"} loadingLabel="Enregistrement…" /></button><button type="button" className="tenderButton tenderButtonDanger" disabled={pendingAction === "deleteDossier"} onClick={() => void deleteDossier()}><ButtonLabel loading={pendingAction === "deleteDossier"} label="Supprimer le dossier" loadingLabel="Suppression…" /></button></div>
         <p className="mt-3 text-sm font-semibold text-green-800">{message}</p>
     </div>
 
@@ -1183,7 +1115,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       <div className="mt-3 grid gap-2">
         {linkedDocuments.filter((document) => document.url).map((document) => <button key={document.estimateId} type="button" className="tenderButton" disabled={pendingAction === `bdqe:${document.estimateId}`} onClick={() => void openOfficialBdqe(document.estimateId)}><ButtonLabel loading={pendingAction === `bdqe:${document.estimateId}`} label={`Ouvrir le BDQE externe à imprimer — ${document.fileName}`} /></button>)}
         {!linkedDocuments.some((document) => document.url) && <p className="text-sm text-gray-600">Le BDQE apparaîtra ici dès que le devis officiel associé aura été enregistré.</p>}
-        {bdqeItem?.form_data.__attachmentPath ? <div className="flex flex-wrap gap-2"><button type="button" className="tenderButton" disabled={pendingAction === `view:${bdqeItem.title}`} onClick={() => void viewFile(bdqeItem)}><ButtonLabel loading={pendingAction === `view:${bdqeItem.title}`} label="Ouvrir le BDQE signé" /></button><button type="button" className="tenderButton" disabled={pendingAction === `remove:${bdqeIndex}`} onClick={() => void removeFile(bdqeIndex)}><ButtonLabel loading={pendingAction === `remove:${bdqeIndex}`} label="Supprimer le BDQE signé" loadingLabel="Suppression…" /></button></div> : bdqeIndex >= 0 ? <label className="tenderButton tenderButtonPrimary" style={{ width: "fit-content" }}>{pendingAction === `upload:${bdqeIndex}` ? <ButtonLabel loading label="" loadingLabel="Envoi…" /> : "Choisir un fichier"}<input style={{ display: "none" }} type="file" accept="application/pdf" disabled={pendingAction === `upload:${bdqeIndex}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) void insertFile(bdqeIndex, file); }} /></label> : null}
+        {bdqeItem && bdqeIndex >= 0 && <button type="button" className={`tenderButton ${isItemReady(bdqeItem) ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => toggleReady(bdqeIndex)}>{isItemReady(bdqeItem) ? "Prêt ✓ (annuler)" : "Marquer comme prêt"}</button>}
       </div>
     </section>
 

@@ -62,7 +62,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     return NextResponse.json({ error: "Ce devis n’est pas lié à ce DAO." }, { status: 404 });
   }
 
-  const [profileResult, itemsResult, estimateResult] = await Promise.all([
+  const [profileResult, itemsResult, estimateResult, lockResult] = await Promise.all([
     authorized.supabase
       .from("organization_submission_profiles")
       .select("profile_data")
@@ -76,10 +76,20 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       .order("created_at"),
     estimateId ? authorized.supabase
       .from("estimate_submission_dossiers")
-      .select("items")
+      .select("items,locked_at")
       .eq("estimate_id", estimateId)
       .eq("organization_id", authorized.organizationId)
       .eq("tender_id", authorized.tenderId)
+      .maybeSingle() : Promise.resolve({ data: null, error: null }),
+    // Table facultative ("Valider la complétion") : si la migration n'a pas
+    // encore été appliquée, on ignore simplement l'erreur au lieu de faire
+    // échouer tout le chargement du dossier — seul le bouton de verrouillage
+    // restera indisponible en attendant.
+    !estimateId ? authorized.supabase
+      .from("tender_submission_dossier_locks")
+      .select("locked_at")
+      .eq("tender_id", authorized.tenderId)
+      .eq("organization_id", authorized.organizationId)
       .maybeSingle() : Promise.resolve({ data: null, error: null }),
   ]);
   if (migrationError(profileResult.error) || migrationError(itemsResult.error) || migrationError(estimateResult.error)) {
@@ -92,6 +102,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   return NextResponse.json({
     profile: profileResult.data?.profile_data ?? {},
     items: estimateId ? (estimateResult.data?.items ?? []) : (itemsResult.data ?? []),
+    lockedAt: estimateId ? (estimateResult.data?.locked_at ?? null) : (lockResult.data?.locked_at ?? null),
   });
 }
 
