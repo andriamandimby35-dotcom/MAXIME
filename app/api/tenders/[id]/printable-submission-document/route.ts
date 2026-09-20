@@ -29,16 +29,23 @@ export const maxDuration = 300;
 // DIFFÉRENTE revendique aussi ce même numéro. Cette règle s'applique à
 // TOUTE pièce sourcée du DAO (garantie bancaire, code de conduite, lettre de
 // soumission, plans...), pas à un cas particulier.
+function otherItemsClaimedPages(
+  items: Array<{ title?: string; template_page_numbers?: number[] }>,
+  ownTitle: string,
+): Set<number> {
+  return new Set(
+    items
+      .filter((item) => item.title?.toLocaleLowerCase("fr-FR") !== ownTitle.toLocaleLowerCase("fr-FR"))
+      .flatMap((item) => item.template_page_numbers ?? []),
+  );
+}
+
 function pagesNotClaimedByOtherItems(
   items: Array<{ title?: string; template_page_numbers?: number[] }>,
   ownTitle: string,
   candidatePages: number[],
 ) {
-  const claimedByOthers = new Set(
-    items
-      .filter((item) => item.title?.toLocaleLowerCase("fr-FR") !== ownTitle.toLocaleLowerCase("fr-FR"))
-      .flatMap((item) => item.template_page_numbers ?? []),
-  );
+  const claimedByOthers = otherItemsClaimedPages(items, ownTitle);
   return candidatePages.filter((page) => !claimedByOthers.has(page));
 }
 
@@ -419,7 +426,9 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           const documentPageCount = (await PDFDocument.load(bytes)).getPageCount();
           const verifiedPages = /\bplans?\b/i.test(title)
             ? await expandToContiguousPlanRange(title, candidatePages, analysis?.submission_items ?? [], documentPageCount)
-            : await extractRelevantPageRange(bytes, candidatePages, detectedTemplate.title ?? title);
+            : await extractRelevantPageRange(bytes, candidatePages, detectedTemplate.title ?? title, {
+              claimedByOtherPages: otherItemsClaimedPages(analysis?.submission_items ?? [], detectedTemplate.title ?? title),
+            });
           const templateFields = detectedTemplate.fields ?? [];
           let pdf: Buffer;
           if (/\bplans?\b/i.test(title)) {
@@ -485,7 +494,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           // suite (ex. "Partie III" commence par l'acte d'engagement et la
           // localisation du site AVANT le CCAP) : on recadre sur la première
           // page qui mentionne vraiment le sujet demandé.
-          const verifiedPages = await trimToRelevantStart(bytes, notClaimedByOthers, title);
+          const verifiedPages = await trimToRelevantStart(bytes, notClaimedByOthers, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title));
           const pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [], templateValues);
           return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
         }
@@ -504,7 +513,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
         const source = await fetch(tender.document_url);
         if (source.ok) {
           const bytes = new Uint8Array(await source.arrayBuffer());
-          const locatedPages = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], title, await locateTitleInFullDocument(bytes, title));
+          const locatedPages = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], title, await locateTitleInFullDocument(bytes, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title)));
           if (locatedPages.length) {
             const pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, [], templateValues);
             return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);

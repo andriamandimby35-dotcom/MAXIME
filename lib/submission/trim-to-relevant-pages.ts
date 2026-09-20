@@ -4,18 +4,26 @@ import { significantWords } from "@/lib/submission/title-match";
 
 // Une plage de pages tirée d'une référence textuelle ("Pages 31-46, Partie
 // III") ou de numéros extraits par l'IA peut englober plusieurs documents à
-// la suite (table des matières, un autre modèle, PUIS la pièce demandée).
-// Logique générale (valable pour toute pièce, pas seulement CCAP ou les
-// plans) : tant que le titre en tête de page ne change pas, la page
-// appartient au même groupe ; dès qu'un NOUVEAU titre apparaît, c'est un
-// autre document. On part donc de la page qui nomme vraiment le sujet dans
-// son propre titre, puis on avance tant qu'aucun autre titre ne prend le
-// relais. Un titre est presque toujours en majuscules dans ce genre de DAO,
-// mais pas systématiquement (constaté : "Annexe 2" / calendrier cultural
-// d'un DAO réel a un titre en casse normale) — on ne peut donc pas exiger la
-// casse ; le signal fiable est qu'une ligne de titre est courte et ne se
-// termine jamais comme une phrase (pas de ponctuation de fin).
-const HEADING_ZONE_LENGTH = 100;
+// la suite (table des matières, un autre modèle, PUIS la pièce demandée), OU
+// au contraire être trop courte (l'IA ne cite parfois qu'UNE seule page pour
+// une pièce qui s'étale en réalité sur plusieurs pages, ex. un formulaire
+// "A1 à A5"). Logique générale (valable pour toute pièce, pas seulement CCAP
+// ou les plans) : on part de la page qui nomme vraiment le sujet dans son
+// propre titre, puis on avance — même au-delà des pages initialement
+// données — tant qu'aucun NOUVEAU titre ne prend le relais. Un titre est
+// presque toujours en majuscules dans ce genre de DAO, mais pas
+// systématiquement (constaté : "Annexe 2" / calendrier cultural d'un DAO
+// réel a un titre en casse normale) — on ne peut donc pas exiger la casse ;
+// le signal fiable est qu'une ligne de titre est courte et ne se termine
+// jamais comme une phrase (pas de ponctuation de fin).
+//
+// La "zone de titre" utilisée pour comparer les mots-clés ne prend que les
+// 2 premières lignes de la page (un titre peut être coupé sur deux lignes),
+// jamais tout le haut de la page : sinon un simple sommaire ("a. MODELES DE
+// FICHES DE RENSEIGNEMENTS...") glissé sous un AUTRE titre ("PARTIE II —
+// FORMULAIRES DE SOUMISSION") se faisait passer à tort pour le vrai début du
+// document "Fiches de renseignements..." — constaté sur un DAO réel.
+const HEADING_LINE_COUNT = 2;
 
 function normalizeText(value: string) {
   return value
@@ -53,12 +61,12 @@ async function pageHeadingLine(doc: Awaited<ReturnType<typeof getDocument>["prom
   // La toute première ligne est souvent juste le numéro de page imprimé.
   const withoutPageNumber = lines[0] && /^\d{1,4}$/.test(lines[0]) ? lines.slice(1) : lines;
   const firstLine = withoutPageNumber[0] ?? "";
-  const fullText = withoutPageNumber.join(" ");
-  return { firstLine, isHeading: isUppercaseHeading(firstLine), heading: normalizeText(fullText.slice(0, HEADING_ZONE_LENGTH)) };
+  const headingZone = withoutPageNumber.slice(0, HEADING_LINE_COUNT).join(" ");
+  return { firstLine, isHeading: isUppercaseHeading(firstLine), heading: normalizeText(headingZone) };
 }
 
-export async function trimToRelevantStart(pdfBytes: Uint8Array, candidatePages: number[], title: string): Promise<number[]> {
-  const range = await extractRelevantPageRange(pdfBytes, candidatePages, title);
+export async function trimToRelevantStart(pdfBytes: Uint8Array, candidatePages: number[], title: string, claimedByOtherPages?: Set<number>): Promise<number[]> {
+  const range = await extractRelevantPageRange(pdfBytes, candidatePages, title, { claimedByOtherPages });
   return range;
 }
 
@@ -70,28 +78,34 @@ export async function trimToRelevantStart(pdfBytes: Uint8Array, candidatePages: 
 // plage connue — sauf qu'ici la "plage de départ" est le DAO entier.
 // Générique par construction (le titre cherché est un paramètre) : sert
 // n'importe quelle pièce, sur n'importe quel DAO, pas seulement le CCAP.
-export async function locateTitleInFullDocument(pdfBytes: Uint8Array, title: string): Promise<number[]> {
+export async function locateTitleInFullDocument(pdfBytes: Uint8Array, title: string, claimedByOtherPages?: Set<number>): Promise<number[]> {
   try {
     const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
     const allPages = Array.from({ length: doc.numPages }, (_, index) => index + 1);
-    return await extractRelevantPageRange(pdfBytes, allPages, title, { returnEmptyIfNotFound: true });
+    return await extractRelevantPageRange(pdfBytes, allPages, title, { returnEmptyIfNotFound: true, claimedByOtherPages });
   } catch {
     return [];
   }
 }
 
 /**
- * Trouve, dans candidatePages, la page qui nomme vraiment "title" dans son
- * propre titre (en majuscules), puis prend toutes les pages suivantes tant
- * qu'aucun NOUVEAU titre en majuscules différent n'apparaît.
+ * Trouve, dans candidatePages (élargi aux pages voisines, voir plus bas), la
+ * page qui nomme vraiment "title" dans son propre titre, puis prend toutes
+ * les pages suivantes — y compris AU-DELÀ de candidatePages, dans le
+ * document réel — tant qu'aucun NOUVEAU titre différent n'apparaît.
  */
-// Un seul mot-clé partagé peut être un faux ami (ex. "cahier" seul matche
-// aussi bien "CCAP / Cahier des Clauses..." qu'un simple "cahier des
+// Un ou deux mots-clés partagés peuvent être un faux ami (ex. "cahier" seul
+// matche aussi bien "CCAP / Cahier des Clauses..." qu'un simple "cahier des
 // charges" mentionné en corps de texte sur une page totalement différente,
 // constaté sur un DAO réel : la page B- LOCALISATION DU SITE, qui précède le
-// vrai CCAP, était ainsi prise à tort pour son début). On exige donc qu'une
-// bonne PART des mots-clés du titre soit retrouvée, pas un seul mot isolé.
-const MIN_KEYWORD_MATCH_RATIO = 0.6;
+// vrai CCAP, était ainsi prise à tort pour son début ; et "fiches" +
+// "renseignements" seuls ont aussi fait confondre un simple sommaire listant
+// "MODELES DE FICHES DE RENSEIGNEMENTS" avec le vrai début du formulaire).
+// On exige donc de retrouver PRESQUE TOUS les mots-clés du titre — pas
+// forcément le titre mot pour mot (un DAO peut l'écrire avec un accent, une
+// ponctuation ou un mot en plus/en moins différent de celui donné par
+// l'IA), mais assez pour exclure une simple mention en passant.
+const MIN_KEYWORD_MATCH_RATIO = 0.85;
 
 function matchesTitle(heading: string, keywords: string[]) {
   if (!keywords.length) return false;
@@ -113,26 +127,62 @@ function isNewChapterMarker(line: string) {
   return /^(partie|annexe|chapitre)\b/i.test(trimmed) || /^[a-z][-–.]\s/i.test(trimmed);
 }
 
+// Une page suivante marque-t-elle un VRAI changement de document (donc la
+// fin de la pièce en cours) ? Partagé entre l'extension DANS candidatePages
+// et l'extension AU-DELÀ (voir extractRelevantPageRange), pour appliquer
+// exactement la même règle dans les deux cas : un article/une clause
+// numéroté(e) ne compte jamais comme un arrêt, seul un vrai nouveau titre
+// (différent du sujet recherché) en compte un.
+function isStopBoundary(firstLine: string, heading: string, referenceHeading: string, keywords: string[]) {
+  const isBoundaryCandidate = isStrictUppercaseHeading(firstLine) || isSubsectionContinuation(firstLine) || isNewChapterMarker(firstLine);
+  if (!isBoundaryCandidate || heading === referenceHeading || matchesTitle(heading, keywords)) return false;
+  return isNewChapterMarker(firstLine) || !isSubsectionContinuation(firstLine);
+}
+
+// Une fois la pièce trouvée, elle continue tant qu'aucun nouveau titre ne
+// prend le relais — MÊME au-delà des pages initialement données par l'IA ou
+// par le sommaire du DAO (celles-ci ne couvrent pas toujours tout le
+// document réel, ex. un formulaire "A1 à A5" dont l'IA n'a cité que la
+// première page). On plafonne cette extension pour éviter un balayage
+// interminable en cas de document illisible, et on s'arrête net dès qu'une
+// page est déjà revendiquée par une AUTRE pièce déjà identifiée dans ce DAO
+// (claimedByOtherPages), pour ne jamais avaler par erreur son contenu.
+const MAX_EXTRA_PAGES_BEYOND_CANDIDATES = 60;
+
 export async function extractRelevantPageRange(
   pdfBytes: Uint8Array,
   candidatePages: number[],
   title: string,
-  // Les deux appels historiques (trimToRelevantStart, et la référence
-  // textuelle du DAO dans printable-submission-document) partent d'une
-  // plage déjà probablement correcte (page citée par l'IA ou par le
-  // sommaire) : si le titre n'y est finalement pas retrouvé, mieux vaut
-  // rester sur cette plage de départ que de ne rien renvoyer du tout.
-  // locateTitleInFullDocument (recherche à l'aveugle sur TOUT le DAO,
-  // sans aucun indice de page au départ) a besoin du signal inverse :
-  // rien trouvé doit vouloir dire rien à imprimer, jamais "tout le DAO".
-  options: { returnEmptyIfNotFound?: boolean } = {},
+  options: {
+    // Les deux appels historiques (trimToRelevantStart, et la référence
+    // textuelle du DAO dans printable-submission-document) partent d'une
+    // plage déjà probablement correcte (page citée par l'IA ou par le
+    // sommaire) : si le titre n'y est finalement pas retrouvé, mieux vaut
+    // rester sur cette plage de départ que de ne rien renvoyer du tout.
+    // locateTitleInFullDocument (recherche à l'aveugle sur TOUT le DAO,
+    // sans aucun indice de page au départ) a besoin du signal inverse :
+    // rien trouvé doit vouloir dire rien à imprimer, jamais "tout le DAO".
+    returnEmptyIfNotFound?: boolean;
+    // Pages déjà revendiquées par une AUTRE pièce déjà identifiée dans ce
+    // DAO (voir pagesNotClaimedByOtherItems côté appelant) : sert de
+    // garde-fou pendant l'extension au-delà de candidatePages, pour ne
+    // jamais avaler par erreur le début d'un autre document déjà repéré.
+    claimedByOtherPages?: Set<number>;
+  } = {},
 ): Promise<number[]> {
   if (!candidatePages.length) return candidatePages;
   const keywords = [...significantWords(title)].filter((word) => word.length >= 4);
   if (!keywords.length) return candidatePages;
   try {
     const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
-    const sorted = [...candidatePages].sort((a, b) => a - b);
+    // La page citée par l'IA (ou par le sommaire du DAO) peut être décalée
+    // d'une unité (pagination différente entre le PDF et le sommaire, ou
+    // simple erreur de l'IA) : on vérifie donc aussi la page juste avant et
+    // juste après chaque page donnée, en plus de celle-ci — jamais à la
+    // place, seulement en plus — avant de chercher le titre.
+    const widened = new Set<number>();
+    for (const page of candidatePages) for (const neighbor of [page - 1, page, page + 1]) if (neighbor >= 1) widened.add(neighbor);
+    const sorted = [...widened].sort((a, b) => a - b);
     let startIndex = -1;
     let referenceHeading = "";
     for (let index = 0; index < sorted.length; index += 1) {
@@ -155,6 +205,7 @@ export async function extractRelevantPageRange(
     if (startIndex === -1) return options.returnEmptyIfNotFound ? [] : candidatePages;
     const kept = [sorted[startIndex]];
     let previousPage = sorted[startIndex];
+    let stoppedEarly = false;
     for (let index = startIndex + 1; index < sorted.length; index += 1) {
       const pageNumber = sorted[index];
       if (pageNumber < 1 || pageNumber > doc.numPages) break;
@@ -172,19 +223,9 @@ export async function extractRelevantPageRange(
         if (isIsolatedJump) {
           const fullPageHeading = normalizeText((await (await doc.getPage(pageNumber)).getTextContent()).items.map((item) => ("str" in item ? item.str : "")).join(" ").slice(0, 400));
           if (!matchesTitle(fullPageHeading, keywords)) { previousPage = pageNumber; continue; }
-        } else {
-          // Un simple retour à la ligne au milieu d'une phrase peut
-          // ressembler à "un titre" (court, sans ponctuation de fin) sans en
-          // être un : seule une VRAIE frontière de structure (majuscules,
-          // article/clause numéroté, ou repère de chapitre) compte pour
-          // décider d'arrêter ou de continuer — un texte courant ne l'est pas.
-          const isBoundaryCandidate = isStrictUppercaseHeading(firstLine) || isSubsectionContinuation(firstLine) || isNewChapterMarker(firstLine);
-          if (isBoundaryCandidate && heading !== referenceHeading && !matchesTitle(heading, keywords)) {
-            if (isNewChapterMarker(firstLine) || !isSubsectionContinuation(firstLine)) {
-              break; // Nouveau titre différent : un autre document (ou chapitre) commence ici.
-            }
-            // Une clause/article numéroté(e) reste dans le même document : on avance sans y voir un arrêt.
-          }
+        } else if (isStopBoundary(firstLine, heading, referenceHeading, keywords)) {
+          stoppedEarly = true;
+          break; // Nouveau titre différent : un autre document (ou chapitre) commence ici.
         }
         kept.push(pageNumber);
         previousPage = pageNumber;
@@ -192,6 +233,31 @@ export async function extractRelevantPageRange(
       } catch {
         if (!isIsolatedJump) kept.push(pageNumber); // Page illisible au milieu d'un groupe contigu : gardée par prudence.
         previousPage = pageNumber;
+      }
+    }
+    // On a épuisé toutes les pages DONNÉES sans rencontrer de nouveau titre :
+    // rien ne dit que le document s'arrête vraiment là, l'IA (ou le
+    // sommaire) n'a peut-être simplement pas cité toutes ses pages (ex. un
+    // formulaire "A1 à A5" dont seule la première page A1 a été citée). On
+    // continue alors à lire les VRAIES pages suivantes du document, avec
+    // exactement la même règle d'arrêt, jusqu'à un nouveau titre, une page
+    // déjà revendiquée par une autre pièce, la fin du document, ou une
+    // limite de sécurité.
+    if (!stoppedEarly) {
+      let extraChecked = 0;
+      let pageNumber = previousPage + 1;
+      while (pageNumber <= doc.numPages && extraChecked < MAX_EXTRA_PAGES_BEYOND_CANDIDATES) {
+        if (options.claimedByOtherPages?.has(pageNumber)) break;
+        try {
+          const { firstLine, heading, isHeading } = await pageHeadingLine(doc, pageNumber);
+          if (isStopBoundary(firstLine, heading, referenceHeading, keywords)) break;
+          kept.push(pageNumber);
+          if (isHeading) referenceHeading = heading;
+        } catch {
+          kept.push(pageNumber); // Page illisible au milieu : gardée par prudence, comme ci-dessus.
+        }
+        pageNumber += 1;
+        extraChecked += 1;
       }
     }
     return kept;
