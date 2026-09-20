@@ -408,20 +408,37 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
         : cell.replace(/\{\{[a-z0-9_]+\}\}/gi, ""))),
     };
   });
+  const isPersonnelRoster = /personnel|personnels|ressources humaines|equipe/i.test(title) && !isWorkerContract;
+  const isMaterialRoster = /materiel|matériels|equipement|équipement|engins/i.test(title);
   const rosterTable = (() => {
-    const isPersonnel = /personnel|personnels|ressources humaines|equipe/i.test(title) && !isWorkerContract;
-    const isMaterial = /materiel|matériels|equipement|équipement|engins/i.test(title);
-    if (!isPersonnel && !isMaterial) return [];
-    const key = isPersonnel ? "__personnel" : "__materiel";
+    if (!isPersonnelRoster && !isMaterialRoster) return [];
+    const key = isPersonnelRoster ? "__personnel" : "__materiel";
     try {
       const rows = JSON.parse(formData[key] || "[]") as Array<{ name?: string; role?: string; qualification?: string; experience?: string }>;
       return [{
         title,
-        columns: isPersonnel ? ["Nom et prénoms", "Fonction", "Diplôme / qualification", "Expérience"] : ["Matériel / engin", "Fonction / usage", "État / capacité", "Quantité / disponibilité"],
+        columns: isPersonnelRoster ? ["Nom et prénoms", "Fonction", "Diplôme / qualification", "Expérience"] : ["Matériel / engin", "Fonction / usage", "État / capacité", "Quantité / disponibilité"],
         rows: (rows.length ? rows : [{ name: "", role: "", qualification: "", experience: "" }]).map((row) => [row.name || "", row.role || "", row.qualification || "", row.experience || ""]),
       }];
     } catch { return []; }
   })();
+  // RÈGLE UNIQUE pour toutes les pièces dont le contenu est un tableau que
+  // l'application construit ELLE-MÊME (planning d'exécution, poids du
+  // transport, registre des plans, listes de personnel/matériel) : ces
+  // pièces ne doivent JAMAIS être remplacées par une page du DAO trouvée par
+  // ressemblance de titre. Ce rapprochement (findBestTitleMatch, plus bas)
+  // reste utile pour les VRAIES pièces sourcées du DAO, mais devient un piège
+  // pour celles-ci : leur titre contient souvent un mot ("plan", "personnel",
+  // "matériel"...) qui ressemble aussi à une tout autre pièce du DAO, et
+  // cette fausse ressemblance faisait alors ouvrir la mauvaise page à la
+  // place du tableau attendu (ex. "Liste des plans" affichait de vraies
+  // pages techniques d'un autre plan au lieu de son propre registre). Toutes
+  // ces pièces suivent maintenant CETTE SEULE règle prioritaire ; la
+  // recherche dans le DAO garde un rôle, mais seulement plus bas, comme
+  // pièce jointe complémentaire (le tableau original du DAO joint en
+  // preuve), jamais comme source principale du contenu affiché.
+  const isAppComputedTableItem = isExecutionPlanning || isPersonnelRoster || isMaterialRoster
+    || /mat.riaux.*transport/i.test(title) || (/\bplans?\b/i.test(title) && /liste/i.test(title));
   // Une pièce "document_to_provide" (ex. garantie bancaire, caution) n'a
   // souvent aucune case à remplir sur ses pages DAO — juste les pages elles-
   // mêmes à extraire pour signature/insertion. On ne doit donc pas exiger
@@ -445,7 +462,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // correcte, mais origin pas "dao", donc cette branche était sautée
   // entièrement malgré une page connue et fiable). Une page/référence connue
   // est un signal plus sûr que ce classement : dès qu'on en a une, on l'utilise.
-  if (!isExecutionPlanning && detectedTemplate && tender.document_url && detectedTemplateKnownPages.length) {
+  if (!isAppComputedTableItem && detectedTemplate && tender.document_url && detectedTemplateKnownPages.length) {
     const notClaimedByOthers = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], detectedTemplate.title ?? title, detectedTemplateKnownPages);
     if (notClaimedByOthers.length) {
       try {
@@ -558,7 +575,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // seulement l'extraction de page nue — en s'appuyant sur les champs déjà
   // connus pour cette pièce (ceux de l'IA si elle en a, sinon ceux déjà
   // enregistrés côté dossier).
-  if (!isExecutionPlanning && !detectedTemplateKnownPages.length && tender.document_url) {
+  if (!isAppComputedTableItem && !detectedTemplateKnownPages.length && tender.document_url) {
     const fieldTargets = (detectedTemplate?.fields?.length ? detectedTemplate.fields : fields)
       .map((field) => ({ field_key: field.key, label: field.label, description: (field as { description?: string }).description }))
       .filter((field): field is { field_key: string; label: string; description: string | undefined } => Boolean(field.field_key && field.label));
