@@ -27,8 +27,15 @@ export type TemplateDetectedItem = DetectedItem & {
   template_page_numbers?: number[];
 };
 
+export type ChecklistEntry = { title: string; sequence: number; source_reference?: string };
+
 export type MasterAnalysis = {
   submission_items?: DetectedItem[];
+  // Sommaire propre au DAO (ex. son "Article 6 - Dossier d'Appel d'Offres")
+  // qui énumère, dans l'ordre exact du document, toutes les pièces à
+  // fournir — voir le prompt d'analyse. Sert UNIQUEMENT à ordonner
+  // l'affichage ci-dessous ; jamais à modifier le contenu d'une pièce.
+  submission_checklist?: ChecklistEntry[];
 } | null;
 
 function normalize(value: string) {
@@ -69,22 +76,29 @@ export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDete
   // DAO — voir son propre sommaire, ex. "Article 6 - Dossier d'Appel
   // d'Offres") est bien plus simple quand l'application affiche les pièces
   // EXACTEMENT dans l'ordre où le DAO les liste lui-même, plutôt que
-  // regroupées par catégorie. template_page_numbers n'est renseigné que
-  // pour les pièces avec un vrai modèle imprimable (template_origin=dao,
-  // voir le prompt d'analyse) : une pièce purement informative (ex. une
-  // clause à lire et signer, sans page de modèle dédiée) peut donc rester
-  // sans template_page_numbers alors que le DAO la situe bien à une page
-  // précise. source_reference, lui, est renseigné pour CHAQUE pièce
-  // ("la page, l'annexe ou l'article source") : on relit ce texte avec le
-  // même analyseur que le reste de l'application (parsePageNumbersFromReference,
-  // déjà utilisé pour savoir si un PDF est imprimable) pour retrouver cette
-  // page quand template_page_numbers est vide. En prenant la plus petite
-  // des deux pages connues, on trie par la position la plus fidèle possible
-  // à ce que le DAO indique lui-même, quel que soit le DAO. Une pièce dont
-  // aucune des deux pages n'est connue (générique non confirmée dans ce DAO
-  // précis, ou pièce sans page — ex. BDQE externe ajouté par l'application)
-  // reste à la fin de la liste, dans son ordre d'origine, pour rester
-  // visible sans fausser le contrôle.
+  // regroupées par catégorie ou dans l'ordre où l'IA les a rencontrées en
+  // lisant le document (souvent proche de l'ordre des pages, mais pas de
+  // l'ordre du sommaire officiel du DAO). submission_checklist recopie ce
+  // sommaire officiel tel quel (voir le prompt d'analyse) : c'est la source
+  // de vérité pour l'ordre. On rapproche chaque pièce détectée de sa ligne
+  // du sommaire avec le même outil de rapprochement de titres que le reste
+  // de l'application (findBestTitleMatch, déjà utilisé pour relier une
+  // pièce générique à sa vraie pièce IA).
+  //
+  // Une pièce absente de ce sommaire (générique non confirmée dans ce DAO
+  // précis, ou pièce ajoutée par l'application comme le BDQE externe) est
+  // ordonnée en repli par sa première page connue : template_page_numbers
+  // (renseigné seulement pour les pièces avec un vrai modèle imprimable),
+  // sinon la page lue dans source_reference (renseigné pour chaque pièce,
+  // via parsePageNumbersFromReference, déjà utilisé pour savoir si un PDF
+  // est imprimable). Une pièce sans aucune page connue reste tout à la fin,
+  // dans son ordre d'origine, pour rester visible sans fausser le contrôle.
+  const checklist = Array.isArray(analysis?.submission_checklist) ? analysis.submission_checklist : [];
+  const checklistSequence = (item: DetectedItem) => {
+    if (!checklist.length) return null;
+    const match = findBestTitleMatch(item.title, checklist);
+    return match ? match.sequence : null;
+  };
   const firstKnownPage = (item: TemplateDetectedItem) => {
     const templatePages = item.template_page_numbers;
     const fromTemplate = Array.isArray(templatePages) && templatePages.length ? templatePages[0] : undefined;
@@ -93,8 +107,13 @@ export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDete
     return known.length ? Math.min(...known) : Number.POSITIVE_INFINITY;
   };
   return [...genericItemsWithoutRealMatch, ...aiItems]
-    .map((item, index) => ({ item, index, page: firstKnownPage(item as TemplateDetectedItem) }))
-    .sort((a, b) => (a.page !== b.page ? a.page - b.page : a.index - b.index))
+    .map((item, index) => ({
+      item,
+      index,
+      sequence: checklistSequence(item) ?? Number.POSITIVE_INFINITY,
+      page: firstKnownPage(item as TemplateDetectedItem),
+    }))
+    .sort((a, b) => (a.sequence !== b.sequence ? a.sequence - b.sequence : a.page !== b.page ? a.page - b.page : a.index - b.index))
     .map((entry) => entry.item);
 }
 

@@ -46,11 +46,12 @@ export default async function SubmissionPage({ params, searchParams }: { params:
     }
   }
 
-  let analysis: { submission_items?: DetectedItem[]; worksite_location?: string; execution_period_days?: number | null } | null = null;
+  type TenderAnalysis = { submission_items?: DetectedItem[]; submission_checklist?: Array<{ title: string; sequence: number; source_reference?: string }>; worksite_location?: string; execution_period_days?: number | null };
+  let analysis: TenderAnalysis | null = null;
   try {
     analysis = typeof tender.ai_analysis === "string"
-      ? JSON.parse(tender.ai_analysis) as { submission_items?: DetectedItem[]; worksite_location?: string; execution_period_days?: number | null }
-      : tender.ai_analysis as { submission_items?: DetectedItem[]; worksite_location?: string; execution_period_days?: number | null } | null;
+      ? JSON.parse(tender.ai_analysis) as TenderAnalysis
+      : tender.ai_analysis as TenderAnalysis | null;
   } catch {
     analysis = null;
   }
