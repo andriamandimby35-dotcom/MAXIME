@@ -109,11 +109,28 @@ const hasAppComputedContent = (title: string) => /planning.*ex.cution/i.test(tit
 // n'a pas trouvé de vraie pièce correspondante dans CE DAO précis.
 export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDetectedItem[] {
   const aiItems = Array.isArray(analysis?.submission_items) ? analysis.submission_items : [];
-  const genericItemsWithoutRealMatch = standardSubmissionItems
-    .filter((item) => !findBestTitleMatch(item.title, aiItems))
-    .map((item) => (item.kind === "form_to_complete" && item.fields.length === 0 && !hasAppComputedContent(item.title)
-      ? { ...item, kind: "document_to_provide" as const, instructions: "Récupérez le modèle correspondant dans le DAO, complétez-le à la main avec vos informations, faites-le signer si nécessaire, puis joignez la version scannée." }
-      : item));
+  // Une pièce générique de secours ("Cahier des clauses administratives
+  // particulières (CCAP) signé") et la VRAIE pièce que l'IA a détectée dans
+  // CE DAO précis (ex. "CCAP / Contrat des Travaux") sont souvent formulées
+  // de façon si différente que la comparaison directe de leurs titres
+  // (findBestTitleMatch juste en dessous) ne les reconnaît pas comme le même
+  // document : elles ne partagent presque aucun mot ("cahier", "clauses",
+  // "administratives", "particulières" d'un côté, "contrat", "travaux" de
+  // l'autre — seul "ccap" est commun). Le résultat était un doublon affiché
+  // : la vraie pièce ET la pièce générique côte à côte, alors qu'il ne faut
+  // la demander qu'une seule fois.
+  //
+  // On ne rajoute PAS de cas particulier pour "CCAP" ou un autre sigle (déjà
+  // essayé, rejeté : ça ne se concentre plus sur le titre et ça provoque
+  // d'autres erreurs ailleurs). On utilise à la place le sommaire officiel
+  // du DAO (submission_checklist, déjà utilisé juste plus bas pour ordonner
+  // les pièces) comme pont entre les deux formulations : si la pièce
+  // générique ET une pièce IA se rapprochent chacune de la MÊME ligne de ce
+  // sommaire (avec le même outil de rapprochement de titres partout,
+  // findBestTitleMatch), c'est que ce sommaire les désigne comme UNE seule
+  // et même pièce du DAO, même si leurs titres ne se ressemblent pas
+  // directement entre eux.
+  //
   // Le contrôle visuel (vérifier une par une les pièces demandées par le
   // DAO — voir son propre sommaire, ex. "Article 6 - Dossier d'Appel
   // d'Offres") est bien plus simple quand l'application affiche les pièces
@@ -122,19 +139,8 @@ export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDete
   // lisant le document (souvent proche de l'ordre des pages, mais pas de
   // l'ordre du sommaire officiel du DAO). submission_checklist recopie ce
   // sommaire officiel tel quel (voir le prompt d'analyse) : c'est la source
-  // de vérité pour l'ordre. On rapproche chaque pièce détectée de sa ligne
-  // du sommaire avec le même outil de rapprochement de titres que le reste
-  // de l'application (findBestTitleMatch, déjà utilisé pour relier une
-  // pièce générique à sa vraie pièce IA).
-  //
-  // Une pièce absente de ce sommaire (générique non confirmée dans ce DAO
-  // précis, ou pièce ajoutée par l'application comme le BDQE externe) est
-  // ordonnée en repli par sa première page connue : template_page_numbers
-  // (renseigné seulement pour les pièces avec un vrai modèle imprimable),
-  // sinon la page lue dans source_reference (renseigné pour chaque pièce,
-  // via parsePageNumbersFromReference, déjà utilisé pour savoir si un PDF
-  // est imprimable). Une pièce sans aucune page connue reste tout à la fin,
-  // dans son ordre d'origine, pour rester visible sans fausser le contrôle.
+  // de vérité pour l'ordre — ET, comme expliqué au-dessus, le pont utilisé
+  // pour repérer les doublons entre une pièce générique et sa vraie pièce IA.
   const checklist = Array.isArray(analysis?.submission_checklist) ? analysis.submission_checklist : [];
   // Seules les lignes level=1 (pièces réelles) servent à rapprocher un titre
   // détecté de sa place dans le sommaire ; une ligne level=0 (titre de
@@ -147,6 +153,28 @@ export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDete
     const match = findBestTitleMatch(item.title, orderableChecklist);
     return match ? match.sequence : null;
   };
+  const aiChecklistSequences = new Set(
+    aiItems
+      .map((item) => checklistSequence(item))
+      .filter((sequence): sequence is number => sequence !== null),
+  );
+  const genericItemsWithoutRealMatch = standardSubmissionItems
+    .filter((item) => {
+      if (findBestTitleMatch(item.title, aiItems)) return false;
+      const sequence = checklistSequence(item);
+      return sequence === null || !aiChecklistSequences.has(sequence);
+    })
+    .map((item) => (item.kind === "form_to_complete" && item.fields.length === 0 && !hasAppComputedContent(item.title)
+      ? { ...item, kind: "document_to_provide" as const, instructions: "Récupérez le modèle correspondant dans le DAO, complétez-le à la main avec vos informations, faites-le signer si nécessaire, puis joignez la version scannée." }
+      : item));
+  // Une pièce absente de ce sommaire (générique non confirmée dans ce DAO
+  // précis, ou pièce ajoutée par l'application comme le BDQE externe) est
+  // ordonnée en repli par sa première page connue : template_page_numbers
+  // (renseigné seulement pour les pièces avec un vrai modèle imprimable),
+  // sinon la page lue dans source_reference (renseigné pour chaque pièce,
+  // via parsePageNumbersFromReference, déjà utilisé pour savoir si un PDF
+  // est imprimable). Une pièce sans aucune page connue reste tout à la fin,
+  // dans son ordre d'origine, pour rester visible sans fausser le contrôle.
   const firstKnownPage = (item: TemplateDetectedItem) => {
     const templatePages = item.template_page_numbers;
     const fromTemplate = Array.isArray(templatePages) && templatePages.length ? templatePages[0] : undefined;
