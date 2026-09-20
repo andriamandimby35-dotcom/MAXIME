@@ -75,9 +75,14 @@ async function pageHeadingLine(doc: Awaited<ReturnType<typeof getDocument>["prom
   return { titleLine, heading: normalizeText(titleLine) };
 }
 
-export async function trimToRelevantStart(pdfBytes: Uint8Array, candidatePages: number[], title: string, claimedByOtherPages?: Set<number>): Promise<number[]> {
-  const range = await extractRelevantPageRange(pdfBytes, candidatePages, title, { claimedByOtherPages });
-  return range;
+// Renvoie, en plus des pages, le VRAI titre trouvé sur le DAO (tel qu'imprimé
+// — majuscules et gras confirmés) : sert à afficher ce titre confirmé dans le
+// document final, au lieu de laisser certains PDF générés sans aucun titre
+// visible (voir printable-submission-document/route.ts).
+export type RelevantPageRange = { pages: number[]; title: string | null };
+
+export async function trimToRelevantStart(pdfBytes: Uint8Array, candidatePages: number[], title: string, claimedByOtherPages?: Set<number>): Promise<RelevantPageRange> {
+  return extractRelevantPageRange(pdfBytes, candidatePages, title, { claimedByOtherPages });
 }
 
 // Dernier recours quand l'IA n'a retrouvé AUCUNE page pour une pièce
@@ -88,13 +93,13 @@ export async function trimToRelevantStart(pdfBytes: Uint8Array, candidatePages: 
 // plage connue — sauf qu'ici la "plage de départ" est le DAO entier.
 // Générique par construction (le titre cherché est un paramètre) : sert
 // n'importe quelle pièce, sur n'importe quel DAO, pas seulement le CCAP.
-export async function locateTitleInFullDocument(pdfBytes: Uint8Array, title: string, claimedByOtherPages?: Set<number>): Promise<number[]> {
+export async function locateTitleInFullDocument(pdfBytes: Uint8Array, title: string, claimedByOtherPages?: Set<number>): Promise<RelevantPageRange> {
   try {
     const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
     const allPages = Array.from({ length: doc.numPages }, (_, index) => index + 1);
     return await extractRelevantPageRange(pdfBytes, allPages, title, { returnEmptyIfNotFound: true, claimedByOtherPages });
   } catch {
-    return [];
+    return { pages: [], title: null };
   }
 }
 
@@ -183,10 +188,10 @@ export async function extractRelevantPageRange(
     // jamais avaler par erreur le début d'un autre document déjà repéré.
     claimedByOtherPages?: Set<number>;
   } = {},
-): Promise<number[]> {
-  if (!candidatePages.length) return candidatePages;
+): Promise<RelevantPageRange> {
+  if (!candidatePages.length) return { pages: candidatePages, title: null };
   const keywords = [...significantWords(title)].filter((word) => word.length >= 4);
-  if (!keywords.length) return candidatePages;
+  if (!keywords.length) return { pages: candidatePages, title: null };
   try {
     const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
     // La page citée par l'IA (ou par le sommaire du DAO) peut être décalée
@@ -199,6 +204,9 @@ export async function extractRelevantPageRange(
     const sorted = [...widened].sort((a, b) => a - b);
     let startIndex = -1;
     let referenceHeading = "";
+    // Titre TEL QU'IMPRIMÉ (pas normalisé) sur la page de départ — le vrai
+    // titre confirmé du document, à afficher dans le PDF final.
+    let detectedTitle: string | null = null;
     for (let index = 0; index < sorted.length; index += 1) {
       const pageNumber = sorted[index];
       if (pageNumber < 1 || pageNumber > doc.numPages) continue;
@@ -207,6 +215,7 @@ export async function extractRelevantPageRange(
         if (titleLine && matchesTitle(heading, keywords)) {
           startIndex = index;
           referenceHeading = heading;
+          detectedTitle = titleLine;
           break;
         }
       } catch {
@@ -216,7 +225,7 @@ export async function extractRelevantPageRange(
     // Sujet non trouvé : on ne devine pas. Comportement historique (garder
     // toute la plage de départ) sauf pour une recherche à l'aveugle, où
     // "toute la plage" serait le DAO entier — voir options ci-dessus.
-    if (startIndex === -1) return options.returnEmptyIfNotFound ? [] : candidatePages;
+    if (startIndex === -1) return { pages: options.returnEmptyIfNotFound ? [] : candidatePages, title: null };
     const kept = [sorted[startIndex]];
     let previousPage = sorted[startIndex];
     let stoppedEarly = false;
@@ -277,8 +286,8 @@ export async function extractRelevantPageRange(
         extraChecked += 1;
       }
     }
-    return kept;
+    return { pages: kept, title: detectedTitle };
   } catch {
-    return candidatePages;
+    return { pages: candidatePages, title: null };
   }
 }

@@ -45,6 +45,7 @@ const BOTTOM_Y = 50;
 
 export async function createPrintableSubmissionPdf(title: string, company: Record<string, unknown>, extraLines: string[] = [], tables: PrintableTable[] = []) {
   const doc = await PDFDocument.create();
+  doc.setTitle(cleanText(title).slice(0, 200));
   const { font, boldFont } = await embedUnicodeFonts(doc);
 
   const lines = [

@@ -28,12 +28,22 @@ function compact(value: string, maximum: number) {
   return safe.length > maximum ? `${safe.slice(0, Math.max(1, maximum - 1))}…` : safe;
 }
 
-/** Keeps the DAO pages untouched and only writes values in the detected candidate fields. */
-export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers: number[], positions: FillPosition[], values: Record<string, string>, redactions: RedactionZone[] = []) {
+/**
+ * Keeps the DAO pages untouched and only writes values in the detected
+ * candidate fields. documentTitle (facultatif) est le VRAI titre confirmé
+ * (majuscules + gras) retrouvé sur la page DAO elle-même par
+ * extractRelevantPageRange/locateTitleInFullDocument : il est écrit dans les
+ * PROPRIÉTÉS du fichier PDF (titre du document), jamais dessiné sur la page
+ * — la page réelle du DAO reste ainsi copiée à l'identique, sans rien y
+ * ajouter, tout en donnant au PDF final un titre visible (onglet du
+ * navigateur, propriétés du fichier) au lieu de rester sans titre.
+ */
+export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers: number[], positions: FillPosition[], values: Record<string, string>, redactions: RedactionZone[] = [], documentTitle?: string | null) {
   const sourcePdf = await PDFDocument.load(source);
   const validPages = [...new Set(pageNumbers.map((page) => Math.floor(page)).filter((page) => page >= 1 && page <= sourcePdf.getPageCount()))];
   if (!validPages.length) throw new Error("Aucune page de modèle exploitable.");
   const result = await PDFDocument.create();
+  if (documentTitle?.trim()) result.setTitle(compact(documentTitle.trim(), 200));
   const pages = await result.copyPages(sourcePdf, validPages.map((page) => page - 1));
   pages.forEach((page) => result.addPage(page));
   const { font } = await embedUnicodeFonts(result);

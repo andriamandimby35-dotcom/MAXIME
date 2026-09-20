@@ -484,8 +484,11 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           // repli plan (branche ci-dessous), seul cas sans détection de texte.
           const candidatePages = /\bplans?\b/i.test(title) ? notClaimedByOthers : detectedTemplateKnownPages;
           const documentPageCount = (await PDFDocument.load(bytes)).getPageCount();
-          const verifiedPages = /\bplans?\b/i.test(title)
-            ? await expandToContiguousPlanRange(title, candidatePages, analysis?.submission_items ?? [], documentPageCount)
+          // Titre du document VRAIMENT confirmé (majuscules + gras retrouvés
+          // sur la page DAO elle-même) — un plan n'a pas de texte à ce titre,
+          // donc pas de titre confirmé par cette méthode pour lui.
+          const { pages: verifiedPages, title: verifiedTitle } = /\bplans?\b/i.test(title)
+            ? { pages: await expandToContiguousPlanRange(title, candidatePages, analysis?.submission_items ?? [], documentPageCount), title: null as string | null }
             : await extractRelevantPageRange(bytes, candidatePages, detectedTemplate.title ?? title, {
               claimedByOtherPages: otherItemsClaimedPages(analysis?.submission_items ?? [], detectedTemplate.title ?? title),
             });
@@ -495,7 +498,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           if (/\bplans?\b/i.test(title)) {
             // Un plan est un dessin vectoriel sans texte à remplacer : la
             // page DAO reste extraite telle quelle, sans réécriture.
-            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [], templateValues, []);
+            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [], templateValues, [], verifiedTitle);
           } else {
             // La page DAO reste copiée EXACTEMENT telle quelle (cadres,
             // tableaux, toutes les décorations d'origine intactes) : on ne
@@ -523,7 +526,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             const tableCellValues = Object.fromEntries(tableCellTargets.map((target) => [target.field_key, target.value]));
             const foundTableFieldKeys = new Set(tablePositions.map((position) => position.field_key));
             allTableCellsResolvedOnRealPage = tableCellTargets.length > 0 && tableCellTargets.every((target) => foundTableFieldKeys.has(target.field_key));
-            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions);
+            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions, verifiedTitle);
           }
           // La page fabriquée ci-dessous ne sert plus qu'en dernier recours :
           // si toutes les cases du tableau ont été retrouvées et remplies
@@ -590,12 +593,12 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           // suite (ex. "Partie III" commence par l'acte d'engagement et la
           // localisation du site AVANT le CCAP) : on recadre sur la première
           // page qui mentionne vraiment le sujet demandé.
-          const verifiedPages = await trimToRelevantStart(bytes, notClaimedByOthers, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title));
+          const { pages: verifiedPages, title: verifiedTitle } = await trimToRelevantStart(bytes, notClaimedByOthers, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title));
           const [positions, redactions] = await Promise.all([
             locateFieldPositions(bytes, verifiedPages, fieldTargets),
             locateBracketPlaceholders(bytes, verifiedPages, fieldTargets),
           ]);
-          const pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, templateValues, redactions);
+          const pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, templateValues, redactions, verifiedTitle);
           return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
         }
       } catch (error) {
@@ -613,13 +616,14 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
         const source = await fetch(tender.document_url);
         if (source.ok) {
           const bytes = new Uint8Array(await source.arrayBuffer());
-          const locatedPages = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], title, await locateTitleInFullDocument(bytes, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title)));
+          const blindSearchResult = await locateTitleInFullDocument(bytes, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title));
+          const locatedPages = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], title, blindSearchResult.pages);
           if (locatedPages.length) {
             const [positions, redactions] = await Promise.all([
               locateFieldPositions(bytes, locatedPages, fieldTargets),
               locateBracketPlaceholders(bytes, locatedPages, fieldTargets),
             ]);
-            const pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, positions, templateValues, redactions);
+            const pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, positions, templateValues, redactions, blindSearchResult.title);
             return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
           }
         }
@@ -661,7 +665,8 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       if (source.ok) {
         const bytes = new Uint8Array(await source.arrayBuffer());
         const blindSearch = await locateTitleInFullDocument(bytes, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title));
-        debugLines.push(`Recherche à l'aveugle dans tout le DAO : ${blindSearch.join(", ") || "(rien trouvé)"}`);
+        debugLines.push(`Recherche à l'aveugle dans tout le DAO : ${blindSearch.pages.join(", ") || "(rien trouvé)"}`);
+        debugLines.push(`  Titre confirmé (majuscules + gras) : ${blindSearch.title || "(aucun)"}`);
       }
     } catch (error) {
       debugLines.push(`Diagnostic interrompu par une erreur : ${error instanceof Error ? error.message : String(error)}`);
