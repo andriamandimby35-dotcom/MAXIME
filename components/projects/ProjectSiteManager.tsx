@@ -770,6 +770,21 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     await Promise.all(targets.map((note) => supabase.from("project_record_notes").update(buildUpdates(note)).eq("id", note.id)));
   }
 
+  // Déclenche une notification push (voir app/api/projects/[id]/notify/route.ts
+  // et lib/push/send-push.ts) pour un évènement du chantier. Toujours en
+  // "fire-and-forget" : ne bloque jamais l'action d'origine (déjà enregistrée
+  // avant cet appel) et n'affiche jamais d'erreur à l'utilisateur si l'envoi
+  // échoue ou si la connexion est coupée — la donnée réelle reste sauvegardée
+  // dans tous les cas.
+  function notifyProject(event: string, payload: Record<string, unknown> = {}) {
+    if (!selectedId || !online) return;
+    void fetch(`/api/projects/${selectedId}/notify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event, ...payload }),
+    }).catch(() => undefined);
+  }
+
   async function markNoteRead(note: RecordNote) {
     if (!userId) return;
     if (!noteOriginalUnread(note) && !noteReplyUnread(note)) return;
@@ -797,7 +812,9 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     setReplyDraft({ severity: "review", content: "" });
     if (!online) { queueForSync("Réponse à une remarque", "update", "project_record_notes", updates, note.id); setMessage("Réponse enregistrée hors ligne, envoi dès la reconnexion."); return; }
     const { error } = await supabase.from("project_record_notes").update(updates).eq("id", note.id);
-    if (error) setMessage(`Réponse non enregistrée : ${error.message}`); else setMessage("Réponse envoyée à l’équipe.");
+    if (error) { setMessage(`Réponse non enregistrée : ${error.message}`); return; }
+    setMessage("Réponse envoyée à l’équipe.");
+    if (note.created_by) notifyProject("note_replied", { targetUserId: note.created_by, title: note.title });
   }
 
   async function analyzeReportPhotos(report: Report) {
@@ -844,6 +861,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     setViewingPhotoUrl(null);
     setViewingReportDetail(null);
     setMessage("Analyse IA signalée à l’équipe : visible dans « Remarques et notifications ».");
+    notifyProject("note_created", { severity, title });
   }
 
   // Rejoue un rapport journalier mis de côté hors connexion : relance le même
@@ -1415,6 +1433,8 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     setBusy(false);
     if (error) { setMessage(`Demande non enregistrée : ${error.message}`); return; }
     onSuccess(data as MaterialOrder); setMessage("Demande de matériau enregistrée.");
+    const created = data as MaterialOrder;
+    notifyProject("material_order_submitted", { materialName: created.material_name, quantity: created.quantity, unit: created.unit });
   }
 
   async function submitMaterialRequest() {
@@ -1566,14 +1586,17 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     const available = number(material?.on_site_quantity);
     const requested = number(order.quantity);
     const toPurchase = Math.max(0, requested - available);
-    await updateMaterialOrder(order, { status: toPurchase > 0 ? "approved" : "covered_by_stock", approved_at: new Date().toISOString(), approved_quantity: requested, stock_available_at_approval: available, quantity_to_purchase: toPurchase, validated_by: userId || null });
+    const decision = toPurchase > 0 ? "approved" : "covered_by_stock";
+    await updateMaterialOrder(order, { status: decision, approved_at: new Date().toISOString(), approved_quantity: requested, stock_available_at_approval: available, quantity_to_purchase: toPurchase, validated_by: userId || null });
     setMessage(toPurchase > 0 ? `Demande validée : ${available} ${order.unit} en stock, ${toPurchase} ${order.unit} à acheter.` : "Demande couverte entièrement par le stock disponible.");
+    if (order.requested_by) notifyProject("material_order_decided", { targetUserId: order.requested_by, materialName: order.material_name, decision });
   }
 
   async function rejectMaterialRequest(order: MaterialOrder) {
     if (!isAdmin) { setMessage("Seul l’administrateur peut rejeter une demande d’achat."); return; }
     await updateMaterialOrder(order, { status: "rejected", approved_at: new Date().toISOString(), validated_by: userId || null });
     setMessage(`Demande rejetée : ${order.material_name}.`);
+    if (order.requested_by) notifyProject("material_order_decided", { targetUserId: order.requested_by, materialName: order.material_name, decision: "rejected" });
   }
 
   // Cœur de la validation d'un achat (photo, dépense, stock, transport) :
@@ -1763,7 +1786,10 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
       setPurchaseStatus({ kind: "info", text: hasPhoto ? "Envoi de la photo et validation…" : "Validation en cours…" });
       const result = await performPurchaseValidation(order, { purchasedQuantity, unitPrice, photo: hasPhoto ? { blob: file as File, name: (file as File).name, type: (file as File).type } : null, transportMode: selectedTransportMode, transportPrice: selectedTransportPrice, fournisseur: effectiveOffer?.fournisseur || null });
       setPurchaseStatus({ kind: result.ok ? "success" : "error", text: result.ok ? `${result.message}${verificationNote}` : result.message });
-      if (result.ok) { setSelectedTransportMode(null); setSelectedTransportPrice(null); setTransportPriceDraft(""); setSelectedPurchaseOffer(null); formElement.reset(); }
+      if (result.ok) {
+        setSelectedTransportMode(null); setSelectedTransportPrice(null); setTransportPriceDraft(""); setSelectedPurchaseOffer(null); formElement.reset();
+        notifyProject("purchase_verified", { materialName: `${order.material_name} · ${purchasedQuantity} ${order.unit}` });
+      }
       return result.ok;
     } finally { setBusy(false); }
   }

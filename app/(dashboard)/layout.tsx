@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { createServerClient } from "@/lib/supabase/server";
 import { DashboardNav } from "@/components/DashboardNav";
 import { PdfViewerProvider } from "@/components/PdfViewerProvider";
+import { PushRegister } from "@/components/push-register";
 
 
 export default async function DashboardLayout({
@@ -76,6 +77,8 @@ export default async function DashboardLayout({
 
     <div className="dashboardLayout">
 
+
+      <PushRegister />
 
       <DashboardNav isAdmin={isAdmin} isWorksManager={isWorksManager} />
 
