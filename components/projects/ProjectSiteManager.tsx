@@ -44,7 +44,9 @@ type QueuedPurchasePayload = {
   orderId: string;
   purchasedQuantity: number;
   unitPrice: number;
-  photoId: string;
+  // La photo est conseillée mais plus obligatoire (voir uploadPurchaseEvidence) :
+  // absente, aucune photo n'est mise de côté sur l'appareil.
+  photoId?: string;
   transportMode: string | null;
   transportPrice: number | null;
   fournisseur?: string | null;
@@ -898,11 +900,15 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   async function syncQueuedPurchase(entry: PendingSync): Promise<{ ok: boolean; entry?: PendingSync }> {
     const queued = entry.payload as unknown as QueuedPurchasePayload;
     const order = materialOrders.find((item) => item.id === queued.orderId);
-    const stored = await loadOfflinePhoto(queued.photoId);
-    if (!order || !stored) return { ok: false, entry };
+    // La photo reste facultative même hors ligne : un achat mis de côté sans
+    // photo n'a simplement rien à recharger ici. La vérification IA
+    // photo/quantité, elle, ne peut se faire que connecté : elle n'a donc
+    // jamais lieu pour un achat rejoué depuis la file hors ligne.
+    const stored = queued.photoId ? await loadOfflinePhoto(queued.photoId) : null;
+    if (!order || (queued.photoId && !stored)) return { ok: false, entry };
     const result = await performPurchaseValidation(order, { purchasedQuantity: queued.purchasedQuantity, unitPrice: queued.unitPrice, photo: stored, transportMode: queued.transportMode, transportPrice: queued.transportPrice, fournisseur: queued.fournisseur || null });
     if (!result.ok) return { ok: false, entry };
-    await deleteOfflinePhoto(queued.photoId);
+    if (queued.photoId) await deleteOfflinePhoto(queued.photoId);
     return { ok: true };
   }
 
@@ -1574,7 +1580,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   // utilisé à la fois en ligne (tout de suite) et hors ligne (rejoué plus
   // tard avec la photo gardée sur l'appareil), pour ne jamais avoir deux
   // versions différentes de ce calcul sensible (stock, dépenses).
-  async function performPurchaseValidation(order: MaterialOrder, input: { purchasedQuantity: number; unitPrice: number; photo: { blob: Blob; name: string; type: string }; transportMode: string | null; transportPrice: number | null; fournisseur?: string | null }): Promise<{ ok: boolean; message: string }> {
+  async function performPurchaseValidation(order: MaterialOrder, input: { purchasedQuantity: number; unitPrice: number; photo: { blob: Blob; name: string; type: string } | null; transportMode: string | null; transportPrice: number | null; fournisseur?: string | null }): Promise<{ ok: boolean; message: string }> {
     if (!organizationId || !selectedId) return { ok: false, message: "Chantier introuvable." };
     // La liste affichée peut être périmée (onglet resté ouvert, ou longue
     // absence de réseau) : on revérifie l'état réel de la commande avant de
@@ -1586,13 +1592,25 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
       return { ok: false, message: "Cette demande a déjà été traitée par quelqu’un d’autre. La liste va se rafraîchir." };
     }
     const currentOrder = freshOrder as MaterialOrder;
-    const safeName = input.photo.name.replace(/[^a-zA-Z0-9._-]/g, "-");
-    const path = `${organizationId}/${selectedId}/purchase-archives/${currentOrder.id}-${Date.now()}-${safeName}`;
-    const { error: uploadError } = await supabase.storage.from("btp-documents").upload(path, input.photo.blob, { upsert: false, contentType: input.photo.type || "image/jpeg" });
-    if (uploadError) return { ok: false, message: `Photo non envoyée : ${uploadError.message}` };
-    const caption = `Achat — ${currentOrder.material_name} · ${input.purchasedQuantity} ${currentOrder.unit} · ${input.unitPrice.toLocaleString("fr-FR")} Ar${input.fournisseur ? ` · ${input.fournisseur}` : ""}`;
-    const { data: photo, error: photoError } = await supabase.from("project_photos").insert({ organization_id: organizationId, project_id: selectedId, storage_path: path, caption, photo_type: "delivery", created_by: userId }).select().single();
-    if (photoError) return { ok: false, message: `Archive photo non enregistrée : ${photoError.message}` };
+    // La photo est conseillée mais plus obligatoire (voir uploadPurchaseEvidence,
+    // qui prévient et fait confirmer l'utilisateur avant d'arriver ici sans
+    // photo) : sans photo, rien n'est archivé et purchase_photo_path reste vide.
+    // NOTE PROJET : la contrainte base de données project_material_orders_paid_requires_photo
+    // doit être supprimée (voir le message donné dans le chat) pour que cet
+    // enregistrement sans photo soit accepté.
+    let path: string | null = null;
+    let caption = `Achat — ${currentOrder.material_name} · ${input.purchasedQuantity} ${currentOrder.unit} · ${input.unitPrice.toLocaleString("fr-FR")} Ar${input.fournisseur ? ` · ${input.fournisseur}` : ""}`;
+    if (input.photo) {
+      const safeName = input.photo.name.replace(/[^a-zA-Z0-9._-]/g, "-");
+      path = `${organizationId}/${selectedId}/purchase-archives/${currentOrder.id}-${Date.now()}-${safeName}`;
+      const { error: uploadError } = await supabase.storage.from("btp-documents").upload(path, input.photo.blob, { upsert: false, contentType: input.photo.type || "image/jpeg" });
+      if (uploadError) return { ok: false, message: `Photo non envoyée : ${uploadError.message}` };
+      const { data: photo, error: photoError } = await supabase.from("project_photos").insert({ organization_id: organizationId, project_id: selectedId, storage_path: path, caption, photo_type: "delivery", created_by: userId }).select().single();
+      if (photoError) return { ok: false, message: `Archive photo non enregistrée : ${photoError.message}` };
+      setPhotos((rows) => [photo as SitePhoto, ...rows]);
+    } else {
+      caption = `${caption} · sans photo`;
+    }
     const values = { status: "paid", paid_at: new Date().toISOString(), validated_by: userId || null, purchased_quantity: input.purchasedQuantity, unit_price: input.unitPrice, purchase_photo_path: path, purchase_photo_caption: caption };
     // .select() + vérification de la ligne retournée : une mise à jour bloquée
     // par une politique RLS ne remonte aucune erreur (0 ligne modifiée, succès
@@ -1601,7 +1619,6 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     const { data: updatedOrder, error } = await supabase.from("project_material_orders").update(values).eq("id", currentOrder.id).select().maybeSingle();
     if (error || !updatedOrder) return { ok: false, message: `Achat non validé : ${error?.message || "vous n'êtes pas autorisé à modifier cette demande."}` };
     setMaterialOrders((rows) => rows.map((row) => row.id === currentOrder.id ? { ...row, ...values } : row));
-    setPhotos((rows) => [photo as SitePhoto, ...rows]);
     let transportWarning = "";
     if (input.transportMode) {
       const { data: transportOrder, error: transportError } = await supabase.from("project_material_orders").insert({
@@ -1609,8 +1626,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
         quantity: 1, unit_price: input.transportPrice || 0, status: "paid", expense_kind: "transport", transport_mode: input.transportMode,
         paid_at: new Date().toISOString(), requested_by: userId, validated_by: userId,
         // Le transport n'a pas sa propre photo — il réutilise celle de l'achat
-        // du matériau (même field déjà présent) ; la base exige une photo sur
-        // toute ligne "paid" (contrainte project_material_orders_paid_requires_photo).
+        // du matériau si elle existe (même field déjà présent).
         purchase_photo_path: path, purchase_photo_caption: caption,
       }).select().single();
       if (transportOrder) setMaterialOrders((rows) => [transportOrder as MaterialOrder, ...rows]);
@@ -1650,6 +1666,34 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     return { ok: true, message: `Achat validé, photo archivée et dépense comptabilisée.${transportWarning}` };
   }
 
+  // Vérifie la photo prise au moment de l'achat (matériau visible + nombre
+  // d'unités) auprès de l'IA. Ne bloque JAMAIS elle-même : une panne
+  // technique (pas de crédit, moteur IA indisponible, erreur réseau) revient
+  // avec verificationAvailable=false, à traiter exactement comme une photo
+  // qu'on n'a pas pu vérifier — jamais comme une preuve d'incohérence.
+  async function verifyPurchasePhoto(file: File, materialName: string, unit: string, declaredQuantity: number): Promise<{
+    verificationAvailable: boolean;
+    materialMatch: "conforme" | "non_conforme" | "indetermine";
+    estimatedQuantity: number | null;
+    quantityMatch: "conforme" | "non_conforme" | "indetermine";
+    notes: string;
+    error: string;
+  }> {
+    try {
+      const body = new FormData();
+      body.set("photo", file);
+      body.set("material_name", materialName);
+      body.set("unit", unit);
+      body.set("declared_quantity", String(declaredQuantity));
+      const response = await fetch(`/api/projects/${selectedId}/verify-purchase-photo`, { method: "POST", body });
+      const payload = await response.json().catch(() => ({}) as { error?: string });
+      if (!response.ok) return { verificationAvailable: false, materialMatch: "indetermine", estimatedQuantity: null, quantityMatch: "indetermine", notes: "", error: payload.error || "Vérification automatique indisponible." };
+      return { verificationAvailable: true, materialMatch: payload.material_match, estimatedQuantity: payload.estimated_quantity, quantityMatch: payload.quantity_match, notes: payload.notes || "", error: "" };
+    } catch {
+      return { verificationAvailable: false, materialMatch: "indetermine", estimatedQuantity: null, quantityMatch: "indetermine", notes: "", error: "Vérification automatique indisponible (connexion au moteur IA impossible)." };
+    }
+  }
+
   async function uploadPurchaseEvidence(event: FormEvent<HTMLFormElement>, order: MaterialOrder): Promise<boolean> {
     event.preventDefault();
     if (!canUploadPurchaseEvidence || !organizationId || !selectedId) { setPurchaseStatus({ kind: "error", text: "La validation d’achat nécessite l’autorisation Photos." }); return false; }
@@ -1658,21 +1702,29 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     const file = form.get("purchase_photo");
     const purchasedQuantity = number(form.get("purchased_quantity")) || number(order.quantity_to_purchase);
     const unitPrice = number(form.get("unit_price"));
-    if (!(file instanceof File) || !file.size) { setPurchaseStatus({ kind: "error", text: "Ajoutez la photo du matériau avant de valider l’achat." }); return false; }
+    const hasPhoto = file instanceof File && file.size > 0;
+    // La photo est conseillée mais plus obligatoire : sans elle, on prévient
+    // clairement puis on laisse la personne décider de valider quand même.
+    if (!hasPhoto && !window.confirm("Aucune photo n’a été ajoutée pour cet achat. La photo est conseillée (elle permet de vérifier automatiquement le matériau et la quantité). Valider quand même sans photo ?")) {
+      setPurchaseStatus({ kind: "error", text: "Ajoutez une photo, ou confirmez la validation sans photo." });
+      return false;
+    }
     if (purchasedQuantity <= 0) { setPurchaseStatus({ kind: "error", text: "Indiquez une quantité achetée supérieure à zéro." }); return false; }
     // Hors connexion : la photo est gardée sur l'appareil (IndexedDB) et
     // l'achat est mis en attente, exactement comme le rapport journalier —
-    // il sera validé pour de vrai (stock inclus) dès la reconnexion.
+    // il sera validé pour de vrai (stock inclus) dès la reconnexion. La
+    // vérification IA photo/quantité n'a lieu qu'en ligne (voir
+    // performPurchaseValidation) : hors connexion, elle est simplement sautée.
     if (!online) {
       setBusy(true);
       try {
-        const photoId = crypto.randomUUID();
-        await saveOfflinePhoto(photoId, file);
+        const photoId = hasPhoto ? crypto.randomUUID() : undefined;
+        if (hasPhoto && photoId) await saveOfflinePhoto(photoId, file as File);
         const queued: QueuedPurchasePayload = { orderId: order.id, purchasedQuantity, unitPrice, photoId, transportMode: selectedTransportMode, transportPrice: selectedTransportPrice, fournisseur: effectiveOffer?.fournisseur || null };
         queueForSync(`Validation d’achat — ${order.material_name}`, "purchase", "project_material_orders", queued as unknown as Record<string, unknown>);
         setMaterialOrders((rows) => rows.map((row) => row.id === order.id ? { ...row, status: "paid", paid_at: new Date().toISOString(), validated_by: userId || null, purchased_quantity: purchasedQuantity, unit_price: unitPrice } : row));
         setSelectedTransportMode(null); setSelectedTransportPrice(null); setTransportPriceDraft(""); setSelectedPurchaseOffer(null);
-        setPurchaseStatus({ kind: "success", text: "Achat enregistré hors ligne avec sa photo : il sera validé et le stock mis à jour automatiquement dès la reconnexion." });
+        setPurchaseStatus({ kind: "success", text: hasPhoto ? "Achat enregistré hors ligne avec sa photo : il sera validé et le stock mis à jour automatiquement dès la reconnexion." : "Achat enregistré hors ligne sans photo : il sera validé et le stock mis à jour automatiquement dès la reconnexion." });
         formElement.reset();
         return true;
       } catch {
@@ -1683,9 +1735,34 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     setBusy(true);
     setPurchaseStatus({ kind: "info", text: "Vérification de la demande…" });
     try {
-      setPurchaseStatus({ kind: "info", text: "Envoi de la photo et validation…" });
-      const result = await performPurchaseValidation(order, { purchasedQuantity, unitPrice, photo: { blob: file, name: file.name, type: file.type }, transportMode: selectedTransportMode, transportPrice: selectedTransportPrice, fournisseur: effectiveOffer?.fournisseur || null });
-      setPurchaseStatus({ kind: result.ok ? "success" : "error", text: result.message });
+      // Vérification IA de la photo AVANT tout enregistrement : un vrai écart
+      // détecté (mauvais matériau ou quantité manifestement fausse) bloque la
+      // validation pour ne pas fausser le stock du chantier. Une vérification
+      // simplement indisponible (panne IA, plus de crédit, photo illisible)
+      // ne bloque JAMAIS — elle est traitée comme l'absence de photo.
+      let verificationNote = "";
+      if (hasPhoto) {
+        setPurchaseStatus({ kind: "info", text: "Vérification de la photo par l’IA…" });
+        const verification = await verifyPurchasePhoto(file as File, order.material_name, order.unit, purchasedQuantity);
+        if (verification.verificationAvailable) {
+          const { materialMatch, quantityMatch, estimatedQuantity, notes } = verification;
+          if (materialMatch === "non_conforme" || quantityMatch === "non_conforme") {
+            const seen = estimatedQuantity != null ? `${estimatedQuantity} ${order.unit} estimé(s) sur la photo` : "matériau différent de celui déclaré";
+            setPurchaseStatus({ kind: "error", text: `Vérification photo : écart détecté (${seen}, contre ${purchasedQuantity} ${order.unit} déclaré(s)). ${notes} Reprenez une photo plus claire ou corrigez la quantité avant de valider.` });
+            return false;
+          }
+          verificationNote = materialMatch === "conforme" && quantityMatch === "conforme"
+            ? " Quantité et matériau conformes à la photo."
+            : quantityMatch === "conforme"
+              ? " Quantité conforme à la photo (matériau non identifiable automatiquement)."
+              : " Comptage automatique impossible depuis cette photo ; achat validé quand même.";
+        } else {
+          verificationNote = ` Vérification automatique indisponible (${verification.error}) ; achat validé quand même.`;
+        }
+      }
+      setPurchaseStatus({ kind: "info", text: hasPhoto ? "Envoi de la photo et validation…" : "Validation en cours…" });
+      const result = await performPurchaseValidation(order, { purchasedQuantity, unitPrice, photo: hasPhoto ? { blob: file as File, name: (file as File).name, type: (file as File).type } : null, transportMode: selectedTransportMode, transportPrice: selectedTransportPrice, fournisseur: effectiveOffer?.fournisseur || null });
+      setPurchaseStatus({ kind: result.ok ? "success" : "error", text: result.ok ? `${result.message}${verificationNote}` : result.message });
       if (result.ok) { setSelectedTransportMode(null); setSelectedTransportPrice(null); setTransportPriceDraft(""); setSelectedPurchaseOffer(null); formElement.reset(); }
       return result.ok;
     } finally { setBusy(false); }
