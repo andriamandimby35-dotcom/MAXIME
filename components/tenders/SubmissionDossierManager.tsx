@@ -7,6 +7,7 @@ import { createClient } from "@/lib/supabase/client";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
 import { buildDossierRecordsForInsert } from "@/lib/submission/build-dossier-items";
 import { toFriendlyPdfError } from "@/lib/submission/friendly-pdf-error";
+import { isPhoneDevice } from "@/lib/is-phone-device";
 
 type Field = { key: string; label: string; required: boolean; description: string };
 type Item = {
@@ -352,6 +353,17 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     setViewingPdf({ title, objectUrl });
   }
 
+  // Si un onglet natif a été ouvert à l'avance (voir openPdfDirectly plus
+  // bas pour l'explication complète du pourquoi), on y affiche le PDF en
+  // plein écran ; sinon on garde notre fenêtre habituelle avec ses boutons.
+  function openPdfPreferringNativeTab(nativeTab: Window | null, title: string, blob: Blob) {
+    if (nativeTab) {
+      nativeTab.location.href = URL.createObjectURL(new Blob([blob], { type: "application/pdf" }));
+    } else {
+      showPdfInModal(title, blob);
+    }
+  }
+
   function closePdfModal() {
     if (viewingPdf) URL.revokeObjectURL(viewingPdf.objectUrl);
     setViewingPdf(null);
@@ -368,14 +380,16 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     const key = `view:${item.title}`;
     setPendingAction(key);
     setMessage("Ouverture du fichier…");
+    const nativeTab = isPhoneDevice() ? window.open("", "_blank") : null;
     try {
       const signed = await supabase.storage.from("btp-documents").createSignedUrl(path, 300);
-      if (signed.error || !signed.data?.signedUrl) { setMessage("Ouverture du fichier impossible."); return; }
+      if (signed.error || !signed.data?.signedUrl) { nativeTab?.close(); setMessage("Ouverture du fichier impossible."); return; }
       const response = await fetch(signed.data.signedUrl);
       if (!response.ok) throw new Error(`Le serveur a répondu avec le statut ${response.status}.`);
-      showPdfInModal(item.form_data.__attachmentName || item.title, await response.blob());
+      openPdfPreferringNativeTab(nativeTab, item.form_data.__attachmentName || item.title, await response.blob());
       setMessage("");
     } catch (error) {
+      nativeTab?.close();
       setMessage(error instanceof Error ? error.message : "Ouverture du fichier impossible.");
     } finally {
       setPendingAction((current) => current === key ? null : current);
@@ -477,6 +491,16 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   async function openPdfDirectly(key: string, title: string, documentUrl: string) {
     setPendingAction(key);
     setMessage("Préparation du PDF…");
+    // Sur téléphone, un PDF affiché dans notre fenêtre (iframe) n'a ni zoom
+    // ni défilement correct entre les pages — limitation du mini-lecteur
+    // intégré d'iOS/Android, pas de notre code. Le vrai lecteur PDF natif du
+    // téléphone ne s'active que si le PDF s'ouvre en plein écran dans son
+    // propre onglet. On ouvre donc cet onglet ICI, de façon synchrone, AVANT
+    // le premier "await" : Safari bloque comme une pop-up indésirable tout
+    // window.open() déclenché après une attente réseau, mais pas celui-ci,
+    // toujours accepté puisqu'il vient directement du clic. Sur ordinateur,
+    // rien ne change : on garde notre fenêtre avec les boutons personnalisés.
+    const nativeTab = isPhoneDevice() ? window.open("", "_blank") : null;
     // Un premier essai raté vient presque toujours d'une fonction serveur
     // trop lente à démarrer (surtout après une période sans activité — un
     // "cold start"), plus visible sur téléphone à cause d'un réseau moins
@@ -498,9 +522,10 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
         }
       }
       if (!pdf) throw lastError instanceof Error ? lastError : new Error("Le PDF n’a pas pu être préparé.");
-      showPdfInModal(title, pdf);
+      openPdfPreferringNativeTab(nativeTab, title, pdf);
       setMessage("");
     } catch (error) {
+      nativeTab?.close();
       const raw = error instanceof Error ? error.message : "Le PDF n’a pas pu être préparé.";
       if (raw !== "Le PDF n’a pas pu être préparé.") console.error("Échec de préparation du PDF :", raw);
       setMessage(toFriendlyPdfError(raw));
@@ -513,6 +538,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     const key = `bdqe:${officialEstimateId}`;
     setPendingAction(key);
     setMessage("Préparation du BDQE…");
+    const nativeTab = isPhoneDevice() ? window.open("", "_blank") : null;
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const response = await fetch(`/api/estimates/${officialEstimateId}/official-pdf`, {
@@ -530,9 +556,10 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       const payload = await response.json().catch(() => ({})) as { pdfBase64?: string; error?: string };
       if (!response.ok || !payload.pdfBase64) throw new Error(payload.error || "Le BDQE n’a pas pu être préparé.");
       const bytes = Uint8Array.from(atob(payload.pdfBase64), (character) => character.charCodeAt(0));
-      showPdfInModal("BDQE", new Blob([bytes], { type: "application/pdf" }));
+      openPdfPreferringNativeTab(nativeTab, "BDQE", new Blob([bytes], { type: "application/pdf" }));
       setMessage("");
     } catch (error) {
+      nativeTab?.close();
       setMessage(error instanceof Error ? error.message : "Ouverture du BDQE impossible.");
     } finally {
       setPendingAction((current) => current === key ? null : current);
@@ -568,12 +595,14 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     const key = "read";
     setPendingAction(key);
     setMessage("Ouverture du document…");
+    const nativeTab = isPhoneDevice() ? window.open("", "_blank") : null;
     try {
       const response = await fetch(daoUrl);
       if (!response.ok) throw new Error(`Le serveur a répondu avec le statut ${response.status}.`);
-      showPdfInModal("Document à lire", await response.blob());
+      openPdfPreferringNativeTab(nativeTab, "Document à lire", await response.blob());
       setMessage("");
     } catch (error) {
+      nativeTab?.close();
       setMessage(error instanceof Error ? error.message : "Ouverture du document impossible.");
     } finally {
       setPendingAction((current) => current === key ? null : current);
@@ -782,6 +811,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     const key = "final";
     setPendingAction(key);
     setMessage("Vérification finale du dossier…");
+    const nativeTab = isPhoneDevice() ? window.open("", "_blank") : null;
     try {
       await saveImmediately(profile, items);
       const { data: { session } } = await supabase.auth.getSession();
@@ -804,9 +834,10 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       });
       const pdf = await getResponse.blob();
       if (!getResponse.ok || !pdf.type.includes("pdf") || pdf.size < 5) throw new Error("Le PDF final a été enregistré mais ne peut pas être ouvert.");
-      showPdfInModal("Dossier de soumission — PDF final", pdf);
+      openPdfPreferringNativeTab(nativeTab, "Dossier de soumission — PDF final", pdf);
       setMessage("Dossier validé et PDF final enregistré.");
     } catch (error) {
+      nativeTab?.close();
       setMessage(error instanceof Error ? error.message : "Génération finale impossible.");
     } finally {
       setPendingAction((current) => current === key ? null : current);
