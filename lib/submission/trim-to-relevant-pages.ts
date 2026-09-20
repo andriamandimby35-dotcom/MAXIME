@@ -1,6 +1,5 @@
 import "@/lib/submission/pdfjs-worker-setup";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
-import { significantWords } from "@/lib/submission/title-match";
 
 // Une plage de pages tirée d'une référence textuelle ("Pages 31-46, Partie
 // III") ou de numéros extraits par l'IA peut englober plusieurs documents à
@@ -22,7 +21,11 @@ import { significantWords } from "@/lib/submission/title-match";
 // sommaire, une mention en passant...) ne compte jamais comme un changement
 // de document, quel que soit son aspect par ailleurs — elle reste toujours
 // une continuation du document en cours, quel que soit le nombre de pages.
-const HEADING_SCAN_RUN_COUNT = 8;
+// Large volontairement : une page peut contenir quelques éléments avant son
+// titre (numéro de page déjà retiré séparément, une mention discrète...) —
+// un seuil trop court ratait alors le vrai titre (ex. "ANNEXE 1 / AU CCAP")
+// sur une page pourtant presque vide juste avant.
+const HEADING_SCAN_RUN_COUNT = 20;
 
 function normalizeText(value: string) {
   return value
@@ -115,18 +118,27 @@ export async function locateTitleInFullDocument(pdfBytes: Uint8Array, title: str
  * les pages suivantes — y compris AU-DELÀ de candidatePages, dans le
  * document réel — tant qu'aucun NOUVEAU titre différent n'apparaît.
  */
-// Un ou deux mots-clés partagés peuvent être un faux ami (ex. "cahier" seul
-// matche aussi bien "CCAP / Cahier des Clauses..." qu'un simple "cahier des
-// charges" mentionné en corps de texte sur une page totalement différente,
-// constaté sur un DAO réel : la page B- LOCALISATION DU SITE, qui précède le
-// vrai CCAP, était ainsi prise à tort pour son début ; et "fiches" +
-// "renseignements" seuls ont aussi fait confondre un simple sommaire listant
-// "MODELES DE FICHES DE RENSEIGNEMENTS" avec le vrai début du formulaire).
-// On exige donc de retrouver PRESQUE TOUS les mots-clés du titre — pas
-// forcément le titre mot pour mot (un DAO peut l'écrire avec un accent, une
-// ponctuation ou un mot en plus/en moins différent de celui donné par
-// l'IA), mais assez pour exclure une simple mention en passant.
+// On compare la PHRASE ENTIÈRE du titre demandé (tous ses mots, sans en
+// écarter certains comme "spéciaux" ou "significatifs") à la zone de titre
+// repérée sur la page — jamais seulement un ou deux mots choisis à part :
+// choisir seulement quelques mots-clés a déjà fait prendre une page
+// totalement différente pour la bonne (ex. "cahier" seul matche aussi bien
+// "CCAP / Cahier des Clauses..." qu'un simple "cahier des charges" mentionné
+// en passant, sur une page totalement différente). On exige donc de
+// retrouver PRESQUE TOUS les mots de la phrase — pas forcément mot pour mot
+// (un DAO peut l'écrire avec un accent ou une ponctuation différente de
+// celle donnée), mais assez pour exclure une simple mention en passant.
 const MIN_KEYWORD_MATCH_RATIO = 0.85;
+
+function phraseWords(title: string) {
+  return title
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLocaleLowerCase("fr-FR")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
 
 // Un mot-clé du TITRE demandé peut être au pluriel ("Fiches de
 // renseignements du candidat A1 à A5") alors que le vrai titre imprimé sur la
@@ -196,7 +208,7 @@ export async function extractRelevantPageRange(
   } = {},
 ): Promise<RelevantPageRange> {
   if (!candidatePages.length) return { pages: candidatePages, title: null };
-  const keywords = [...significantWords(title)].filter((word) => word.length >= 4);
+  const keywords = phraseWords(title);
   if (!keywords.length) return { pages: candidatePages, title: null };
   try {
     const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
