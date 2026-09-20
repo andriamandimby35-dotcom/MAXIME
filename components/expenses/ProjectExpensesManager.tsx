@@ -6,7 +6,8 @@ import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
 
-type StaffMember = { id: string; project_id: string; full_name: string; role_name?: string | null; active?: boolean; mvola_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; created_at?: string | null; linked_assignment_id?: string | null };
+type RoleHistoryEntry = { role_name: string; effective_from: string };
+type StaffMember = { id: string; project_id: string; full_name: string; role_name?: string | null; active?: boolean; mvola_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; created_at?: string | null; linked_assignment_id?: string | null; role_history?: RoleHistoryEntry[] | null };
 type Attendance = { id: string; staff_member_id: string; report_date: string; present: boolean };
 type ConductorAssignment = { id: string; user_id: string; role: string; active?: boolean; displayName?: string | null; phone_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; created_at?: string };
 type MaterialOrder = {
@@ -30,6 +31,10 @@ type SalaryRow = {
   mvolaEnabled: boolean;
   callEnabled: boolean;
   dailyRate: number | null;
+  // true si les jours comptés n'ont pas tous été payés au même taux (la
+  // personne a changé de poste — donc de taux — pendant la période) :
+  // dailyRate reste alors indicatif (poste actuel) mais amount seul fait foi.
+  mixedRates: boolean;
   daysWorked: number;
   amount: number;
   alreadyPaid: boolean;
@@ -138,6 +143,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [revealedRowKey]);
 
+  const todayKey = new Date().toISOString().slice(0, 10);
   const nowMonthKey = new Date().toISOString().slice(0, 7);
   const [periodMonth, setPeriodMonth] = useState(nowMonthKey);
   const [viewingEmployeeDetail, setViewingEmployeeDetail] = useState<SalaryRow | null>(null);
@@ -324,6 +330,37 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     staffMembers.find((item) => item.linked_assignment_id === assignment.id)?.role_name
     || (assignment.role === "works_manager" ? "Conducteur" : "Chef de chantier");
 
+  // Une promotion (ouvrier → chef, conducteur → conducteur associé, etc.)
+  // ne doit changer le taux de paye qu'à partir du jour du changement,
+  // jamais rétroactivement sur des jours déjà travaillés sous l'ancien
+  // poste : on retrouve donc, pour une date donnée, le poste réellement en
+  // vigueur ce jour-là dans l'historique (role_history), pas le poste
+  // actuel de la fiche.
+  function roleOnDate(member: StaffMember, dateStr: string, fallbackRole: string): string {
+    const history = Array.isArray(member.role_history) ? member.role_history : [];
+    const applicable = history.filter((entry) => entry.effective_from <= dateStr).sort((a, b) => b.effective_from.localeCompare(a.effective_from));
+    return applicable[0]?.role_name || member.role_name || fallbackRole;
+  }
+
+  // Calcule la paye d'une personne jour par jour (chaque jour pointé
+  // présent utilise le taux du poste qu'elle occupait CE jour-là), et
+  // signale si plusieurs taux ont été utilisés sur la période (mixedRates)
+  // pour ne pas afficher un "X FMG/j" trompeur dans ce cas.
+  function payForPresentDays(member: StaffMember | null, presentDates: string[], fallbackRole: string) {
+    let amount = 0;
+    const ratesUsed = new Set<number>();
+    for (const dateStr of presentDates) {
+      const roleForDay = member ? roleOnDate(member, dateStr, fallbackRole) : fallbackRole;
+      const rate = matchLaborRate(roleForDay) ?? 0;
+      amount += rate;
+      ratesUsed.add(rate);
+    }
+    const mixedRates = ratesUsed.size > 1;
+    const currentRole = member ? roleOnDate(member, todayKey, fallbackRole) : fallbackRole;
+    const dailyRate = matchLaborRate(currentRole);
+    return { amount, dailyRate, mixedRates };
+  }
+
   const presentRoles: string[] = Array.from(new Set<string>([
     ...assignments.map((item) => roleNameForAssignment(item)),
     ...staffMembers
@@ -388,16 +425,17 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   const staffRows: SalaryRow[] = staffMembers.filter((staff) => staff.active !== false && !staff.linked_assignment_id).map((staff) => {
     const joinedAt = staff.created_at ? staff.created_at.slice(0, 10) : periodStart;
     const effectiveStart = joinedAt > periodStart ? joinedAt : periodStart;
-    const daysWorked = attendance.filter((item) => item.staff_member_id === staff.id && item.present && item.report_date >= periodStart && item.report_date <= periodEnd).length;
+    const presentDates = attendance.filter((item) => item.staff_member_id === staff.id && item.present && item.report_date >= periodStart && item.report_date <= periodEnd).map((item) => item.report_date);
+    const daysWorked = presentDates.length;
     // Jours où le chantier a pointé quelqu'un, depuis l'arrivée de cette
     // personne : ce sont les jours où elle était censée être présente.
     const trackedDays = trackedDatesInPeriod.filter((date) => date >= effectiveStart).length;
     const absenceDays = Math.max(0, trackedDays - daysWorked);
-    const dailyRate = matchLaborRate(staff.role_name || "");
+    const { amount, dailyRate, mixedRates } = payForPresentDays(staff, presentDates, staff.role_name || "Ouvrier");
     return {
       key: `staff-${staff.id}`, kind: "staff" as const, refId: staff.id, name: staff.full_name, roleName: staff.role_name || "Ouvrier",
       phone: staff.mvola_number || null, mvolaEnabled: Boolean(staff.mvola_enabled && staff.mvola_number), callEnabled: Boolean(staff.call_enabled && staff.mvola_number),
-      dailyRate, daysWorked, amount: dailyRate ? dailyRate * daysWorked : 0, alreadyPaid: isPaidThisPeriod("staff", staff.id),
+      dailyRate, mixedRates, daysWorked, amount, alreadyPaid: isPaidThisPeriod("staff", staff.id),
       trackedDays, absenceDays,
     };
   });
@@ -409,19 +447,21 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   // avant même le démarrage du chantier comme déjà au travail).
   const assignmentRows: SalaryRow[] = assignments.map((assignment) => {
     const linkedStaff = staffMembers.find((item) => item.linked_assignment_id === assignment.id);
-    const roleName = linkedStaff?.role_name || (assignment.role === "works_manager" ? "Conducteur" : "Chef de chantier");
+    const fallbackRole = assignment.role === "works_manager" ? "Conducteur" : "Chef de chantier";
+    const roleName = linkedStaff?.role_name || fallbackRole;
     const joinedAt = linkedStaff?.created_at ? linkedStaff.created_at.slice(0, 10) : (assignment.created_at ? assignment.created_at.slice(0, 10) : periodStart);
     const effectiveStart = joinedAt > periodStart ? joinedAt : periodStart;
-    const daysWorked = linkedStaff
-      ? attendance.filter((item) => item.staff_member_id === linkedStaff.id && item.present && item.report_date >= periodStart && item.report_date <= periodEnd).length
-      : 0;
+    const presentDates = linkedStaff
+      ? attendance.filter((item) => item.staff_member_id === linkedStaff.id && item.present && item.report_date >= periodStart && item.report_date <= periodEnd).map((item) => item.report_date)
+      : [];
+    const daysWorked = presentDates.length;
     const trackedDays = trackedDatesInPeriod.filter((date) => date >= effectiveStart).length;
     const absenceDays = Math.max(0, trackedDays - daysWorked);
-    const dailyRate = matchLaborRate(roleName);
+    const { amount, dailyRate, mixedRates } = payForPresentDays(linkedStaff ?? null, presentDates, fallbackRole);
     return {
       key: `assignment-${assignment.id}`, kind: "assignment" as const, refId: assignment.id, name: assignment.displayName || roleName, roleName,
       phone: assignment.phone_number || null, mvolaEnabled: Boolean(assignment.mvola_enabled && assignment.phone_number), callEnabled: Boolean(assignment.call_enabled && assignment.phone_number),
-      dailyRate, daysWorked, amount: dailyRate ? dailyRate * daysWorked : 0, alreadyPaid: isPaidThisPeriod("assignment", assignment.id),
+      dailyRate, mixedRates, daysWorked, amount, alreadyPaid: isPaidThisPeriod("assignment", assignment.id),
       trackedDays, absenceDays,
     };
   });
@@ -510,7 +550,10 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
       assignment_id: row.kind === "assignment" ? row.refId : null,
       full_name: row.name,
       role_name: row.roleName,
-      daily_rate: row.dailyRate || 0,
+      // Taux moyen réellement payé (utile quand le poste — donc le taux — a
+      // changé en cours de période) : days_worked × daily_rate retombe
+      // toujours juste sur amount, même en cas de changement de poste.
+      daily_rate: row.mixedRates && row.daysWorked ? Math.round((row.amount / row.daysWorked) * 100) / 100 : (row.dailyRate || 0),
       days_worked: row.daysWorked,
       amount: row.amount,
       mvola_number: row.phone,
@@ -704,7 +747,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
         <div className="projectStockSummaryList">{presentRows.length ? presentRows.map((row) => <div key={row.key} style={{ cursor: "pointer" }} onClick={() => { setViewingEmployeeDetail(row); setAdvanceDraft({ amount: "", note: "", method: "cash" }); }}>
           <span className="chipName">{row.name} <small style={{ color: "#8a5b08" }}>{row.roleName}</small></span>
           <span className="chipQty" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            {row.daysWorked} j{row.dailyRate ? ` · ${money(row.dailyRate)}/j · ${money(row.amount)}` : " · taux non défini"}
+            {row.daysWorked} j{row.amount > 0 ? ` · ${row.mixedRates ? "taux variable (changement de poste)" : row.dailyRate ? `${money(row.dailyRate)}/j` : ""} · ${money(row.amount)}` : (row.daysWorked > 0 ? " · taux non défini" : "")}
             {row.alreadyPaid ? <span className="projectChecklistBadge">Payé</span> : (canManage && !row.mvolaEnabled && <button type="button" className="secondary" style={{ padding: "4px 8px", fontSize: ".7rem" }} onClick={(event) => { event.stopPropagation(); requestCashPayment(row); }}>Marquer payé</button>)}
           </span>
         </div>) : <p className="projectEmptyText">Personne présent sur ce chantier pour ce mois.</p>}</div>

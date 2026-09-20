@@ -32,27 +32,44 @@ async function syncStaffLinkForAssignment(
 ) {
   if (params.role === "viewer") return;
   const roleName = params.role === "works_manager" ? (params.isAssociate ? "Conducteur associé" : "Conducteur") : "Chef de chantier";
-  const fields = {
+  const today = new Date().toISOString().slice(0, 10);
+  const commonFields = {
     organization_id: params.organizationId,
     project_id: params.projectId,
     full_name: params.fullName,
     role_name: roleName,
     active: true,
     deleted_at: null,
-    linked_assignment_id: params.assignmentId,
     mvola_number: params.phoneNumber,
     mvola_enabled: params.phoneNumber ? params.mvolaEnabled : false,
     call_enabled: params.phoneNumber ? params.callEnabled : false,
   };
-  const { error } = await admin.from("project_staff_members").upsert(fields, { onConflict: "linked_assignment_id" });
-  if (error?.code === "23505") {
-    // Un employé déclaré porte déjà ce nom : on distingue la fiche du compte pour éviter le conflit d'unicité.
-    const { error: retryError } = await admin.from("project_staff_members")
-      .upsert({ ...fields, full_name: `${params.fullName} (accès)` }, { onConflict: "linked_assignment_id" });
-    if (retryError) console.error("Fiche de présence non liée pour ce compte", retryError);
-  } else if (error) {
-    console.error("Fiche de présence non liée pour ce compte", error);
+
+  // Une réactivation (accès retiré puis recréé) ne doit pas écraser
+  // l'historique des postes déjà tenus : seule une nouvelle entrée est
+  // ajoutée si le poste change vraiment (voir role_history — sert au calcul
+  // de paye jour par jour, poste tenu ce jour-là, pas le poste actuel).
+  const { data: existingLink } = await admin
+    .from("project_staff_members")
+    .select("id, role_name, role_history")
+    .eq("linked_assignment_id", params.assignmentId)
+    .maybeSingle();
+
+  let error;
+  if (existingLink) {
+    const history = Array.isArray(existingLink.role_history) ? existingLink.role_history : [];
+    const roleChanged = existingLink.role_name !== roleName;
+    const fields = { ...commonFields, ...(roleChanged ? { role_history: [...history, { role_name: roleName, effective_from: today }] } : {}) };
+    ({ error } = await admin.from("project_staff_members").update(fields).eq("id", existingLink.id));
+  } else {
+    const fields = { ...commonFields, linked_assignment_id: params.assignmentId, role_history: [{ role_name: roleName, effective_from: today }] };
+    ({ error } = await admin.from("project_staff_members").insert(fields));
+    if (error?.code === "23505") {
+      // Un employé déclaré porte déjà ce nom : on distingue la fiche du compte pour éviter le conflit d'unicité.
+      ({ error } = await admin.from("project_staff_members").insert({ ...fields, full_name: `${params.fullName} (accès)` }));
+    }
   }
+  if (error) console.error("Fiche de présence non liée pour ce compte", error);
 }
 
 type RevokePayload = {
