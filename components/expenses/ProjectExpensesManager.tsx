@@ -6,7 +6,7 @@ import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
 
-type StaffMember = { id: string; project_id: string; full_name: string; role_name?: string | null; active?: boolean; mvola_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; created_at?: string | null };
+type StaffMember = { id: string; project_id: string; full_name: string; role_name?: string | null; active?: boolean; mvola_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; created_at?: string | null; linked_assignment_id?: string | null };
 type Attendance = { id: string; staff_member_id: string; report_date: string; present: boolean };
 type ConductorAssignment = { id: string; user_id: string; role: string; active?: boolean; displayName?: string | null; phone_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; created_at?: string };
 type MaterialOrder = {
@@ -317,8 +317,15 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     return price > 0 ? price : null;
   }
 
+  // Le libellé d'un conducteur/chef reprend celui de sa fiche "Équipe
+  // déclarée" liée (donc "Conducteur associé" si c'est le cas), avec
+  // repli sur le libellé générique du rôle pour un accès pas encore lié.
+  const roleNameForAssignment = (assignment: ConductorAssignment) =>
+    staffMembers.find((item) => item.linked_assignment_id === assignment.id)?.role_name
+    || (assignment.role === "works_manager" ? "Conducteur" : "Chef de chantier");
+
   const presentRoles: string[] = Array.from(new Set<string>([
-    ...assignments.map((item) => item.role === "works_manager" ? "Conducteur" : "Chef de chantier"),
+    ...assignments.map((item) => roleNameForAssignment(item)),
     ...staffMembers
       .filter((item) => item.active !== false)
       .map((item) => (item.role_name || "Ouvrier").trim())
@@ -373,10 +380,12 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     attendance.filter((item) => item.report_date >= periodStart && item.report_date <= periodEnd).map((item) => item.report_date),
   )).sort();
 
-  // Un ouvrier n'a de jour "travaillé" que s'il a été pointé présent ; un
-  // conducteur/chef est considéré présent chaque jour de sa mission active,
-  // comme pour la Présence du jour de l'Espace chantier (pas de pointage).
-  const staffRows: SalaryRow[] = staffMembers.filter((staff) => staff.active !== false).map((staff) => {
+  // Un ouvrier n'a de jour "travaillé" que s'il a été pointé présent. Un
+  // conducteur/chef fonctionne pareil, mais reste affiché comme une ligne
+  // "accès" séparée ci-dessous (assignmentRows) — sa fiche "Équipe déclarée"
+  // liée (linked_assignment_id) n'apparaît donc pas ici en double, elle sert
+  // seulement à retrouver son pointage réel.
+  const staffRows: SalaryRow[] = staffMembers.filter((staff) => staff.active !== false && !staff.linked_assignment_id).map((staff) => {
     const joinedAt = staff.created_at ? staff.created_at.slice(0, 10) : periodStart;
     const effectiveStart = joinedAt > periodStart ? joinedAt : periodStart;
     const daysWorked = attendance.filter((item) => item.staff_member_id === staff.id && item.present && item.report_date >= periodStart && item.report_date <= periodEnd).length;
@@ -392,19 +401,28 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
       trackedDays, absenceDays,
     };
   });
+  // Un conducteur/chef a désormais sa présence pointée exactement comme un
+  // employé (voir l'Espace chantier, carte "Présence du jour"), via la fiche
+  // "Équipe déclarée" liée à son accès : ses jours travaillés viennent de ce
+  // pointage réel, plus jamais d'un simple décompte de jours calendaires
+  // depuis la création de l'accès (ce qui comptait à tort un conducteur créé
+  // avant même le démarrage du chantier comme déjà au travail).
   const assignmentRows: SalaryRow[] = assignments.map((assignment) => {
-    const startedAt = assignment.created_at ? assignment.created_at.slice(0, 10) : periodStart;
-    const effectiveStart = startedAt > periodStart ? startedAt : periodStart;
-    const daysWorked = effectiveStart > periodEnd ? 0 : Math.floor((new Date(periodEnd).getTime() - new Date(effectiveStart).getTime()) / 86400000) + 1;
-    const roleName = assignment.role === "works_manager" ? "Conducteur" : "Chef de chantier";
+    const linkedStaff = staffMembers.find((item) => item.linked_assignment_id === assignment.id);
+    const roleName = linkedStaff?.role_name || (assignment.role === "works_manager" ? "Conducteur" : "Chef de chantier");
+    const joinedAt = linkedStaff?.created_at ? linkedStaff.created_at.slice(0, 10) : (assignment.created_at ? assignment.created_at.slice(0, 10) : periodStart);
+    const effectiveStart = joinedAt > periodStart ? joinedAt : periodStart;
+    const daysWorked = linkedStaff
+      ? attendance.filter((item) => item.staff_member_id === linkedStaff.id && item.present && item.report_date >= periodStart && item.report_date <= periodEnd).length
+      : 0;
+    const trackedDays = trackedDatesInPeriod.filter((date) => date >= effectiveStart).length;
+    const absenceDays = Math.max(0, trackedDays - daysWorked);
     const dailyRate = matchLaborRate(roleName);
     return {
       key: `assignment-${assignment.id}`, kind: "assignment" as const, refId: assignment.id, name: assignment.displayName || roleName, roleName,
       phone: assignment.phone_number || null, mvolaEnabled: Boolean(assignment.mvola_enabled && assignment.phone_number), callEnabled: Boolean(assignment.call_enabled && assignment.phone_number),
       dailyRate, daysWorked, amount: dailyRate ? dailyRate * daysWorked : 0, alreadyPaid: isPaidThisPeriod("assignment", assignment.id),
-      // Pas de pointage journalier pour le conducteur/chef : il est compté
-      // présent chaque jour de sa mission, donc jamais "absent" ici.
-      trackedDays: daysWorked, absenceDays: 0,
+      trackedDays, absenceDays,
     };
   });
   const salaryRows: SalaryRow[] = [...assignmentRows, ...staffRows];

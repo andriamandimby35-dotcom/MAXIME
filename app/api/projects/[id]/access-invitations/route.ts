@@ -15,7 +15,45 @@ type InvitationPayload = {
   phoneNumber?: string;
   mvolaEnabled?: boolean;
   callEnabled?: boolean;
+  // "Conducteur associé" (works_manager uniquement) : même accès qu'un
+  // conducteur normal, seule l'étiquette de paye change (voir plus bas,
+  // fiche "Équipe déclarée" liée à ce compte).
+  isAssociate?: boolean;
 };
+
+// Un conducteur ou un chef de chantier reçoit automatiquement sa propre
+// fiche "Équipe déclarée", liée à son accès (linked_assignment_id) : il
+// utilise ainsi exactement le même pointage de présence et le même calcul
+// de paye que les employés, au lieu d'être compté présent depuis la
+// création de son accès quel que soit l'avancement réel du chantier.
+async function syncStaffLinkForAssignment(
+  admin: ReturnType<typeof createAdminClient>,
+  params: { organizationId: string; projectId: string; assignmentId: string; role: ProjectRole; fullName: string; isAssociate: boolean; phoneNumber: string | null; mvolaEnabled: boolean; callEnabled: boolean },
+) {
+  if (params.role === "viewer") return;
+  const roleName = params.role === "works_manager" ? (params.isAssociate ? "Conducteur associé" : "Conducteur") : "Chef de chantier";
+  const fields = {
+    organization_id: params.organizationId,
+    project_id: params.projectId,
+    full_name: params.fullName,
+    role_name: roleName,
+    active: true,
+    deleted_at: null,
+    linked_assignment_id: params.assignmentId,
+    mvola_number: params.phoneNumber,
+    mvola_enabled: params.phoneNumber ? params.mvolaEnabled : false,
+    call_enabled: params.phoneNumber ? params.callEnabled : false,
+  };
+  const { error } = await admin.from("project_staff_members").upsert(fields, { onConflict: "linked_assignment_id" });
+  if (error?.code === "23505") {
+    // Un employé déclaré porte déjà ce nom : on distingue la fiche du compte pour éviter le conflit d'unicité.
+    const { error: retryError } = await admin.from("project_staff_members")
+      .upsert({ ...fields, full_name: `${params.fullName} (accès)` }, { onConflict: "linked_assignment_id" });
+    if (retryError) console.error("Fiche de présence non liée pour ce compte", retryError);
+  } else if (error) {
+    console.error("Fiche de présence non liée pour ce compte", error);
+  }
+}
 
 type RevokePayload = {
   invitationId?: string;
@@ -250,6 +288,21 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     return NextResponse.json({ error: `Compte créé mais accès au chantier non enregistré : ${assignmentError?.message ?? "erreur inconnue"}` }, { status: 500 });
   }
 
+  // Ne bloque jamais la création du compte : sans cette fiche, l'accès
+  // fonctionne quand même, seul le pointage de présence resterait à relier
+  // manuellement (l'administrateur peut réessayer en modifiant le compte).
+  await syncStaffLinkForAssignment(admin, {
+    organizationId: project.organization_id,
+    projectId,
+    assignmentId: assignment.id,
+    role,
+    fullName: identifier,
+    isAssociate: payload.isAssociate === true,
+    phoneNumber: phoneNumber || null,
+    mvolaEnabled: payload.mvolaEnabled === true,
+    callEnabled: payload.callEnabled === true,
+  });
+
   return NextResponse.json({
     assignment: { ...assignment, email, displayName: identifier },
     message: existingAssignment
@@ -454,6 +507,14 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
     console.error("Impossible de retirer l’accès", assignmentRevokeError);
     return NextResponse.json({ error: "Impossible de retirer cet accès." }, { status: 500 });
   }
+
+  // La fiche "Équipe déclarée" liée à ce compte (voir syncStaffLinkForAssignment)
+  // est retirée avec lui, comme pour un employé, en gardant son historique.
+  const { error: staffDeactivateError } = await admin
+    .from("project_staff_members")
+    .update({ active: false, deleted_at: new Date().toISOString() })
+    .eq("linked_assignment_id", assignment.id);
+  if (staffDeactivateError) console.error("Fiche de présence non désactivée", staffDeactivateError);
 
   const { data: account } = await admin.auth.admin.getUserById(assignment.user_id);
   const accountEmail = account.user?.email?.trim().toLowerCase();
