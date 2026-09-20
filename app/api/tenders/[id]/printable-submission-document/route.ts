@@ -560,13 +560,52 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       }
     }
   }
+  // Diagnostic TEMPORAIRE : on arrive ici seulement quand aucune des méthodes
+  // ci-dessus n'a réussi à utiliser une vraie page du DAO — donc juste avant
+  // de retomber sur la feuille générique. Plutôt que de deviner à l'aveugle
+  // pourquoi (déjà 3 corrections sans effet visible), on affiche directement
+  // dans le PDF généré ce que chaque étape a vu, pour comprendre d'un coup où
+  // ça bloque réellement. À retirer une fois le vrai problème confirmé.
+  const debugLines: string[] = [];
+  if (tender.document_url) {
+    try {
+      debugLines.push(
+        "— DIAGNOSTIC TEMPORAIRE (à retirer après résolution) —",
+        `Pièce IA trouvée par titre : ${detectedTemplate ? "oui" : "non"}`,
+      );
+      if (detectedTemplate) {
+        debugLines.push(
+          `  Titre IA : ${detectedTemplate.title ?? "(vide)"}`,
+          `  Origine (template_origin) : ${detectedTemplate.template_origin ?? "(vide)"}`,
+          `  Pages numériques (template_page_numbers) : ${(detectedTemplate.template_page_numbers ?? []).join(", ") || "(aucune)"}`,
+          `  Référence texte (source_reference) : ${detectedTemplate.source_reference || "(vide)"}`,
+        );
+      }
+      debugLines.push(`Pages connues combinées (detectedTemplateKnownPages) : ${detectedTemplateKnownPages.join(", ") || "(aucune)"}`);
+      if (detectedTemplateKnownPages.length) {
+        const claimedByOthers1 = otherItemsClaimedPages(analysis?.submission_items ?? [], detectedTemplate?.title ?? title);
+        debugLines.push(`  Réclamées par une AUTRE pièce : ${detectedTemplateKnownPages.filter((page) => claimedByOthers1.has(page)).join(", ") || "(aucune)"}`);
+      }
+      debugLines.push(`Référence du dossier (sourceReference client) : ${clientSourceReference || "(vide)"}`);
+      const referencedPagesDebug = parsePageNumbersFromReference(clientSourceReference);
+      debugLines.push(`  Pages extraites de cette référence : ${referencedPagesDebug.join(", ") || "(aucune)"}`);
+      const source = await fetch(tender.document_url);
+      if (source.ok) {
+        const bytes = new Uint8Array(await source.arrayBuffer());
+        const blindSearch = await locateTitleInFullDocument(bytes, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title));
+        debugLines.push(`Recherche à l'aveugle dans tout le DAO : ${blindSearch.join(", ") || "(rien trouvé)"}`);
+      }
+    } catch (error) {
+      debugLines.push(`Diagnostic interrompu par une erreur : ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   const transportTables = /mat.riaux.*transport/i.test(title) && hasTransportWeightTable && transportWeightTable
     ? [{ title: transportWeightTable.title || title, columns: transportWeightTable.columns || [], rows: transportWeightTable.rows || [] }]
     : [];
   const planTables = /\bplans?\b/i.test(title) && hasPlanRegister && planRegister
     ? [{ title: planRegister.title || title, columns: planRegister.columns || [], rows: planRegister.rows || [] }]
     : [];
-  let pdf = await createPrintableSubmissionPdf(title, profileData, [...formLines, ...extraLines], isExecutionPlanning && executionPlanningTable ? [executionPlanningTable] : templateTables.length ? templateTables : transportTables.length ? transportTables : planTables.length ? planTables : rosterTable);
+  let pdf = await createPrintableSubmissionPdf(title, profileData, [...formLines, ...extraLines, "", ...debugLines], isExecutionPlanning && executionPlanningTable ? [executionPlanningTable] : templateTables.length ? templateTables : transportTables.length ? transportTables : planTables.length ? planTables : rosterTable);
   // planRegister.page_numbers ne liste que quelques pages éparses au lieu de
   // la vraie plage complète des planches (vérifié : sur un DAO réel, les
   // plans couvraient ~110 pages consécutives alors que l'IA n'en avait cité

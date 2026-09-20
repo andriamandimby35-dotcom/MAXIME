@@ -107,9 +107,24 @@ export async function locateTitleInFullDocument(pdfBytes: Uint8Array, title: str
 // l'IA), mais assez pour exclure une simple mention en passant.
 const MIN_KEYWORD_MATCH_RATIO = 0.85;
 
+// Un mot-clé du TITRE demandé peut être au pluriel ("Fiches de
+// renseignements du candidat A1 à A5") alors que le vrai titre imprimé sur la
+// page DAO est au singulier ("A1 - FICHE DE RENSEIGNEMENTS RELATIFS AU
+// CANDIDAT", un -s de différence) — ou l'inverse. Un simple "includes" ne
+// voit alors que "renseignements"/"candidat" comme partagés (2 mots sur 3),
+// ce qui repasse SOUS le seuil de 85 % et fait déclarer la bonne page
+// "non trouvée" à tort. Le pluriel français le plus courant n'ajoute qu'un
+// -s final : on accepte donc un mot-clé même quand seule sa forme avec/sans
+// ce -s apparaît dans la zone de titre.
+function keywordAppearsIn(heading: string, keyword: string) {
+  if (heading.includes(keyword)) return true;
+  if (keyword.endsWith("s") && keyword.length > 4) return heading.includes(keyword.slice(0, -1));
+  return heading.includes(`${keyword}s`);
+}
+
 function matchesTitle(heading: string, keywords: string[]) {
   if (!keywords.length) return false;
-  const matched = keywords.filter((keyword) => heading.includes(keyword)).length;
+  const matched = keywords.filter((keyword) => keywordAppearsIn(heading, keyword)).length;
   return matched / keywords.length >= MIN_KEYWORD_MATCH_RATIO;
 }
 
