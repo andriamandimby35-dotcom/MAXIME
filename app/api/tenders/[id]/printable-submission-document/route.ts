@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { PDFDocument } from "pdf-lib";
 import { createServerClient } from "@/lib/supabase/server";
 import { createPrintableSubmissionPdf } from "@/lib/submission/printable-pdf";
-import { appendDaoPagesToPdf, createFilledDaoTemplatePdf } from "@/lib/submission/dao-template-pdf";
+import { appendDaoPagesToPdf, appendExternalFileAsPages, createFilledDaoTemplatePdf } from "@/lib/submission/dao-template-pdf";
 import { rebuildTemplatePages, renderRebuiltPages } from "@/lib/submission/rebuild-template-pdf";
 import { measureTableColumnRatios } from "@/lib/submission/locate-field-positions";
 import { findBestTitleMatch } from "@/lib/submission/title-match";
@@ -208,16 +208,27 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     } catch { /* The user can still complete a malformed legacy entry manually. */ }
   }
   let workerRole = "";
+  // Chemin (dans le stockage Supabase "btp-documents") et type MIME du
+  // fichier CIN joint pour ce personnel, s'il en a un — conservés en dehors
+  // du bloc try pour rester utilisables plus bas, après la génération du PDF
+  // du contrat, afin d'y ajouter la CIN en pages supplémentaires (voir
+  // appendExternalFileAsPages plus bas).
+  let workerCinPath = "";
+  let workerCinMime = "";
   try {
     const personnelItem = allItems.find((item) => /personnel|personnels|ressources humaines|equipe/i.test(item.title || "")
       && !(/petit contrat.*travailleur|contrat.*travailleur|contrat.*employ/i.test(item.title || "") || (/liste du personnel et leurs fonctions/i.test(item.title || "") && !/affecter au chantier/i.test(item.title || ""))));
-    const workers = JSON.parse(personnelItem?.form_data?.__personnel || "[]") as Array<{ name?: string; role?: string; identity?: string }>;
+    const workers = JSON.parse(personnelItem?.form_data?.__personnel || "[]") as Array<{ name?: string; role?: string; identity?: string; address?: string; salary?: string; cinPath?: string; cinMime?: string }>;
     const worker = workers[workerIndex];
     if (worker) {
       templateValues.worker_name = worker.name || "";
       templateValues.worker_identity = worker.identity || "";
       templateValues.worker_cin = worker.identity || "";
+      templateValues.worker_address = worker.address || "";
+      templateValues.worker_salary = worker.salary || "";
       workerRole = worker.role || "";
+      workerCinPath = worker.cinPath || "";
+      workerCinMime = worker.cinMime || "";
     }
   } catch { /* A legacy malformed list remains editable in the dossier. */ }
   // Une valeur non résolue ne doit jamais imprimer une explication de ce
@@ -312,11 +323,13 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   const generatedWorkerContractLines = isWorkerContract ? [
     "CONTRAT INDIVIDUEL DE TRAVAIL",
     `Entre l’entreprise ${companyName}, sise à ${profileData.address || "[adresse à compléter]"}, représentée par ${signer},`,
-    `et le travailleur : ${templateValues.worker_name || "[nom à compléter]"}, CIN / identité : ${templateValues.worker_identity || "[numéro à compléter]"}.`,
+    `et le travailleur : ${templateValues.worker_name || "[nom à compléter]"}, CIN / identité : ${templateValues.worker_identity || "[numéro à compléter]"}, demeurant à ${templateValues.worker_address || "[adresse à compléter]"}.`,
     `Poste / fonction sur le chantier : ${workerRole || "[à compléter]"}.`,
+    `Rémunération convenue : ${templateValues.worker_salary || "[montant à compléter]"}.`,
     "Les parties conviennent que le travailleur intervient pour les activités prévues au chantier, suivant les conditions du DAO et les consignes de sécurité applicables.",
     "Le présent document doit être vérifié, imprimé puis signé par les deux parties.",
     "", "Signature de l’entreprise : ____________________", "", "Signature du travailleur : ____________________",
+    ...(workerCinPath ? ["", "La copie de la CIN du travailleur est jointe en dernière(s) page(s) de ce document."] : []),
   ] : [];
   const submissionLetterLines = detectedTemplate?.template_text?.trim()
     ? [
@@ -526,6 +539,25 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       }
     } catch (error) {
       console.error("Transport weight table pages append failed", error);
+    }
+  }
+  // Contrat individuel de travail avec une CIN jointe (photo ou PDF) : la CIN
+  // est conservée telle quelle (jamais réécrite) et ajoutée en page(s)
+  // supplémentaire(s) à la toute fin du contrat, comme demandé — "le pdf
+  // contrat aura la ccin en bas sur un autre feuille".
+  if (isWorkerContract && workerCinPath) {
+    try {
+      const signedCin = await supabase.storage.from("btp-documents").createSignedUrl(workerCinPath, 300);
+      if (signedCin.data?.signedUrl) {
+        const cinResponse = await fetch(signedCin.data.signedUrl);
+        if (cinResponse.ok) {
+          const cinBytes = new Uint8Array(await cinResponse.arrayBuffer());
+          const cinMime = workerCinMime || cinResponse.headers.get("content-type") || (workerCinPath.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/jpeg");
+          pdf = await appendExternalFileAsPages(pdf, cinBytes, cinMime);
+        }
+      }
+    } catch (error) {
+      console.error("Worker CIN append failed", error);
     }
   }
   return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);

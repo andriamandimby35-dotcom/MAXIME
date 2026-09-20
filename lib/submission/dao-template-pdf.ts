@@ -122,3 +122,54 @@ export async function appendDaoPagesToPdf(generatedPdf: Uint8Array, source: Uint
   pages.forEach((page) => generated.addPage(page));
   return Buffer.from(await generated.save());
 }
+
+/**
+ * Joint un fichier externe fourni par l'utilisateur (ici la CIN d'un
+ * personnel, recto/verso) en pages SUPPLÉMENTAIRES à la fin d'un PDF déjà
+ * généré — jamais mélangé avec ses propres pages. Si le fichier est déjà un
+ * PDF (CIN scannée en PDF, éventuellement plusieurs pages pour recto/verso),
+ * chacune de ses pages est copiée telle quelle. Si c'est une photo (jpg ou
+ * png, cas le plus courant pour une CIN prise en photo), elle est centrée et
+ * mise à l'échelle sur une nouvelle page A4, sans la déformer.
+ */
+export async function appendExternalFileAsPages(generatedPdf: Uint8Array, fileBytes: Uint8Array, mimeType: string) {
+  const generated = await PDFDocument.load(generatedPdf);
+  const normalizedMime = mimeType.toLowerCase();
+  if (normalizedMime.includes("pdf")) {
+    try {
+      const external = await PDFDocument.load(fileBytes);
+      const pages = await generated.copyPages(external, external.getPageIndices());
+      pages.forEach((page) => generated.addPage(page));
+    } catch {
+      // Un PDF de CIN illisible ou corrompu ne doit jamais faire échouer tout
+      // le contrat déjà généré : on le laisse simplement de côté.
+    }
+    return Buffer.from(await generated.save());
+  }
+  try {
+    const image = normalizedMime.includes("png")
+      ? await generated.embedPng(fileBytes)
+      : await generated.embedJpg(fileBytes);
+    // Format A4 portrait en points PDF (595 x 842), comme le reste des pages
+    // générées par l'application.
+    const pageWidth = 595;
+    const pageHeight = 842;
+    const page = generated.addPage([pageWidth, pageHeight]);
+    const margin = 40;
+    const maxWidth = pageWidth - margin * 2;
+    const maxHeight = pageHeight - margin * 2;
+    const scale = Math.min(maxWidth / image.width, maxHeight / image.height, 1);
+    const drawWidth = image.width * scale;
+    const drawHeight = image.height * scale;
+    page.drawImage(image, {
+      x: (pageWidth - drawWidth) / 2,
+      y: (pageHeight - drawHeight) / 2,
+      width: drawWidth,
+      height: drawHeight,
+    });
+  } catch {
+    // Une image illisible (format non pris en charge, fichier corrompu) ne
+    // doit pas non plus faire échouer le contrat déjà généré.
+  }
+  return Buffer.from(await generated.save());
+}

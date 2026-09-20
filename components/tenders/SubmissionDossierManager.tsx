@@ -31,7 +31,15 @@ type Item = {
 
 type DetectedItem = Omit<Item, "status" | "form_data">;
 type TemplateDetectedItem = DetectedItem & { prefilled_values?: Array<{ key: string; value: string }> };
-type RosterEntry = { name: string; role: string; qualification: string; experience: string; identity?: string };
+type RosterEntry = {
+  name: string; role: string; qualification: string; experience: string; identity?: string;
+  // Ajoutés pour générer un contrat individuel de travail complet (voir
+  // isWorkerContract) : adresse et rémunération saisies à la main, et fichier
+  // CIN (photo ou PDF recto/verso) lu automatiquement par l'IA dès l'ajout
+  // (voir insertCinFile) puis conservé pour être joint en pages
+  // supplémentaires à la fin du contrat PDF de cette personne.
+  address?: string; salary?: string; cinPath?: string; cinName?: string; cinMime?: string;
+};
 
 const profileFields = [
   ["legal_name", "Raison sociale"], ["trade_name", "Nom commercial"],
@@ -747,6 +755,84 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     updateItem(index, { form_data: { ...items[index].form_data, [key]: JSON.stringify(roster) } });
   }
 
+  // Photo/PDF de la CIN d'un personnel (recto/verso) : lue AUTOMATIQUEMENT dès
+  // l'ajout (pas de bouton "Analyser" séparé), puis CONSERVÉE — jamais
+  // effacée après lecture — pour être jointe en pages supplémentaires à la
+  // fin du contrat individuel de cette personne (voir generatedWorkerContractLines
+  // et appendExternalFileAsPages côté serveur). Une valeur déjà tapée à la
+  // main par l'utilisateur (nom, n° CIN, adresse) n'est jamais écrasée par la
+  // lecture automatique : on ne complète que les cases encore vides.
+  async function insertCinFile(index: number, rosterIndex: number, file: File) {
+    const key = `cin:${index}:${rosterIndex}`;
+    setPendingAction(key);
+    setMessage("Envoi et lecture de la CIN en cours…");
+    try {
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const path = `${organizationId}/submission/${tenderId}/cin/${crypto.randomUUID()}-${safeName}`;
+      const upload = await supabase.storage.from("btp-documents").upload(path, file, { upsert: false });
+      if (upload.error) { setMessage(`Envoi de la CIN impossible : ${upload.error.message}`); return; }
+      // On repart du rôster LE PLUS À JOUR (items[index], pas une copie
+      // capturée avant l'envoi) : sinon une saisie faite pendant l'upload
+      // serait perdue en enregistrant le fichier joint.
+      const rosterWithFile = rosterFor(items[index], "__personnel").map((entry, currentIndex) => currentIndex === rosterIndex
+        ? { ...entry, cinPath: path, cinName: file.name, cinMime: file.type || "application/octet-stream" }
+        : entry);
+      updateRoster(index, "__personnel", rosterWithFile);
+      setMessage("CIN jointe. Lecture automatique des informations…");
+      const { data: { session } } = await supabase.auth.getSession();
+      const response = await fetch(`/api/tenders/${tenderId}/extract-cin`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}`, "X-Supabase-Access-Token": session.access_token } : {}),
+        },
+        body: JSON.stringify({ path }),
+      });
+      const payload = await response.json().catch(() => ({}) as { full_name?: string; cin_number?: string; address?: string; error?: string });
+      if (!response.ok) { setMessage(`${payload.error || "Lecture automatique de la CIN impossible."} Le fichier reste joint : complétez les champs à la main.`); return; }
+      // À nouveau le rôster le plus récent (la lecture prend quelques
+      // secondes, une saisie manuelle a pu avoir lieu entre-temps) ; on ne
+      // remplit que les champs encore vides.
+      const mergedRoster = rosterFor(items[index], "__personnel").map((entry, currentIndex) => {
+        if (currentIndex !== rosterIndex) return entry;
+        return {
+          ...entry,
+          name: entry.name.trim() ? entry.name : (payload.full_name || entry.name),
+          identity: entry.identity?.trim() ? entry.identity : (payload.cin_number || entry.identity || ""),
+          address: entry.address?.trim() ? entry.address : (payload.address || entry.address || ""),
+        };
+      });
+      updateRoster(index, "__personnel", mergedRoster);
+      setMessage("Informations lues sur la CIN et complétées automatiquement. Vérifiez avant impression.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Lecture de la CIN impossible.");
+    } finally {
+      setPendingAction((current) => current === key ? null : current);
+    }
+  }
+
+  async function removeCinFile(index: number, rosterIndex: number) {
+    const roster = rosterFor(items[index], "__personnel");
+    const entry = roster[rosterIndex];
+    if (!entry?.cinPath) return;
+    const key = `cin-remove:${index}:${rosterIndex}`;
+    setPendingAction(key);
+    setMessage("Suppression de la CIN…");
+    try {
+      const removal = await supabase.storage.from("btp-documents").remove([entry.cinPath]);
+      if (removal.error) { setMessage(`Suppression impossible : ${removal.error.message}`); return; }
+      const nextRoster = rosterFor(items[index], "__personnel").map((current, currentIndex) => currentIndex === rosterIndex
+        ? { ...current, cinPath: undefined, cinName: undefined, cinMime: undefined }
+        : current);
+      updateRoster(index, "__personnel", nextRoster);
+      setMessage("CIN supprimée.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Suppression de la CIN impossible.");
+    } finally {
+      setPendingAction((current) => current === key ? null : current);
+    }
+  }
+
   // Même principe que rosterFor/updateRoster ci-dessus, mais générique pour
   // n'importe quel tableau marqué repeatable par l'analyse IA (litiges,
   // conventions non exécutées, marchés similaires...) : chaque ligne est un
@@ -1010,7 +1096,22 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
                 <button type="button" className="tenderButton tenderButtonPrimary mt-2" onClick={() => updateTableRows(index, tableIndex, [...rows, {}])}>+ Ajouter une ligne</button>
               </div>;
             })}
-            {(personnel || material) && <div className="mt-3 grid gap-3">{roster.map((entry, rosterIndex) => <div key={rosterIndex} className="rounded-lg border bg-gray-50 p-3"><div className="grid gap-2 md:grid-cols-2"><label className="grid gap-1 text-sm font-semibold">{personnel ? "Nom et prénoms" : "Matériel / engin"}<input value={entry.name} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, name: event.target.value }; updateRoster(index, rosterKey, next); }} /></label><label className="grid gap-1 text-sm font-semibold">{personnel ? "Poste sur chantier" : "Fonction / usage"}<input value={entry.role} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, role: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>{personnel && <label className="grid gap-1 text-sm font-semibold">N° CIN / identité (pour le contrat)<input value={entry.identity ?? ""} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, identity: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>}{!personnel && <><label className="grid gap-1 text-sm font-semibold">État / capacité<input value={entry.qualification} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, qualification: event.target.value }; updateRoster(index, rosterKey, next); }} /></label><label className="grid gap-1 text-sm font-semibold">Quantité / disponibilité<input value={entry.experience} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, experience: event.target.value }; updateRoster(index, rosterKey, next); }} /></label></>}</div><button type="button" className="tenderButton mt-2" onClick={() => updateRoster(index, rosterKey, roster.filter((_, currentIndex) => currentIndex !== rosterIndex))}>Retirer cette ligne</button></div>)}<button type="button" className="tenderButton tenderButtonPrimary" onClick={() => updateRoster(index, rosterKey, [...roster, { name: "", role: "", qualification: "", experience: "", identity: "" }])}>+ Ajouter {personnel ? "un personnel" : "un matériel"}</button></div>}
+            {(personnel || material) && <div className="mt-3 grid gap-3">{roster.map((entry, rosterIndex) => <div key={rosterIndex} className="rounded-lg border bg-gray-50 p-3">
+              <div className="grid gap-2 md:grid-cols-2">
+                <label className="grid gap-1 text-sm font-semibold">{personnel ? "Nom et prénoms" : "Matériel / engin"}<input value={entry.name} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, name: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>
+                <label className="grid gap-1 text-sm font-semibold">{personnel ? "Poste sur chantier" : "Fonction / usage"}<input value={entry.role} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, role: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>
+                {personnel && <label className="grid gap-1 text-sm font-semibold">N° CIN / identité (pour le contrat)<input value={entry.identity ?? ""} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, identity: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>}
+                {personnel && <label className="grid gap-1 text-sm font-semibold">Adresse<input value={entry.address ?? ""} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, address: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>}
+                {personnel && <label className="grid gap-1 text-sm font-semibold">Rémunération / salaire<input value={entry.salary ?? ""} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, salary: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>}
+                {!personnel && <><label className="grid gap-1 text-sm font-semibold">État / capacité<input value={entry.qualification} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, qualification: event.target.value }; updateRoster(index, rosterKey, next); }} /></label><label className="grid gap-1 text-sm font-semibold">Quantité / disponibilité<input value={entry.experience} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, experience: event.target.value }; updateRoster(index, rosterKey, next); }} /></label></>}
+              </div>
+              {personnel && <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-white p-2">
+                <span className="text-sm font-semibold">CIN (photo ou PDF, recto/verso) :</span>
+                {entry.cinPath ? <><span className="text-sm font-semibold text-green-700">{entry.cinName || "Fichier joint"}</span><button type="button" className="tenderButton" disabled={pendingAction === `cin-remove:${index}:${rosterIndex}`} onClick={() => void removeCinFile(index, rosterIndex)}><ButtonLabel loading={pendingAction === `cin-remove:${index}:${rosterIndex}`} label="Supprimer" loadingLabel="Suppression…" /></button></> : <label className="tenderButton">{pendingAction === `cin:${index}:${rosterIndex}` ? <ButtonLabel loading label="" loadingLabel="Lecture…" /> : "Ajouter une photo ou un PDF"}<input style={{ display: "none" }} type="file" accept="image/*,application/pdf" disabled={pendingAction === `cin:${index}:${rosterIndex}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) void insertCinFile(index, rosterIndex, file); }} /></label>}
+                <span className="text-xs text-gray-600">L’IA lit automatiquement le nom, le n° CIN et l’adresse dès l’ajout ; le fichier reste joint et sera imprimé à la fin du contrat de cette personne.</span>
+              </div>}
+              <button type="button" className="tenderButton mt-2" onClick={() => updateRoster(index, rosterKey, roster.filter((_, currentIndex) => currentIndex !== rosterIndex))}>Retirer cette ligne</button>
+            </div>)}<button type="button" className="tenderButton tenderButtonPrimary" onClick={() => updateRoster(index, rosterKey, [...roster, { name: "", role: "", qualification: "", experience: "", identity: "", address: "", salary: "" }])}>+ Ajouter {personnel ? "un personnel" : "un matériel"}</button></div>}
             {workerContract && <div className="mt-3 grid gap-3">{!personnelRoster.length && <p className="text-sm text-amber-700">Ajoutez d’abord le personnel affecté au chantier dans la liste ci-dessus.</p>}{personnelRoster.map((worker, workerIndex) => <div key={workerIndex} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-gray-50 p-3"><span><strong>{worker.name || "Personnel sans nom"}</strong>{worker.role ? ` — ${worker.role}` : ""}</span><button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `pdf:${item.title}:${workerIndex}`} onClick={() => openWorkerContract(item, workerIndex)}><ButtonLabel loading={pendingAction === `pdf:${item.title}:${workerIndex}`} label="Ouvrir le contrat PDF" /></button></div>)}</div>}
             <div className="mt-3 flex flex-wrap gap-2">{(needsPrintableVersion(item) || personnel || material) && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Ouvrir le PDF à imprimer" /></button>}{item.form_data.__attachmentPath ? <><button type="button" className="tenderButton" disabled={pendingAction === `view:${item.title}`} onClick={() => void viewFile(item)}><ButtonLabel loading={pendingAction === `view:${item.title}`} label="Ouvrir" /></button><button type="button" className="tenderButton" disabled={pendingAction === `remove:${index}`} onClick={() => void removeFile(index)}><ButtonLabel loading={pendingAction === `remove:${index}`} label="Supprimer" loadingLabel="Suppression…" /></button></> : <label className="tenderButton">{pendingAction === `upload:${index}` ? <ButtonLabel loading label="" loadingLabel="Envoi…" /> : "Choisir un fichier"}<input style={{ display: "none" }} type="file" disabled={pendingAction === `upload:${index}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) void insertFile(index, file); }} /></label>}</div>
             {!item.fields.length && <p className="mt-3 text-sm text-amber-700">Aucune valeur n’a été identifiée à préremplir. Le PDF à imprimer reprend néanmoins le document demandé et doit être vérifié avant signature.</p>}
