@@ -3,8 +3,7 @@ import { PDFDocument } from "pdf-lib";
 import { createServerClient } from "@/lib/supabase/server";
 import { createPrintableSubmissionPdf } from "@/lib/submission/printable-pdf";
 import { appendDaoPagesToPdf, appendExternalFileAsPages, createFilledDaoTemplatePdf } from "@/lib/submission/dao-template-pdf";
-import { rebuildTemplatePages, renderRebuiltPages } from "@/lib/submission/rebuild-template-pdf";
-import { measureTableColumnRatios } from "@/lib/submission/locate-field-positions";
+import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholders } from "@/lib/submission/locate-field-positions";
 import { findBestTitleMatch } from "@/lib/submission/title-match";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
 import { trimToRelevantStart, extractRelevantPageRange, locateTitleInFullDocument } from "@/lib/submission/trim-to-relevant-pages";
@@ -398,20 +397,29 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // mêmes à extraire pour signature/insertion. On ne doit donc pas exiger
   // template_fill_positions : createFilledDaoTemplatePdf gère très bien un
   // tableau de positions vide (elle extrait alors les pages telles quelles).
-  if (!isExecutionPlanning && detectedTemplate?.template_origin === "dao" && tender.document_url && detectedTemplate.template_page_numbers?.length) {
-    const notClaimedByOthers = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], detectedTemplate.title ?? title, detectedTemplate.template_page_numbers);
+  // template_page_numbers ne contient souvent qu'UNE page de départ (demandée
+  // ainsi à l'IA) et peut même rester vide si l'IA n'a donné cette page QUE
+  // sous forme de texte dans source_reference ("Pages 31-46, Partie III") —
+  // ça a longtemps fait passer à tort une pièce pourtant bien identifiée pour
+  // "aucune page connue", et tomber sur le générateur générique tout en bas
+  // au lieu d'utiliser la vraie page du DAO. On combine donc toujours les
+  // deux sources ici, avant même de décider d'entrer dans cette branche.
+  const detectedTemplateKnownPages = [...new Set([
+    ...(detectedTemplate?.template_page_numbers ?? []),
+    ...parsePageNumbersFromReference(detectedTemplate?.source_reference),
+  ])].sort((left, right) => left - right);
+  if (!isExecutionPlanning && detectedTemplate?.template_origin === "dao" && tender.document_url && detectedTemplateKnownPages.length) {
+    const notClaimedByOthers = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], detectedTemplate.title ?? title, detectedTemplateKnownPages);
     if (notClaimedByOthers.length) {
       try {
         const source = await fetch(tender.document_url);
         if (source.ok) {
           const bytes = new Uint8Array(await source.arrayBuffer());
-          // template_page_numbers ne contient qu'UNE page de départ (demandée
-          // ainsi à l'IA) : si cette page précise s'avère être la mauvaise
-          // (l'IA se trompe parfois de quelques pages), la recherche de titre
-          // n'a alors aucune autre page où chercher. source_reference donne
-          // presque toujours une plage plus large ("p. 34-47") qui sert de
-          // filet : on l'ajoute aux pages candidates pour laisser la
-          // recherche de titre trouver le VRAI début quelque part dedans.
+          // Si la page précise citée s'avère être la mauvaise (l'IA se trompe
+          // parfois de quelques pages), la recherche de titre n'a alors aucune
+          // autre page où chercher : detectedTemplateKnownPages (page + plage
+          // de source_reference) sert de filet pour laisser la recherche de
+          // titre trouver le VRAI début quelque part dedans.
           // Contrairement aux plans (sans texte, donc sans signal fiable), une
           // pièce avec du texte a sa propre détection de frontière par titre :
           // on ne retire donc pas ici les pages qu'une AUTRE pièce revendique
@@ -420,9 +428,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           // ça créerait un trou artificiel dans une page qui appartient bien
           // à CETTE pièce-ci. Ce garde-fou anti-collision reste réservé au
           // repli plan (branche ci-dessous), seul cas sans détection de texte.
-          const candidatePages = /\bplans?\b/i.test(title)
-            ? notClaimedByOthers
-            : [...new Set([...(detectedTemplate.template_page_numbers ?? []), ...parsePageNumbersFromReference(detectedTemplate.source_reference)])].sort((left, right) => left - right);
+          const candidatePages = /\bplans?\b/i.test(title) ? notClaimedByOthers : detectedTemplateKnownPages;
           const documentPageCount = (await PDFDocument.load(bytes)).getPageCount();
           const verifiedPages = /\bplans?\b/i.test(title)
             ? await expandToContiguousPlanRange(title, candidatePages, analysis?.submission_items ?? [], documentPageCount)
@@ -436,17 +442,22 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             // page DAO reste extraite telle quelle, sans réécriture.
             pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [], templateValues, []);
           } else {
-            // Écrire par-dessus la page DAO copiée dépend de la mise en page
-            // interne exacte du fichier source (polices, calques...) et son
-            // rendu peut alors différer d'un lecteur PDF à l'autre sans
-            // qu'aucune erreur ne remonte. On ne touche donc plus du tout au
-            // PDF original : on relit son texte réel et on RECRÉE entièrement
-            // la page en remplaçant directement les crochets/pointillés par
-            // les vraies valeurs — même si la police change, le contenu reste
-            // fidèle au modèle du DAO et ne dépend plus jamais du fichier
-            // source pour son rendu.
-            const rebuiltPages = await rebuildTemplatePages(bytes, verifiedPages, templateFields.map((field) => ({ field_key: field.key, label: field.label, description: field.description })), templateValues);
-            pdf = await renderRebuiltPages(rebuiltPages);
+            // La page DAO reste copiée EXACTEMENT telle quelle (cadres,
+            // tableaux, toutes les décorations d'origine intactes) : on ne
+            // réécrit jamais son texte à la main. On repère seulement, sur
+            // cette vraie page, où se trouve le libellé de chaque champ
+            // ("Nom ou raison sociale du candidat :"...) pour écrire la
+            // valeur juste à côté — plutôt que de faire deviner une position
+            // à l'IA (quasi jamais fiable) ou de reconstruire toute la page
+            // nous-même (perd les décorations d'origine, et peut faire
+            // déborder le contenu sur une page en trop si le texte recréé est
+            // un peu plus long que l'original).
+            const fieldTargets = templateFields.map((field) => ({ field_key: field.key, label: field.label, description: field.description }));
+            const [positions, redactions] = await Promise.all([
+              locateFieldPositions(bytes, verifiedPages, fieldTargets),
+              locateBracketPlaceholders(bytes, verifiedPages, fieldTargets),
+            ]);
+            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, templateValues, redactions);
           }
           if (templateTables.length) {
             // Les colonnes d'un tableau reconstruit gardaient une largeur
