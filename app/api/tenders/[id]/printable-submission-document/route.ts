@@ -408,7 +408,14 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     ...(detectedTemplate?.template_page_numbers ?? []),
     ...parsePageNumbersFromReference(detectedTemplate?.source_reference),
   ])].sort((left, right) => left - right);
-  if (!isExecutionPlanning && detectedTemplate?.template_origin === "dao" && tender.document_url && detectedTemplateKnownPages.length) {
+  // On a longtemps exigé ICI que l'IA ait elle-même classé la pièce en
+  // template_origin "dao" — mais ce classement peut rester "none"/"generated"
+  // même quand l'IA a par ailleurs bien donné une vraie page ou référence
+  // dans le DAO (constaté sur "Fiches de renseignements A1 à A5" : page 13
+  // correcte, mais origin pas "dao", donc cette branche était sautée
+  // entièrement malgré une page connue et fiable). Une page/référence connue
+  // est un signal plus sûr que ce classement : dès qu'on en a une, on l'utilise.
+  if (!isExecutionPlanning && tender.document_url && detectedTemplateKnownPages.length) {
     const notClaimedByOthers = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], detectedTemplate.title ?? title, detectedTemplateKnownPages);
     if (notClaimedByOthers.length) {
       try {
