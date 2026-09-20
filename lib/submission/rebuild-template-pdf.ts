@@ -54,6 +54,26 @@ function widenLabel(resolved: string, offset: number, labelPart: string) {
   return `${context.replace(/\n/g, " ")} ${labelPart}`.trim();
 }
 
+// Un blanc isolé sur sa ligne (rien d'exploitable avant lui, ex. juste "1.Je
+// soussigné" en préambule générique) tire sa véritable légende de ce qui le
+// SUIT — sur la même ligne ("...................... (nom, prénom, fonction)
+// représentant") ou, motif tout aussi courant, sur la ligne juste en dessous.
+// Sans ce filet, ce blanc restait non reconnu (donc visible tel quel avec
+// ses points de suite) tandis qu'un blanc VOISIN, dont le contexte précédent
+// contenait par hasard cette même légende (parce qu'elle précède aussi CE
+// blanc-là dans le texte), recevait la valeur à sa place — bug observé sur
+// la lettre de soumission : le nom du signataire atterrissait sur le blanc
+// suivant, celui prévu pour la raison sociale de l'entreprise.
+function forwardCaption(resolved: string, matchEnd: number) {
+  const lineEnd = resolved.indexOf("\n", matchEnd);
+  const restOfLine = (lineEnd >= 0 ? resolved.slice(matchEnd, lineEnd) : resolved.slice(matchEnd)).trim();
+  if (significantWords(restOfLine).size >= 2) return restOfLine;
+  const nextLineStart = lineEnd >= 0 ? lineEnd + 1 : resolved.length;
+  const nextLineEnd = resolved.indexOf("\n", nextLineStart);
+  const nextLine = (nextLineEnd >= 0 ? resolved.slice(nextLineStart, nextLineEnd) : resolved.slice(nextLineStart)).trim();
+  return `${restOfLine} ${nextLine}`.trim();
+}
+
 // Une note instructive du DAO n'est pas toujours entre crochets (ex. "Note :
 // le texte en italiques... devra être supprimé de la version officielle
 // finale") : ce genre de phrase qui s'auto-désigne comme à retirer avant
@@ -163,7 +183,20 @@ export async function rebuildTemplatePages(pdfBytes: Uint8Array, pageNumbers: nu
     // dernier retour à la ligne), pas tout ce qui précède sur la page.
     resolved = resolved.replace(/([:.]?\s*)([.…_]{5,})/g, (whole, sep: string, _dots: string, offset: number) => {
       const lineStart = resolved.lastIndexOf("\n", offset) + 1;
-      const labelPart = widenLabel(resolved, offset, resolved.slice(lineStart, offset));
+      const backwardSameLine = resolved.slice(lineStart, offset);
+      const forward = forwardCaption(resolved, offset + whole.length);
+      // Une légende qui suit directement le blanc décrit toujours CE blanc
+      // précis, jamais un blanc voisin — contrairement à un contexte "avant"
+      // élargi au-delà de la ligne courante, qui peut en réalité appartenir à
+      // la légende du blanc PRÉCÉDENT (voir forwardCaption ci-dessus). Une
+      // légende après le blanc est donc toujours prioritaire quand elle
+      // existe ; sinon on retombe sur le texte de la même ligne avant le
+      // blanc, et seulement en dernier recours sur la recherche élargie.
+      const labelPart = significantWords(forward).size >= 2
+        ? forward
+        : significantWords(backwardSameLine).size >= 2
+          ? backwardSameLine
+          : widenLabel(resolved, offset, backwardSameLine);
       const match = bestFieldMatch(labelPart, fields, usedForBlanks, 0.5);
       const value = match ? values[match.field_key]?.trim() : "";
       if (match && value) { usedForBlanks.add(match.field_key); return `${sep} ${value} `; }
@@ -173,10 +206,19 @@ export async function rebuildTemplatePages(pdfBytes: Uint8Array, pageNumbers: nu
     // n'utilisent ni crochets ni points de suite : juste un intitulé suivi
     // d'un ":" et d'une case vide sans aucun caractère de remplissage. Toute
     // ligne qui se termine par ":" (rien après, ou seulement des espaces)
-    // reçoit donc directement la valeur du champ reconnu.
+    // reçoit donc directement la valeur du champ reconnu. Un tel intitulé,
+    // exactement comme une instruction entre crochets, revient souvent à
+    // plusieurs endroits légitimes du même formulaire (ex. « Personne
+    // habilitée à représenter le candidat : » PUIS, juste en dessous dans un
+    // encadré séparé, « Nom : » / « Adresse : » pour cette même personne) :
+    // les deux doivent recevoir la vraie valeur. Réutiliser usedForBlanks ici
+    // (partagé avec les points de suite, un signal plus ambigu) empêchait à
+    // tort cette répétition légitime — le second encadré restait vide alors
+    // que la valeur était déjà connue. On utilise donc noExclusion comme pour
+    // les crochets.
     resolved = resolved.replace(/^([^\n]*?:)[ \t]*$/gm, (whole, labelWithColon: string, offset: number) => {
       const labelPart = widenLabel(resolved, offset, labelWithColon.slice(0, -1));
-      const match = bestFieldMatch(labelPart, fields, usedForBlanks, 0.5);
+      const match = bestFieldMatch(labelPart, fields, noExclusion, 0.5);
       const value = match ? values[match.field_key]?.trim() : "";
       if (match && value) { usedForBlanks.add(match.field_key); return `${labelWithColon} ${value}`; }
       return whole;

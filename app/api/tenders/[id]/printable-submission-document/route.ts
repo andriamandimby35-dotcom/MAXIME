@@ -250,7 +250,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     plan_register?: { title?: string; columns?: string[]; rows?: string[][]; total_label?: string; total_count?: string; source_reference?: string; page_numbers?: number[] };
     worksite_location?: string;
     work_items?: Array<PlanningWorkItem>;
-    submission_items?: Array<{ title?: string; template_origin?: "dao" | "internet" | "generated" | "none"; template_source_url?: string; template_text?: string; template_page_numbers?: number[]; template_fill_positions?: Array<{ page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number }>; template_tables?: Array<{ title: string; columns: string[]; rows: string[][]; organization_column_indexes?: number[] }>; source_reference?: string; fields?: Array<{ key: string; label: string; description?: string }> }>;
+    submission_items?: Array<{ title?: string; template_origin?: "dao" | "internet" | "generated" | "none"; template_source_url?: string; template_text?: string; template_page_numbers?: number[]; template_fill_positions?: Array<{ page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number }>; template_tables?: Array<{ title: string; columns: string[]; rows: string[][]; organization_column_indexes?: number[]; repeatable?: boolean }>; source_reference?: string; fields?: Array<{ key: string; label: string; description?: string }> }>;
   } | null;
   templateValues.worksite_location = analysis?.worksite_location || "";
   templateValues.chantier_location = analysis?.worksite_location || "";
@@ -332,14 +332,33 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       : kind === "form_to_complete"
         ? ["FORMULAIRE À SIGNER OU PARAPHER", "", ...filledFields]
         : [];
-  const templateTables = (detectedTemplate?.template_tables ?? []).map((table) => ({
-    ...table,
-    title: replaceTemplateFields(table.title),
-    columns: table.columns.map(replaceTemplateFields),
-    rows: table.rows.map((row) => row.map((cell, columnIndex) => (table.organization_column_indexes ?? table.columns.map((_, index) => index)).includes(columnIndex)
-      ? replaceTemplateFields(cell)
-      : cell.replace(/\{\{[a-z0-9_]+\}\}/gi, ""))),
-  }));
+  const templateTables = (detectedTemplate?.template_tables ?? []).map((table, tableIndex) => {
+    if (table.repeatable) {
+      // Le DAO ne montre qu'une ligne d'exemple pour ce genre de rubrique
+      // (litiges, conventions non exécutées, marchés similaires...) : le
+      // nombre réel de lignes dépend de l'historique du candidat, ajouté via
+      // le bouton "+ Ajouter une ligne" du dossier (form_data.__table_<index>,
+      // même index de tableau que côté client — voir SubmissionDossierManager).
+      let enteredRows: Array<Record<string, string>> = [];
+      try {
+        const parsed = JSON.parse(formData[`__table_${tableIndex}`] || "[]");
+        if (Array.isArray(parsed)) enteredRows = parsed as Array<Record<string, string>>;
+      } catch { /* Une entrée mal formée reste éditable dans le dossier. */ }
+      const rows = enteredRows.length
+        ? enteredRows.map((row) => table.columns.map((_, columnIndex) => row[String(columnIndex)] ?? ""))
+        : [table.columns.map(() => "")];
+      return { ...table, title: replaceTemplateFields(table.title), columns: table.columns.map(replaceTemplateFields), rows };
+    }
+    const orgColumns = table.organization_column_indexes ?? table.columns.map((_, index) => index);
+    return {
+      ...table,
+      title: replaceTemplateFields(table.title),
+      columns: table.columns.map(replaceTemplateFields),
+      rows: table.rows.map((row) => row.map((cell, columnIndex) => orgColumns.includes(columnIndex)
+        ? replaceTemplateFields(cell)
+        : cell.replace(/\{\{[a-z0-9_]+\}\}/gi, ""))),
+    };
+  });
   const rosterTable = (() => {
     const isPersonnel = /personnel|personnels|ressources humaines|equipe/i.test(title) && !isWorkerContract;
     const isMaterial = /materiel|matériels|equipement|équipement|engins/i.test(title);

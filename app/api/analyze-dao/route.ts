@@ -172,8 +172,17 @@ const daoSchema = {
                 columns: { type: "array", items: { type: "string" } },
                 rows: { type: "array", items: { type: "array", items: { type: "string" } } },
                 organization_column_indexes: { type: "array", items: { type: "number" } },
+                // true : le DAO ne montre qu'une seule ligne d'exemple par
+                // rubrique alors que le nombre réel d'entrées dépend du
+                // candidat (litiges, conventions non exécutées, marchés
+                // similaires...) — l'application dupliquera cette ligne
+                // autant de fois que nécessaire. false : le tableau a un
+                // nombre de lignes et colonnes toujours identique (ex. un
+                // chiffre d'affaires réparti sur des colonnes d'années
+                // précises déjà indiquées par le DAO).
+                repeatable: { type: "boolean" },
               },
-              required: ["title", "columns", "rows", "organization_column_indexes"],
+              required: ["title", "columns", "rows", "organization_column_indexes", "repeatable"],
             },
           },
           fields: {
@@ -374,6 +383,8 @@ export async function POST(request: Request) {
           "Règle spéciale personnel : si l’Annexe 3 page 233 est présente, elle correspond uniquement à la liste des personnels affectés au chantier et à son tableau. Ne la duplique pas. Toute autre pièce demandant un contrat, petit contrat ou engagement de travail doit devenir un submission_item distinct de type form_to_complete, intitulé « Contrat individuel de travail ». Ce contrat doit être généré une fois par personnel de la liste Annexe 3, prérempli avec son nom, fonction et CIN. Cherche d’abord son modèle exact dans le DAO avec ses pages, tableau et zones à remplir ; seulement si aucun modèle n’existe, prépare un modèle généré à imprimer et indique clairement qu’il doit être vérifié avant signature.",
           "Pour tout formulaire ou document qui doit être rempli ou généré, applique impérativement cet ordre : 1) cherche d’abord un modèle dans le DAO et toutes ses annexes ; 2) seulement s’il n’existe aucun modèle exploitable, utilise la recherche web pour trouver un modèle équivalent fiable ; 3) seulement en dernier recours, prépare un modèle générique à vérifier.",
           "Pour chaque submission_item, remplis template_origin avec dao, internet, generated ou none. template_source_url contient l’URL vérifiée seulement si template_origin=internet, sinon une chaîne vide. template_text contient le texte ou la structure utile du modèle seulement s’il faut le générer/imprimer ; sinon une chaîne vide. Si template_origin=dao, template_page_numbers contient les pages originales 1-indexées à imprimer, et template_fill_positions contient les positions précises des champs sur la page : page source, field_key, x_percent et y_percent mesurés depuis le coin supérieur gauche, width_percent. Ces positions doivent couvrir aussi les cellules des tableaux. template_tables contient les tableaux du modèle à reproduire avec exactement leurs colonnes, lignes, ordre et intitulés visibles dans le DAO ; utilise [] lorsqu’il n’y a pas de tableau. organization_column_indexes contient les indices à partir de 0 des seules colonnes destinées au candidat qui utilise l’application ; pour un tableau général, indique toutes ses colonnes. Si le tableau concerne plusieurs organismes, candidats, années ou lots, n’indique que la colonne du soumissionnaire courant et ne mets jamais ses données dans les autres colonnes. Dans template_text et dans les seules cellules des colonnes concernées, remplace tout emplacement à compléter par {{cle_du_champ}}, par exemple {{legal_name}}, {{nif}}, {{signature_date}} ou {{contract_reference}}. Ajoute obligatoirement ces clés dans fields afin que l’application préremplisse les données disponibles et demande seulement les valeurs absentes. Ne présente jamais un modèle Internet ou généré comme un modèle officiel du DAO.",
+          "Erreur fréquente à éviter dans template_tables : une cellule destinée au candidat (montant, date, quantité, référence, désignation...) reçoit une clé {{cle_du_champ}} MÊME quand elle apparaît simplement vide dans le DAO, sans aucun pointillé, tiret ou crochet visible — une case vide dans un tableau à remplir est un emplacement à compléter au même titre qu'une case avec pointillés. Ne laisse jamais une telle cellule vide sans clé sous prétexte qu'elle ne contient aucun caractère de remplissage.",
+          "Renseigne repeatable=true pour un tableau dont le DAO ne montre qu'une ou deux lignes d'exemple par rubrique alors que le nombre réel d'entrées dépend de l'historique du candidat — notamment les litiges des cinq dernières années, les conventions ou marchés non exécutés, la liste des travaux ou marchés similaires déjà exécutés, ou tout chiffre d'affaires par exercice qui ne correspond pas à des colonnes d'années déjà fixées par le DAO. Pour un tel tableau, ne numérote jamais les clés : utilise des clés de colonne génériques et réutilisables sur une seule ligne d'exemple (par exemple {{annee}}, {{montant}}, {{identification}}, {{fraction_non_executee}}), jamais {{annee_1}} ni {{montant_2}} — l'application duplique ensuite cette ligne autant de fois que l'utilisateur en a besoin, avec les mêmes clés à chaque fois. Renseigne repeatable=false pour un tableau dont le nombre de lignes et de colonnes est toujours fixe et connu à l'avance (par exemple un chiffre d'affaires réparti sur des colonnes d'exercices précises déjà indiquées par le DAO) : dans ce cas seulement, donne une clé distincte à chaque cellule (par exemple {{travaux_exercice_1}}, {{fournitures_exercice_2}}).",
           "Règle impérative d'impression : pour chaque pièce dont le titre, les instructions ou le DAO demandent une signature, un paraphe, un cachet ou une impression, ne retourne jamais une simple instruction. Cherche son modèle et ses pages dans le DAO. Si elles existent, utilise obligatoirement template_origin=dao, liste toutes les template_page_numbers à imprimer et renseigne toutes les template_fill_positions et template_tables nécessaires pour une version entièrement préremplie. Si aucun modèle DAO exploitable n'existe, utilise un modèle équivalent fiable ou prépare un document complet à imprimer avec template_text et les fields, jamais un simple résumé. Chaque valeur présente dans le DAO ou le profil entreprise doit être inscrite dans prefilled_values; seuls les champs réellement inconnus restent à demander au candidat.",
           "Presque tous les modèles DAO se terminent par un bloc de signature (souvent \"Nom : [...] Titre/Qualité : [...] Signé [...]\"). N'oublie jamais ce bloc dans fields, même quand le reste de la pièce n'a que peu de champs : ajoute systématiquement une clé pour le nom du signataire et une pour sa fonction/qualité (préremplies depuis le représentant légal de l'entreprise dans prefilled_values), en plus de tous les autres blancs entre crochets ou pointillés déjà présents sur ces mêmes pages.",
           "template_fill_positions n'est jamais optionnel : dès que template_origin=dao et que fields contient au moins une clé, template_fill_positions DOIT contenir une position (page, field_key, x_percent, y_percent, width_percent) pour CHAQUE champ de fields, sinon la valeur préremplie n'apparaît nulle part sur le document final et le candidat reçoit un modèle vierge malgré des informations déjà connues. Regarde où se trouve concrètement le blanc, le tiret ou la case correspondante sur la page (visible dans le PDF fourni) et estime sa position en pourcentage de la largeur/hauteur de page depuis le coin supérieur gauche ; une estimation raisonnable vaut toujours mieux qu'une position absente.",
@@ -483,7 +494,7 @@ export async function POST(request: Request) {
         template_text: string;
         template_page_numbers: number[];
         template_fill_positions: Array<{ page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number }>;
-        template_tables: Array<{ title: string; columns: string[]; rows: string[][]; organization_column_indexes: number[] }>;
+        template_tables: Array<{ title: string; columns: string[]; rows: string[][]; organization_column_indexes: number[]; repeatable: boolean }>;
         fields: Array<{ key: string; label: string; required: boolean; description: string }>;
       }>;
     };
@@ -498,7 +509,7 @@ export async function POST(request: Request) {
     structured = parsedOutput as typeof structured;
 
     const analysis = {
-      schema_version: "dao-visual-structured-v10",
+      schema_version: "dao-visual-structured-v11",
       ...structured,
       resume: structured.summary,
       lots: structured.work_items.map((item) => ({

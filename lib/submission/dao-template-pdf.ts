@@ -60,20 +60,29 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
   }
   for (const position of positions) {
     const outputIndex = validPages.indexOf(Math.floor(position.page));
+    if (outputIndex < 0) continue;
     const value = values[position.field_key]?.trim();
-    if (outputIndex < 0 || !value) continue;
     const page = result.getPage(outputIndex);
     const { width, height } = page.getSize();
     const fontSize = 8;
     const available = Math.max(10, width * Math.max(1, Math.min(90, position.width_percent)) / 100);
-    const maxChars = Math.max(4, Math.floor(available / 4.2));
-    page.drawText(compact(value, maxChars), {
-      x: width * Math.max(0, Math.min(100, position.x_percent)) / 100,
-      y: height - (height * Math.max(0, Math.min(100, position.y_percent)) / 100) - fontSize,
-      size: fontSize,
-      font,
-      color: rgb(0, 0, 0),
-    });
+    const x = width * Math.max(0, Math.min(100, position.x_percent)) / 100;
+    const y = height - (height * Math.max(0, Math.min(100, position.y_percent)) / 100) - fontSize;
+    // Le DAO imprime des points de suite, tirets ou soulignés à cet
+    // emplacement ("Nom : .........", "Date : ______") pour indiquer où
+    // écrire à la main. Dès qu'on connaît la vraie valeur, on efface d'abord
+    // ces caractères avec un rectangle blanc avant d'écrire par-dessus,
+    // exactement comme pour les zones de redaction ci-dessus, pour ne
+    // jamais superposer la valeur remplie aux pointillés d'origine — cette
+    // règle couvre aussi les cellules de tableau, qui utilisent les mêmes
+    // positions. Sans valeur connue, on laisse les pointillés intacts pour
+    // que la personne puisse encore les compléter à la main.
+    if (value) {
+      const coverHeight = fontSize * 1.5;
+      page.drawRectangle({ x: x - 1, y: y - coverHeight * 0.25, width: available + 2, height: coverHeight, color: rgb(1, 1, 1) });
+      const maxChars = Math.max(4, Math.floor(available / 4.2));
+      page.drawText(compact(value, maxChars), { x, y, size: fontSize, font, color: rgb(0, 0, 0) });
+    }
   }
   return Buffer.from(await result.save());
 }

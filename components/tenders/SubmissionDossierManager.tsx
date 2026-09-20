@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
-import { buildDossierRecordsForInsert } from "@/lib/submission/build-dossier-items";
+import { buildDossierRecordsForInsert, type TemplateTable } from "@/lib/submission/build-dossier-items";
 import { toFriendlyPdfError } from "@/lib/submission/friendly-pdf-error";
 import { isPhoneDevice } from "@/lib/is-phone-device";
 
@@ -23,6 +23,10 @@ type Item = {
   // réelles à imprimer) plutôt qu'un simple générique à compléter.
   template_origin?: "dao" | "internet" | "generated" | "none";
   template_page_numbers?: number[];
+  // Un tableau marqué repeatable (voir le prompt d'analyse) n'a qu'une seule
+  // ligne d'exemple côté DAO : l'utilisateur peut en ajouter/retirer autant
+  // que nécessaire ci-dessous (ex. litiges, conventions non exécutées).
+  template_tables?: TemplateTable[];
 };
 
 type DetectedItem = Omit<Item, "status" | "form_data">;
@@ -743,6 +747,23 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     updateItem(index, { form_data: { ...items[index].form_data, [key]: JSON.stringify(roster) } });
   }
 
+  // Même principe que rosterFor/updateRoster ci-dessus, mais générique pour
+  // n'importe quel tableau marqué repeatable par l'analyse IA (litiges,
+  // conventions non exécutées, marchés similaires...) : chaque ligne est un
+  // objet { "0": valeur colonne 0, "1": valeur colonne 1, ... }, indexé par
+  // position de colonne plutôt que par un nom de champ fixe puisque ces
+  // colonnes varient d'un DAO à l'autre.
+  type TableRow = Record<string, string>;
+  function tableRowsFor(item: Item, tableIndex: number): TableRow[] {
+    try {
+      const rows = JSON.parse(item.form_data[`__table_${tableIndex}`] || "[]");
+      return Array.isArray(rows) ? rows as TableRow[] : [];
+    } catch { return []; }
+  }
+  function updateTableRows(index: number, tableIndex: number, rows: TableRow[]) {
+    updateItem(index, { form_data: { ...items[index].form_data, [`__table_${tableIndex}`]: JSON.stringify(rows) } });
+  }
+
   // resolvedFieldValue devine une valeur (profil entreprise, date du jour,
   // référence du marché...) pour l'affichage, mais tant qu'elle n'est écrite
   // nulle part elle reste invisible du PDF généré côté serveur : celui-ci ne
@@ -967,6 +988,28 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
             {!personnel && !material && !workerContract && item.fields.map((field) => <label key={field.key} className="mt-3 grid gap-1 text-sm font-semibold">{field.label}{field.required ? " *" : ""}
               <input value={resolvedFieldValue(item, field)} placeholder={field.description || "Information à compléter"} onChange={(event) => updateItem(index, { form_data: { ...item.form_data, [field.key]: event.target.value } })} />
             </label>)}
+            {!personnel && !material && !workerContract && (item.template_tables ?? []).map((table, tableIndex) => {
+              if (!table.repeatable) return null;
+              const rows = tableRowsFor(item, tableIndex);
+              return <div key={tableIndex} className="mt-4 rounded-lg border bg-gray-50 p-3">
+                <strong>{table.title}</strong>
+                <p className="mt-1 text-xs text-gray-600">Le DAO ne montre qu’une ligne d’exemple : ajoutez-en autant que nécessaire.</p>
+                <div className="mt-2 grid gap-3">
+                  {rows.map((row, rowIndex) => <div key={rowIndex} className="rounded-lg border bg-white p-3">
+                    <div className="grid gap-2 md:grid-cols-2">
+                      {table.columns.map((column, columnIndex) => <label key={columnIndex} className="grid gap-1 text-sm font-semibold">{column || `Colonne ${columnIndex + 1}`}
+                        <input value={row[String(columnIndex)] ?? ""} onChange={(event) => {
+                          const next = rows.map((current, currentIndex) => currentIndex === rowIndex ? { ...current, [String(columnIndex)]: event.target.value } : current);
+                          updateTableRows(index, tableIndex, next);
+                        }} />
+                      </label>)}
+                    </div>
+                    <button type="button" className="tenderButton mt-2" onClick={() => updateTableRows(index, tableIndex, rows.filter((_, currentIndex) => currentIndex !== rowIndex))}>Retirer cette ligne</button>
+                  </div>)}
+                </div>
+                <button type="button" className="tenderButton tenderButtonPrimary mt-2" onClick={() => updateTableRows(index, tableIndex, [...rows, {}])}>+ Ajouter une ligne</button>
+              </div>;
+            })}
             {(personnel || material) && <div className="mt-3 grid gap-3">{roster.map((entry, rosterIndex) => <div key={rosterIndex} className="rounded-lg border bg-gray-50 p-3"><div className="grid gap-2 md:grid-cols-2"><label className="grid gap-1 text-sm font-semibold">{personnel ? "Nom et prénoms" : "Matériel / engin"}<input value={entry.name} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, name: event.target.value }; updateRoster(index, rosterKey, next); }} /></label><label className="grid gap-1 text-sm font-semibold">{personnel ? "Poste sur chantier" : "Fonction / usage"}<input value={entry.role} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, role: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>{personnel && <label className="grid gap-1 text-sm font-semibold">N° CIN / identité (pour le contrat)<input value={entry.identity ?? ""} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, identity: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>}{!personnel && <><label className="grid gap-1 text-sm font-semibold">État / capacité<input value={entry.qualification} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, qualification: event.target.value }; updateRoster(index, rosterKey, next); }} /></label><label className="grid gap-1 text-sm font-semibold">Quantité / disponibilité<input value={entry.experience} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, experience: event.target.value }; updateRoster(index, rosterKey, next); }} /></label></>}</div><button type="button" className="tenderButton mt-2" onClick={() => updateRoster(index, rosterKey, roster.filter((_, currentIndex) => currentIndex !== rosterIndex))}>Retirer cette ligne</button></div>)}<button type="button" className="tenderButton tenderButtonPrimary" onClick={() => updateRoster(index, rosterKey, [...roster, { name: "", role: "", qualification: "", experience: "", identity: "" }])}>+ Ajouter {personnel ? "un personnel" : "un matériel"}</button></div>}
             {workerContract && <div className="mt-3 grid gap-3">{!personnelRoster.length && <p className="text-sm text-amber-700">Ajoutez d’abord le personnel affecté au chantier dans la liste ci-dessus.</p>}{personnelRoster.map((worker, workerIndex) => <div key={workerIndex} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-gray-50 p-3"><span><strong>{worker.name || "Personnel sans nom"}</strong>{worker.role ? ` — ${worker.role}` : ""}</span><button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `pdf:${item.title}:${workerIndex}`} onClick={() => openWorkerContract(item, workerIndex)}><ButtonLabel loading={pendingAction === `pdf:${item.title}:${workerIndex}`} label="Ouvrir le contrat PDF" /></button></div>)}</div>}
             <div className="mt-3 flex flex-wrap gap-2">{(needsPrintableVersion(item) || personnel || material) && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Ouvrir le PDF à imprimer" /></button>}{item.form_data.__attachmentPath ? <><button type="button" className="tenderButton" disabled={pendingAction === `view:${item.title}`} onClick={() => void viewFile(item)}><ButtonLabel loading={pendingAction === `view:${item.title}`} label="Ouvrir" /></button><button type="button" className="tenderButton" disabled={pendingAction === `remove:${index}`} onClick={() => void removeFile(index)}><ButtonLabel loading={pendingAction === `remove:${index}`} label="Supprimer" loadingLabel="Suppression…" /></button></> : <label className="tenderButton">{pendingAction === `upload:${index}` ? <ButtonLabel loading label="" loadingLabel="Envoi…" /> : "Choisir un fichier"}<input style={{ display: "none" }} type="file" disabled={pendingAction === `upload:${index}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) void insertFile(index, file); }} /></label>}</div>

@@ -21,10 +21,19 @@ export type DetectedItem = {
   fields: Field[];
 };
 
+export type TemplateTable = { title: string; columns: string[]; rows: string[][]; organization_column_indexes?: number[]; repeatable?: boolean };
+
 export type TemplateDetectedItem = DetectedItem & {
   prefilled_values?: Array<{ key: string; value: string }>;
   template_origin?: "dao" | "internet" | "generated" | "none";
   template_page_numbers?: number[];
+  // Transmis tel quel jusqu'au dossier affiché côté client, uniquement pour
+  // qu'un éditeur à lignes ("+ Ajouter une ligne") puisse repérer les
+  // tableaux marqués repeatable (voir le prompt d'analyse) et laisser
+  // l'utilisateur y ajouter autant de lignes que nécessaire ; le contenu et
+  // le rendu PDF réels restent construits côté serveur à partir de ces
+  // mêmes lignes.
+  template_tables?: TemplateTable[];
 };
 
 export type ChecklistEntry = { title: string; sequence: number; source_reference?: string };
