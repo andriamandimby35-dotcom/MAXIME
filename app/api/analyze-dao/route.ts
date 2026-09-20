@@ -125,8 +125,9 @@ const daoSchema = {
           title: { type: "string" },
           sequence: { type: "number" },
           source_reference: { type: "string" },
+          level: { type: "number" },
         },
-        required: ["title", "sequence", "source_reference"],
+        required: ["title", "sequence", "source_reference", "level"],
       },
     },
     submission_items: {
@@ -368,6 +369,7 @@ export async function POST(request: Request) {
           "Pour le coffrage, examine les plans de semelles, poteaux, poutres, linteaux, chaînages et dalles; indique les dimensions, surfaces, répétitions et possibilités de réemploi déductibles.",
           "Si le plan est incomplet, fournis dans pricing_context une hypothèse prudente de calepinage clairement signalée à valider, au lieu de laisser une composition inexploitable.",
           "Cherche dans le DAO l'article, la clause ou le sommaire qui énumère la liste complète des pièces à fournir pour la soumission (par exemple un article intitulé « Dossier d'Appel d'Offres », « Composition du dossier de soumission » ou équivalent selon le DAO). Recopie cette énumération telle quelle, avec l'intitulé exact de chaque ligne (parties, formulaires, annexes, chapitres...) dans submission_checklist, en gardant EXACTEMENT son ordre d'apparition dans ce sommaire : sequence commence à 1 et augmente de 1 pour chaque ligne, y compris les sous-parties et sous-annexes listées séparément. Renseigne source_reference avec la page indiquée pour cette ligne dans le sommaire, ou une chaîne vide si aucune page n'y est indiquée. Cette liste sert UNIQUEMENT à fixer l'ordre d'affichage des pièces détectées dans submission_items : elle reste totalement séparée de leur contenu, page réelle, modèle ou champs, qui restent décrits uniquement dans submission_items. N'invente jamais une ligne absente de ce sommaire et ne fusionne jamais deux lignes distinctes ; si le DAO ne contient aucun sommaire de ce type, retourne submission_checklist=[].",
+          "Renseigne aussi level pour chaque ligne de submission_checklist, afin que l'application puisse afficher les titres de ce sommaire exactement comme le DAO les présente : level=0 pour une grande division du sommaire (par exemple « Partie I », « Partie II », un titre ou chapitre principal en chiffres romains, en gras ou en plus gros qui regroupe plusieurs lignes en dessous), et level=1 pour chaque ligne secondaire placée sous cette division (tiret, sous-point, formulaire ou annexe nommé individuellement). Si le sommaire du DAO est plat, sans regroupement visible en grandes divisions, mets level=1 pour toutes les lignes et n'invente aucune division qui n'existe pas dans le DAO.",
           "Analyse aussi toutes les pièces de soumission demandées dans le DAO, y compris les annexes, formulaires, attestations, garanties et justificatifs.",
           "Place chaque pièce explicitement demandée dans submission_items : kind=document_to_provide pour une pièce à joindre et kind=form_to_complete pour un formulaire, une lettre ou une déclaration à compléter.",
           "Le critère décisif entre document_to_provide et form_to_complete n'est jamais l'intitulé donné par le DAO mais l'état réel du modèle sur sa page : dès que le modèle DAO d'une pièce comporte des blancs, tirets, pointillés, mentions entre crochets à remplacer, ou un tableau partiellement vide à compléter (montant, durée, référence, banque, date, nom du candidat...), utilise obligatoirement kind=form_to_complete, même si le DAO la liste parmi les pièces jointes plutôt que parmi les formulaires — c'est notamment le cas fréquent de la garantie bancaire de soumission, de la caution personnelle et solidaire et de la garantie de bonne exécution. Repère précisément chaque blanc et chaque cellule de tableau à remplir avec template_fill_positions et template_tables (colonnes et lignes exactes du DAO), crée une clé dans fields pour chaque valeur réellement inconnue, et préremplis dans prefilled_values toute valeur déjà disponible dans le DAO ou le profil entreprise. Le PDF généré doit reproduire le modèle DAO lettre pour lettre et tableau pour tableau, avec uniquement les blancs effectivement remplis à la place des espaces à compléter — jamais une simple instruction de signature sans le modèle rempli.",
@@ -468,7 +470,7 @@ export async function POST(request: Request) {
         pricing_context: string;
       }>;
       warnings: string[];
-      submission_checklist: Array<{ title: string; sequence: number; source_reference: string }>;
+      submission_checklist: Array<{ title: string; sequence: number; source_reference: string; level: number }>;
       internal_cost_recommendations: Array<{
         kind: "labor" | "material" | "equipment" | "service" | "overhead";
         title: string;

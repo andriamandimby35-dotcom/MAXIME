@@ -27,6 +27,14 @@ type Item = {
   // ligne d'exemple côté DAO : l'utilisateur peut en ajouter/retirer autant
   // que nécessaire ci-dessous (ex. litiges, conventions non exécutées).
   template_tables?: TemplateTable[];
+  // Titre de la grande division du sommaire du DAO (ex. "Partie II. Les
+  // formulaires de soumission...") sous laquelle cette pièce se trouve —
+  // calculé côté serveur par buildMasterDetectedItems (voir lib/submission/
+  // build-dossier-items.ts) ; sert uniquement à afficher un titre de
+  // section au-dessus du groupe de pièces correspondant, dans le MÊME ordre
+  // que le sommaire du DAO. null si le DAO n'a pas de grandes divisions ou
+  // si cette pièce n'a pas pu y être rattachée.
+  dossierSection?: string | null;
 };
 
 type DetectedItem = Omit<Item, "status" | "form_data">;
@@ -892,11 +900,108 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   // sans dépendre d'une liste préparée à l'avance pour ce DAO précis.
   const isAiGenerated = (item: Item) => item.kind === "form_to_complete" && item.fields.length === 0
     && !isPersonnelList(item) && !isMaterialList(item) && !isWorkerContract(item);
-  const generatedDocuments = items.filter(isAiGenerated);
   const bdqeItem = items.find(isBdqe);
   const bdqeIndex = bdqeItem ? items.indexOf(bdqeItem) : -1;
-  const documents = items.filter((item) => item.kind === "document_to_provide" && !isAiGenerated(item) && !isBdqe(item));
-  const forms = items.filter((item) => item.kind === "form_to_complete" && !isAiGenerated(item));
+  // Liste unique de toutes les pièces (documents et formulaires confondus),
+  // dans le MÊME ordre que le sommaire du DAO — le BDQE externe a sa propre
+  // section fixe juste au-dessus (voir "BDQE automatique" plus bas) car il
+  // dépend du devis enregistré, pas du sommaire du DAO. Remplace les 3
+  // anciens blocs séparés "Documents préparés"/"Documents à fournir"/
+  // "Formulaires" qui affichaient les pièces groupées par catégorie plutôt
+  // que dans l'ordre réel du DAO, empêchant d'afficher les titres de ses
+  // parties (voir renderDossierCard et hasDossierSections plus bas).
+  const dossierItems = items.filter((item) => !isBdqe(item));
+  const hasDossierSections = dossierItems.some((item) => item.dossierSection);
+
+  // Une seule fonction de rendu de carte, quel que soit le type de pièce
+  // (document déjà préparé par l'appli, document à joindre, ou formulaire à
+  // compléter) — reprend exactement le JSX qu'affichaient auparavant les 3
+  // blocs séparés "Documents préparés"/"Documents à fournir"/"Formulaires",
+  // pour que dossierItems puisse toutes les afficher dans une seule liste,
+  // triée dans l'ordre du DAO avec ses titres de partie (voir plus bas).
+  function renderDossierCard(item: Item) {
+    const index = items.indexOf(item);
+    if (isAiGenerated(item)) {
+      return <article key={`${item.kind}-${normalize(item.title)}-${index}`} className="rounded-lg border p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3"><strong>{item.title}</strong><span className={item.form_data.__attachmentPath ? "text-sm font-semibold text-green-700" : "text-sm text-amber-700"}>{item.form_data.__attachmentPath ? "Document signé joint" : "PDF disponible — à imprimer, faire signer/parapher puis joindre"}</span></div>
+        <p className="mt-2 text-sm">{item.instructions || "Document établi à partir des postes, quantités et du délai du DAO."}</p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Ouvrir le PDF" /></button>
+          {item.form_data.__attachmentPath ? <><button type="button" className="tenderButton" disabled={pendingAction === `view:${item.title}`} onClick={() => void viewFile(item)}><ButtonLabel loading={pendingAction === `view:${item.title}`} label="Ouvrir" /></button><button type="button" className="tenderButton" disabled={pendingAction === `remove:${index}`} onClick={() => void removeFile(index)}><ButtonLabel loading={pendingAction === `remove:${index}`} label="Supprimer" loadingLabel="Suppression…" /></button></> : <label className="tenderButton">{pendingAction === `upload:${index}` ? <ButtonLabel loading label="" loadingLabel="Envoi…" /> : "Choisir un fichier"}<input style={{ display: "none" }} type="file" disabled={pendingAction === `upload:${index}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) void insertFile(index, file); }} /></label>}
+        </div>
+        {item.source_reference && <p className="mt-2 text-xs text-gray-500">Source : {item.source_reference}</p>}
+      </article>;
+    }
+    if (item.kind === "document_to_provide") {
+      const readingOnly = isReadingOnly(item);
+      return <article key={`${item.kind}-${item.title}`} className="rounded-lg border p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3"><strong>{item.title}</strong><span className={readingOnly && item.form_data.__acknowledgedAt ? "text-sm font-semibold text-green-700" : item.form_data.__attachmentPath ? "text-sm font-semibold text-green-700" : "text-sm text-amber-700"}>{readingOnly ? (item.form_data.__acknowledgedAt ? "Lecture confirmée" : "Lecture à confirmer") : (item.form_data.__attachmentPath ? "Document joint" : "Document à insérer")}</span></div>
+        <p className="mt-2 text-sm">{item.instructions}</p>
+        <div className="mt-3 flex flex-wrap gap-2">{readingOnly && <><button type="button" className="tenderButton" disabled={!daoUrl || pendingAction === "read"} onClick={() => void openReadingDocument()}><ButtonLabel loading={pendingAction === "read"} label="Ouvrir le document à lire" /></button><button type="button" className={`tenderButton ${item.form_data.__acknowledgedAt ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => updateItem(index, { status: "ready", form_data: { ...item.form_data, __acknowledgedAt: new Date().toISOString() } })}>{item.form_data.__acknowledgedAt ? "Lecture confirmée" : "Prendre connaissance"}</button></>}{needsPrintableVersion(item) && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Ouvrir le document à imprimer" /></button>}{item.form_data.__attachmentPath ? <><button type="button" className="tenderButton" disabled={pendingAction === `view:${item.title}`} onClick={() => void viewFile(item)}><ButtonLabel loading={pendingAction === `view:${item.title}`} label="Ouvrir" /></button><button type="button" className="tenderButton" disabled={pendingAction === `remove:${index}`} onClick={() => void removeFile(index)}><ButtonLabel loading={pendingAction === `remove:${index}`} label="Supprimer" loadingLabel="Suppression…" /></button></> : <label className="tenderButton">{pendingAction === `upload:${index}` ? <ButtonLabel loading label="" loadingLabel="Envoi…" /> : "Choisir un fichier"}<input style={{ display: "none" }} type="file" disabled={pendingAction === `upload:${index}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) void insertFile(index, file); }} /></label>}</div>
+        {item.source_reference && <p className="mt-1 text-xs text-gray-500">Source : {item.source_reference}</p>}
+      </article>;
+    }
+    const personnel = isPersonnelList(item);
+    const material = isMaterialList(item) && !personnel;
+    const workerContract = isWorkerContract(item);
+    const personnelSource = items.find((candidate) => isPersonnelList(candidate));
+    const personnelRoster = personnelSource ? rosterFor(personnelSource, "__personnel") : [];
+    const rosterKey = personnel ? "__personnel" : material ? "__materiel" : "__workers";
+    const roster = personnel || material ? rosterFor(item, rosterKey) : workerContract ? personnelRoster : [];
+    const missingFields = (personnel || material || workerContract) ? [] : item.fields.filter((field) => !resolvedFieldValue(item, field).trim());
+    const formState = item.form_data.__attachmentPath ? "Document signé joint" : (personnel || material || workerContract) && !roster.length ? "Ajoutez au moins une ligne" : missingFields.length ? "Informations à compléter" : "Prêt à imprimer et signer";
+    return <article key={`${item.kind}-${item.title}`} className="rounded-lg border p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3"><strong>{workerContract ? "Contrat individuel de travail — un PDF par personnel" : item.title}</strong><span className={item.form_data.__attachmentPath || !missingFields.length ? "text-sm font-semibold text-green-700" : "text-sm font-semibold text-amber-700"}>{formState}</span></div>
+      <p className="mt-2 text-sm">{item.instructions}</p>
+      {!personnel && !material && !workerContract && item.fields.length > 0 && missingFields.length === 0 && <p className="mt-3 rounded-md bg-green-50 p-3 text-sm font-medium text-green-800">Les informations de ce formulaire sont déjà préremplies depuis le profil de l’entreprise.</p>}
+      {!personnel && !material && !workerContract && item.fields.map((field) => <label key={field.key} className="mt-3 grid gap-1 text-sm font-semibold">{field.label}{field.required ? " *" : ""}
+        <input value={resolvedFieldValue(item, field)} placeholder={field.description || "Information à compléter"} onChange={(event) => updateItem(index, { form_data: { ...item.form_data, [field.key]: event.target.value } })} />
+      </label>)}
+      {!personnel && !material && !workerContract && (item.template_tables ?? []).map((table, tableIndex) => {
+        if (!table.repeatable) return null;
+        const rows = tableRowsFor(item, tableIndex);
+        return <div key={tableIndex} className="mt-4 rounded-lg border bg-gray-50 p-3">
+          <strong>{table.title}</strong>
+          <p className="mt-1 text-xs text-gray-600">Le DAO ne montre qu’une ligne d’exemple : ajoutez-en autant que nécessaire.</p>
+          <div className="mt-2 grid gap-3">
+            {rows.map((row, rowIndex) => <div key={rowIndex} className="rounded-lg border bg-white p-3">
+              <div className="grid gap-2 md:grid-cols-2">
+                {table.columns.map((column, columnIndex) => <label key={columnIndex} className="grid gap-1 text-sm font-semibold">{column || `Colonne ${columnIndex + 1}`}
+                  <input value={row[String(columnIndex)] ?? ""} onChange={(event) => {
+                    const next = rows.map((current, currentIndex) => currentIndex === rowIndex ? { ...current, [String(columnIndex)]: event.target.value } : current);
+                    updateTableRows(index, tableIndex, next);
+                  }} />
+                </label>)}
+              </div>
+              <button type="button" className="tenderButton mt-2" onClick={() => updateTableRows(index, tableIndex, rows.filter((_, currentIndex) => currentIndex !== rowIndex))}>Retirer cette ligne</button>
+            </div>)}
+          </div>
+          <button type="button" className="tenderButton tenderButtonPrimary mt-2" onClick={() => updateTableRows(index, tableIndex, [...rows, {}])}>+ Ajouter une ligne</button>
+        </div>;
+      })}
+      {(personnel || material) && <div className="mt-3 grid gap-3">{roster.map((entry, rosterIndex) => <div key={rosterIndex} className="rounded-lg border bg-gray-50 p-3">
+        <div className="grid gap-2 md:grid-cols-2">
+          <label className="grid gap-1 text-sm font-semibold">{personnel ? "Nom et prénoms" : "Matériel / engin"}<input value={entry.name} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, name: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>
+          <label className="grid gap-1 text-sm font-semibold">{personnel ? "Poste sur chantier" : "Fonction / usage"}<input value={entry.role} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, role: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>
+          {personnel && <label className="grid gap-1 text-sm font-semibold">N° CIN / identité (pour le contrat)<input value={entry.identity ?? ""} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, identity: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>}
+          {personnel && <label className="grid gap-1 text-sm font-semibold">Adresse<input value={entry.address ?? ""} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, address: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>}
+          {personnel && <label className="grid gap-1 text-sm font-semibold">Rémunération / salaire<input value={entry.salary ?? ""} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, salary: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>}
+          {!personnel && <><label className="grid gap-1 text-sm font-semibold">État / capacité<input value={entry.qualification} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, qualification: event.target.value }; updateRoster(index, rosterKey, next); }} /></label><label className="grid gap-1 text-sm font-semibold">Quantité / disponibilité<input value={entry.experience} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, experience: event.target.value }; updateRoster(index, rosterKey, next); }} /></label></>}
+        </div>
+        {personnel && <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-white p-2">
+          <span className="text-sm font-semibold">CIN (photo ou PDF, recto/verso) :</span>
+          {entry.cinPath ? <><span className="text-sm font-semibold text-green-700">{entry.cinName || "Fichier joint"}</span><button type="button" className="tenderButton" disabled={pendingAction === `cin-remove:${index}:${rosterIndex}`} onClick={() => void removeCinFile(index, rosterIndex)}><ButtonLabel loading={pendingAction === `cin-remove:${index}:${rosterIndex}`} label="Supprimer" loadingLabel="Suppression…" /></button></> : <label className="tenderButton">{pendingAction === `cin:${index}:${rosterIndex}` ? <ButtonLabel loading label="" loadingLabel="Lecture…" /> : "Ajouter une photo ou un PDF"}<input style={{ display: "none" }} type="file" accept="image/*,application/pdf" disabled={pendingAction === `cin:${index}:${rosterIndex}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) void insertCinFile(index, rosterIndex, file); }} /></label>}
+          <span className="text-xs text-gray-600">L’IA lit automatiquement le nom, le n° CIN et l’adresse dès l’ajout ; le fichier reste joint et sera imprimé à la fin du contrat de cette personne.</span>
+        </div>}
+        <button type="button" className="tenderButton mt-2" onClick={() => updateRoster(index, rosterKey, roster.filter((_, currentIndex) => currentIndex !== rosterIndex))}>Retirer cette ligne</button>
+      </div>)}<button type="button" className="tenderButton tenderButtonPrimary" onClick={() => updateRoster(index, rosterKey, [...roster, { name: "", role: "", qualification: "", experience: "", identity: "", address: "", salary: "" }])}>+ Ajouter {personnel ? "un personnel" : "un matériel"}</button></div>}
+      {workerContract && <div className="mt-3 grid gap-3">{!personnelRoster.length && <p className="text-sm text-amber-700">Ajoutez d’abord le personnel affecté au chantier dans la liste ci-dessus.</p>}{personnelRoster.map((worker, workerIndex) => <div key={workerIndex} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-gray-50 p-3"><span><strong>{worker.name || "Personnel sans nom"}</strong>{worker.role ? ` — ${worker.role}` : ""}</span><button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `pdf:${item.title}:${workerIndex}`} onClick={() => openWorkerContract(item, workerIndex)}><ButtonLabel loading={pendingAction === `pdf:${item.title}:${workerIndex}`} label="Ouvrir le contrat PDF" /></button></div>)}</div>}
+      <div className="mt-3 flex flex-wrap gap-2">{(needsPrintableVersion(item) || personnel || material) && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Ouvrir le PDF à imprimer" /></button>}{item.form_data.__attachmentPath ? <><button type="button" className="tenderButton" disabled={pendingAction === `view:${item.title}`} onClick={() => void viewFile(item)}><ButtonLabel loading={pendingAction === `view:${item.title}`} label="Ouvrir" /></button><button type="button" className="tenderButton" disabled={pendingAction === `remove:${index}`} onClick={() => void removeFile(index)}><ButtonLabel loading={pendingAction === `remove:${index}`} label="Supprimer" loadingLabel="Suppression…" /></button></> : <label className="tenderButton">{pendingAction === `upload:${index}` ? <ButtonLabel loading label="" loadingLabel="Envoi…" /> : "Choisir un fichier"}<input style={{ display: "none" }} type="file" disabled={pendingAction === `upload:${index}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) void insertFile(index, file); }} /></label>}</div>
+      {!item.fields.length && <p className="mt-3 text-sm text-amber-700">Aucune valeur n’a été identifiée à préremplir. Le PDF à imprimer reprend néanmoins le document demandé et doit être vérifié avant signature.</p>}
+      {item.source_reference && <p className="mt-2 text-xs text-gray-500">Source : {item.source_reference}</p>}
+    </article>;
+  }
+
   const incompleteItems = items.filter((item) => {
     if (isAiGenerated(item)) return false;
     if (isPersonnelList(item) && !rosterFor(item, "__personnel").length) return true;
@@ -1011,19 +1116,6 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       </div>
     </section>
 
-    {generatedDocuments.length > 0 && <section className="mb-6 rounded-xl border bg-white p-5"><h2 className="text-xl font-bold">Documents préparés</h2><p className="mt-1 text-sm text-gray-600">Ils restent dans la liste du dossier comme les autres documents et sont disponibles pour vérification avant impression ou signature.</p><div className="mt-3 grid gap-3">{generatedDocuments.map((item, position) => {
-  const realIndex = items.indexOf(item);
-  return <article key={`${item.kind}-${normalize(item.title)}-${position}`} className="rounded-lg border p-4">
-    <div className="flex flex-wrap items-center justify-between gap-3"><strong>{item.title}</strong><span className={item.form_data.__attachmentPath ? "text-sm font-semibold text-green-700" : "text-sm text-amber-700"}>{item.form_data.__attachmentPath ? "Document signé joint" : "PDF disponible — à imprimer, faire signer/parapher puis joindre"}</span></div>
-    <p className="mt-2 text-sm">{item.instructions || "Document établi à partir des postes, quantités et du délai du DAO."}</p>
-    <div className="mt-3 flex flex-wrap gap-2">
-      <button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Ouvrir le PDF" /></button>
-      {item.form_data.__attachmentPath ? <><button type="button" className="tenderButton" disabled={pendingAction === `view:${item.title}`} onClick={() => void viewFile(item)}><ButtonLabel loading={pendingAction === `view:${item.title}`} label="Ouvrir" /></button><button type="button" className="tenderButton" disabled={pendingAction === `remove:${realIndex}`} onClick={() => void removeFile(realIndex)}><ButtonLabel loading={pendingAction === `remove:${realIndex}`} label="Supprimer" loadingLabel="Suppression…" /></button></> : <label className="tenderButton">{pendingAction === `upload:${realIndex}` ? <ButtonLabel loading label="" loadingLabel="Envoi…" /> : "Choisir un fichier"}<input style={{ display: "none" }} type="file" disabled={pendingAction === `upload:${realIndex}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) void insertFile(realIndex, file); }} /></label>}
-    </div>
-    {item.source_reference && <p className="mt-2 text-xs text-gray-500">Source : {item.source_reference}</p>}
-  </article>;
-})}</div></section>}
-
     <section className="mb-6 rounded-xl border bg-white p-5">
       <h2 className="text-xl font-bold">BDQE automatique</h2>
       <p className="mt-1 text-sm text-gray-600">Le BDQE externe provient du devis enregistré pour ce DAO, avec ses récapitulatifs. Imprimez-le, faites signer et parapher les pages demandées, puis joignez la version signée.</p>
@@ -1034,90 +1126,25 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       </div>
     </section>
 
-    <section className="mb-6 rounded-xl border bg-white p-5">
-      <h2 className="text-xl font-bold">Documents à fournir ({documents.length})</h2>
-      {!documents.length && <p className="mt-3 text-gray-600">Aucune pièce distincte n’a été explicitement détectée. Contrôlez tout de même les annexes du DAO.</p>}
-      <div className="mt-3 grid gap-3">
-        {documents.map((item) => {
-          const index = items.indexOf(item);
-          const officialBdqe = isBdqe(item) ? linkedDocuments.find((document) => document.url) : null;
-          const readingOnly = isReadingOnly(item);
-          return <article key={`${item.kind}-${item.title}`} className="rounded-lg border p-4">
-            <div className="flex flex-wrap items-center justify-between gap-3"><strong>{item.title}</strong><span className={readingOnly && item.form_data.__acknowledgedAt ? "text-sm font-semibold text-green-700" : item.form_data.__attachmentPath ? "text-sm font-semibold text-green-700" : "text-sm text-amber-700"}>{readingOnly ? (item.form_data.__acknowledgedAt ? "Lecture confirmée" : "Lecture à confirmer") : (item.form_data.__attachmentPath ? "Document joint" : "Document à insérer")}</span></div>
-            <p className="mt-2 text-sm">{isBdqe(item) ? "Le devis complété sert de BDQE. Imprimez-le, faites signer et parapher les pages demandées, puis joignez la version signée." : item.instructions}</p>
-            <div className="mt-3 flex flex-wrap gap-2">{readingOnly && <><button type="button" className="tenderButton" disabled={!daoUrl || pendingAction === "read"} onClick={() => void openReadingDocument()}><ButtonLabel loading={pendingAction === "read"} label="Ouvrir le document à lire" /></button><button type="button" className={`tenderButton ${item.form_data.__acknowledgedAt ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => updateItem(index, { status: "ready", form_data: { ...item.form_data, __acknowledgedAt: new Date().toISOString() } })}>{item.form_data.__acknowledgedAt ? "Lecture confirmée" : "Prendre connaissance"}</button></>}{officialBdqe?.url && <button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `bdqe:${officialBdqe.estimateId}`} onClick={() => void openOfficialBdqe(officialBdqe.estimateId)}><ButtonLabel loading={pendingAction === `bdqe:${officialBdqe.estimateId}`} label="Ouvrir le BDQE externe à imprimer" /></button>}{isBdqe(item) && !officialBdqe?.url && <span className="text-sm text-amber-700">Enregistrez d’abord le PDF externe du devis pour l’imprimer.</span>}{needsPrintableVersion(item) && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Ouvrir le document à imprimer" /></button>}{item.form_data.__attachmentPath ? <><button type="button" className="tenderButton" disabled={pendingAction === `view:${item.title}`} onClick={() => void viewFile(item)}><ButtonLabel loading={pendingAction === `view:${item.title}`} label="Ouvrir" /></button><button type="button" className="tenderButton" disabled={pendingAction === `remove:${index}`} onClick={() => void removeFile(index)}><ButtonLabel loading={pendingAction === `remove:${index}`} label="Supprimer" loadingLabel="Suppression…" /></button></> : <label className="tenderButton">{pendingAction === `upload:${index}` ? <ButtonLabel loading label="" loadingLabel="Envoi…" /> : (isBdqe(item) ? "Joindre le BDQE externe signé" : "Choisir un fichier")}<input style={{ display: "none" }} type="file" disabled={pendingAction === `upload:${index}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) void insertFile(index, file); }} /></label>}</div>
-            {item.source_reference && <p className="mt-1 text-xs text-gray-500">Source : {item.source_reference}</p>}
-          </article>;
-        })}
-      </div>
-    </section>
-
     <section className="rounded-xl border bg-white p-5">
-      <h2 className="text-xl font-bold">Formulaires et déclarations à compléter ({forms.length})</h2>
-      {!forms.length && <p className="mt-3 text-gray-600">Aucun formulaire distinct n’a été identifié dans ce DAO.</p>}
-      <div className="mt-3 grid gap-4">
-        {forms.map((item) => {
-          const index = items.indexOf(item);
-          const personnel = isPersonnelList(item);
-          const material = isMaterialList(item) && !personnel;
-          const workerContract = isWorkerContract(item);
-          const personnelSource = items.find((candidate) => isPersonnelList(candidate));
-          const personnelRoster = personnelSource ? rosterFor(personnelSource, "__personnel") : [];
-          const rosterKey = personnel ? "__personnel" : material ? "__materiel" : "__workers";
-          const roster = personnel || material ? rosterFor(item, rosterKey) : workerContract ? personnelRoster : [];
-          const missingFields = (personnel || material || workerContract) ? [] : item.fields.filter((field) => !resolvedFieldValue(item, field).trim());
-          const formState = item.form_data.__attachmentPath ? "Document signé joint" : (personnel || material || workerContract) && !roster.length ? "Ajoutez au moins une ligne" : missingFields.length ? "Informations à compléter" : "Prêt à imprimer et signer";
-          return <article key={`${item.kind}-${item.title}`} className="rounded-lg border p-4">
-            <div className="flex flex-wrap items-center justify-between gap-3"><strong>{workerContract ? "Contrat individuel de travail — un PDF par personnel" : item.title}</strong><span className={item.form_data.__attachmentPath || !missingFields.length ? "text-sm font-semibold text-green-700" : "text-sm font-semibold text-amber-700"}>{formState}</span></div>
-            <p className="mt-2 text-sm">{item.instructions}</p>
-            {!personnel && !material && !workerContract && item.fields.length > 0 && missingFields.length === 0 && <p className="mt-3 rounded-md bg-green-50 p-3 text-sm font-medium text-green-800">Les informations de ce formulaire sont déjà préremplies depuis le profil de l’entreprise.</p>}
-            {!personnel && !material && !workerContract && item.fields.map((field) => <label key={field.key} className="mt-3 grid gap-1 text-sm font-semibold">{field.label}{field.required ? " *" : ""}
-              <input value={resolvedFieldValue(item, field)} placeholder={field.description || "Information à compléter"} onChange={(event) => updateItem(index, { form_data: { ...item.form_data, [field.key]: event.target.value } })} />
-            </label>)}
-            {!personnel && !material && !workerContract && (item.template_tables ?? []).map((table, tableIndex) => {
-              if (!table.repeatable) return null;
-              const rows = tableRowsFor(item, tableIndex);
-              return <div key={tableIndex} className="mt-4 rounded-lg border bg-gray-50 p-3">
-                <strong>{table.title}</strong>
-                <p className="mt-1 text-xs text-gray-600">Le DAO ne montre qu’une ligne d’exemple : ajoutez-en autant que nécessaire.</p>
-                <div className="mt-2 grid gap-3">
-                  {rows.map((row, rowIndex) => <div key={rowIndex} className="rounded-lg border bg-white p-3">
-                    <div className="grid gap-2 md:grid-cols-2">
-                      {table.columns.map((column, columnIndex) => <label key={columnIndex} className="grid gap-1 text-sm font-semibold">{column || `Colonne ${columnIndex + 1}`}
-                        <input value={row[String(columnIndex)] ?? ""} onChange={(event) => {
-                          const next = rows.map((current, currentIndex) => currentIndex === rowIndex ? { ...current, [String(columnIndex)]: event.target.value } : current);
-                          updateTableRows(index, tableIndex, next);
-                        }} />
-                      </label>)}
-                    </div>
-                    <button type="button" className="tenderButton mt-2" onClick={() => updateTableRows(index, tableIndex, rows.filter((_, currentIndex) => currentIndex !== rowIndex))}>Retirer cette ligne</button>
-                  </div>)}
-                </div>
-                <button type="button" className="tenderButton tenderButtonPrimary mt-2" onClick={() => updateTableRows(index, tableIndex, [...rows, {}])}>+ Ajouter une ligne</button>
-              </div>;
-            })}
-            {(personnel || material) && <div className="mt-3 grid gap-3">{roster.map((entry, rosterIndex) => <div key={rosterIndex} className="rounded-lg border bg-gray-50 p-3">
-              <div className="grid gap-2 md:grid-cols-2">
-                <label className="grid gap-1 text-sm font-semibold">{personnel ? "Nom et prénoms" : "Matériel / engin"}<input value={entry.name} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, name: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>
-                <label className="grid gap-1 text-sm font-semibold">{personnel ? "Poste sur chantier" : "Fonction / usage"}<input value={entry.role} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, role: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>
-                {personnel && <label className="grid gap-1 text-sm font-semibold">N° CIN / identité (pour le contrat)<input value={entry.identity ?? ""} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, identity: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>}
-                {personnel && <label className="grid gap-1 text-sm font-semibold">Adresse<input value={entry.address ?? ""} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, address: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>}
-                {personnel && <label className="grid gap-1 text-sm font-semibold">Rémunération / salaire<input value={entry.salary ?? ""} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, salary: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>}
-                {!personnel && <><label className="grid gap-1 text-sm font-semibold">État / capacité<input value={entry.qualification} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, qualification: event.target.value }; updateRoster(index, rosterKey, next); }} /></label><label className="grid gap-1 text-sm font-semibold">Quantité / disponibilité<input value={entry.experience} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, experience: event.target.value }; updateRoster(index, rosterKey, next); }} /></label></>}
-              </div>
-              {personnel && <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-white p-2">
-                <span className="text-sm font-semibold">CIN (photo ou PDF, recto/verso) :</span>
-                {entry.cinPath ? <><span className="text-sm font-semibold text-green-700">{entry.cinName || "Fichier joint"}</span><button type="button" className="tenderButton" disabled={pendingAction === `cin-remove:${index}:${rosterIndex}`} onClick={() => void removeCinFile(index, rosterIndex)}><ButtonLabel loading={pendingAction === `cin-remove:${index}:${rosterIndex}`} label="Supprimer" loadingLabel="Suppression…" /></button></> : <label className="tenderButton">{pendingAction === `cin:${index}:${rosterIndex}` ? <ButtonLabel loading label="" loadingLabel="Lecture…" /> : "Ajouter une photo ou un PDF"}<input style={{ display: "none" }} type="file" accept="image/*,application/pdf" disabled={pendingAction === `cin:${index}:${rosterIndex}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) void insertCinFile(index, rosterIndex, file); }} /></label>}
-                <span className="text-xs text-gray-600">L’IA lit automatiquement le nom, le n° CIN et l’adresse dès l’ajout ; le fichier reste joint et sera imprimé à la fin du contrat de cette personne.</span>
-              </div>}
-              <button type="button" className="tenderButton mt-2" onClick={() => updateRoster(index, rosterKey, roster.filter((_, currentIndex) => currentIndex !== rosterIndex))}>Retirer cette ligne</button>
-            </div>)}<button type="button" className="tenderButton tenderButtonPrimary" onClick={() => updateRoster(index, rosterKey, [...roster, { name: "", role: "", qualification: "", experience: "", identity: "", address: "", salary: "" }])}>+ Ajouter {personnel ? "un personnel" : "un matériel"}</button></div>}
-            {workerContract && <div className="mt-3 grid gap-3">{!personnelRoster.length && <p className="text-sm text-amber-700">Ajoutez d’abord le personnel affecté au chantier dans la liste ci-dessus.</p>}{personnelRoster.map((worker, workerIndex) => <div key={workerIndex} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-gray-50 p-3"><span><strong>{worker.name || "Personnel sans nom"}</strong>{worker.role ? ` — ${worker.role}` : ""}</span><button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `pdf:${item.title}:${workerIndex}`} onClick={() => openWorkerContract(item, workerIndex)}><ButtonLabel loading={pendingAction === `pdf:${item.title}:${workerIndex}`} label="Ouvrir le contrat PDF" /></button></div>)}</div>}
-            <div className="mt-3 flex flex-wrap gap-2">{(needsPrintableVersion(item) || personnel || material) && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Ouvrir le PDF à imprimer" /></button>}{item.form_data.__attachmentPath ? <><button type="button" className="tenderButton" disabled={pendingAction === `view:${item.title}`} onClick={() => void viewFile(item)}><ButtonLabel loading={pendingAction === `view:${item.title}`} label="Ouvrir" /></button><button type="button" className="tenderButton" disabled={pendingAction === `remove:${index}`} onClick={() => void removeFile(index)}><ButtonLabel loading={pendingAction === `remove:${index}`} label="Supprimer" loadingLabel="Suppression…" /></button></> : <label className="tenderButton">{pendingAction === `upload:${index}` ? <ButtonLabel loading label="" loadingLabel="Envoi…" /> : "Choisir un fichier"}<input style={{ display: "none" }} type="file" disabled={pendingAction === `upload:${index}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) void insertFile(index, file); }} /></label>}</div>
-            {!item.fields.length && <p className="mt-3 text-sm text-amber-700">Aucune valeur n’a été identifiée à préremplir. Le PDF à imprimer reprend néanmoins le document demandé et doit être vérifié avant signature.</p>}
-            {item.source_reference && <p className="mt-2 text-xs text-gray-500">Source : {item.source_reference}</p>}
-          </article>;
-        })}
+      <h2 className="text-xl font-bold">Pièces du dossier ({dossierItems.length})</h2>
+      <p className="mt-1 text-sm text-gray-600">Dans l’ordre exact du sommaire du DAO{hasDossierSections ? ", avec les titres de ses parties" : ""}. Vérifiez chaque pièce une par une en suivant ce même ordre dans le DAO.</p>
+      {!dossierItems.length && <p className="mt-3 text-gray-600">Aucune pièce distincte n’a été explicitement détectée. Contrôlez tout de même les annexes du DAO.</p>}
+      <div className="mt-3 grid gap-3">
+        {(() => {
+          if (!hasDossierSections) return dossierItems.map((item) => renderDossierCard(item));
+          let previousSection: string | null | undefined;
+          return dossierItems.flatMap((item, position) => {
+            const currentSection = item.dossierSection ?? null;
+            const nodes: JSX.Element[] = [];
+            if (currentSection !== previousSection) {
+              previousSection = currentSection;
+              nodes.push(<h3 key={`section-${position}`} className="mt-4 mb-1 border-b pb-1 text-base font-bold text-emerald-900 first:mt-0">{currentSection ?? "Autres pièces (position non repérée dans le sommaire du DAO)"}</h3>);
+            }
+            nodes.push(renderDossierCard(item));
+            return nodes;
+          });
+        })()}
       </div>
     </section>
   </main>

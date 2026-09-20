@@ -34,9 +34,23 @@ export type TemplateDetectedItem = DetectedItem & {
   // le rendu PDF réels restent construits côté serveur à partir de ces
   // mêmes lignes.
   template_tables?: TemplateTable[];
+  // Titre de la grande division du sommaire du DAO (ex. "Partie II. Les
+  // formulaires de soumission comprenant :") sous laquelle cette pièce se
+  // trouve — calculé par buildMasterDetectedItems à partir des lignes
+  // level=0 de submission_checklist (voir plus bas), uniquement pour
+  // afficher un titre de section dans le dossier ; null si le sommaire du
+  // DAO n'a pas de grandes divisions ou si cette pièce n'a pas pu y être
+  // rattachée.
+  dossierSection?: string | null;
 };
 
-export type ChecklistEntry = { title: string; sequence: number; source_reference?: string };
+// Une ligne level=0 est une grande division du sommaire (ex. "Partie I",
+// "Partie II"...) qui sert de titre de section dans le dossier affiché ;
+// une ligne level=1 est une pièce ou sous-annexe listée sous cette division.
+// Un ancien résultat d'analyse enregistré avant l'ajout de ce champ n'a pas
+// de level : il est alors traité comme une ligne ordinaire (level=1), donc
+// sans titre de section affiché — comportement identique à avant.
+export type ChecklistEntry = { title: string; sequence: number; source_reference?: string; level?: number };
 
 export type MasterAnalysis = {
   submission_items?: DetectedItem[];
@@ -103,9 +117,15 @@ export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDete
   // est imprimable). Une pièce sans aucune page connue reste tout à la fin,
   // dans son ordre d'origine, pour rester visible sans fausser le contrôle.
   const checklist = Array.isArray(analysis?.submission_checklist) ? analysis.submission_checklist : [];
+  // Seules les lignes level=1 (pièces réelles) servent à rapprocher un titre
+  // détecté de sa place dans le sommaire ; une ligne level=0 (titre de
+  // grande division, ex. "Partie II. Les formulaires de soumission...") ne
+  // désigne aucune pièce précise et ne doit jamais être proposée comme
+  // correspondance de titre.
+  const orderableChecklist = checklist.filter((entry) => entry.level !== 0);
   const checklistSequence = (item: DetectedItem) => {
-    if (!checklist.length) return null;
-    const match = findBestTitleMatch(item.title, checklist);
+    if (!orderableChecklist.length) return null;
+    const match = findBestTitleMatch(item.title, orderableChecklist);
     return match ? match.sequence : null;
   };
   const firstKnownPage = (item: TemplateDetectedItem) => {
@@ -115,6 +135,24 @@ export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDete
     const known = [fromTemplate, fromReference].filter((page): page is number => typeof page === "number");
     return known.length ? Math.min(...known) : Number.POSITIVE_INFINITY;
   };
+  // Titres des grandes divisions (level=0), triés par ordre d'apparition
+  // dans le sommaire, pour retrouver sous quelle division se trouve une
+  // séquence donnée : la dernière division dont le numéro précède ou égale
+  // cette séquence. Sert uniquement à afficher un titre de section dans le
+  // dossier (voir SubmissionDossierManager.tsx) ; n'affecte jamais l'ordre
+  // ni le contenu des pièces.
+  const sectionHeaders = checklist
+    .filter((entry) => entry.level === 0)
+    .slice()
+    .sort((a, b) => a.sequence - b.sequence);
+  const sectionTitleForSequence = (sequence: number): string | null => {
+    if (!sectionHeaders.length || sequence === Number.POSITIVE_INFINITY) return null;
+    let current: string | null = null;
+    for (const header of sectionHeaders) {
+      if (header.sequence <= sequence) current = header.title; else break;
+    }
+    return current;
+  };
   return [...genericItemsWithoutRealMatch, ...aiItems]
     .map((item, index) => ({
       item,
@@ -123,7 +161,7 @@ export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDete
       page: firstKnownPage(item as TemplateDetectedItem),
     }))
     .sort((a, b) => (a.sequence !== b.sequence ? a.sequence - b.sequence : a.page !== b.page ? a.page - b.page : a.index - b.index))
-    .map((entry) => entry.item);
+    .map((entry) => ({ ...entry.item, dossierSection: sectionTitleForSequence(entry.sequence) }));
 }
 
 // Reproduit exactement deduplicate() de SubmissionDossierManager.tsx : ajoute

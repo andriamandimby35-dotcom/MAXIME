@@ -46,7 +46,7 @@ export default async function SubmissionPage({ params, searchParams }: { params:
     }
   }
 
-  type TenderAnalysis = { submission_items?: DetectedItem[]; submission_checklist?: Array<{ title: string; sequence: number; source_reference?: string }>; worksite_location?: string; execution_period_days?: number | null };
+  type TenderAnalysis = { submission_items?: DetectedItem[]; submission_checklist?: Array<{ title: string; sequence: number; source_reference?: string; level?: number }>; worksite_location?: string; execution_period_days?: number | null };
   let analysis: TenderAnalysis | null = null;
   try {
     analysis = typeof tender.ai_analysis === "string"
