@@ -17,8 +17,11 @@ export const revalidate = 0;
 // d'exécution par défaut (surtout au premier appel après une période
 // d'inactivité, un "cold start") et Vercel renvoie alors sa propre page
 // d'erreur générique au lieu d'un vrai message — vu à l'écran sur téléphone
-// pour un document nécessitant les pages du DAO.
-export const maxDuration = 60;
+// pour un document nécessitant les pages du DAO. 60s s'est révélé encore
+// trop court (le tableau des ressources Vercel confirme que le forfait
+// autorise jusqu'à 300s, comme les autres routes de l'appli, ex.
+// /api/analyze-dao) : alignée sur cette même limite de 300s.
+export const maxDuration = 300;
 
 // L'IA peut se tromper sur les pages d'une pièce sourcée du DAO (une page
 // réellement dédiée à un AUTRE document — personnel, matériel, un autre
