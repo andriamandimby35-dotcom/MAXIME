@@ -8,6 +8,7 @@
 // centralise ici pour que les deux endroits produisent exactement la même
 // liste de pièces.
 import { findBestTitleMatch } from "@/lib/submission/title-match";
+import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
 
 export type Field = { key: string; label: string; required: boolean; description: string };
 
@@ -68,15 +69,31 @@ export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDete
   // DAO — voir son propre sommaire, ex. "Article 6 - Dossier d'Appel
   // d'Offres") est bien plus simple quand l'application affiche les pièces
   // EXACTEMENT dans l'ordre où le DAO les liste lui-même, plutôt que
-  // regroupées par catégorie. Chaque pièce détectée dans ce DAO précis porte
-  // déjà sa première page réelle (template_page_numbers, voir le prompt
-  // d'analyse) : trier par cette page reproduit donc automatiquement l'ordre
-  // du DAO, quel que soit le DAO. Une pièce dont la page n'est pas connue
-  // (générique non confirmée dans ce DAO précis, ou pièce sans page — ex.
-  // BDQE externe ajouté par l'application) reste à la fin de la liste, dans
-  // son ordre d'origine, pour rester visible mais ne pas fausser le contrôle.
+  // regroupées par catégorie. template_page_numbers n'est renseigné que
+  // pour les pièces avec un vrai modèle imprimable (template_origin=dao,
+  // voir le prompt d'analyse) : une pièce purement informative (ex. une
+  // clause à lire et signer, sans page de modèle dédiée) peut donc rester
+  // sans template_page_numbers alors que le DAO la situe bien à une page
+  // précise. source_reference, lui, est renseigné pour CHAQUE pièce
+  // ("la page, l'annexe ou l'article source") : on relit ce texte avec le
+  // même analyseur que le reste de l'application (parsePageNumbersFromReference,
+  // déjà utilisé pour savoir si un PDF est imprimable) pour retrouver cette
+  // page quand template_page_numbers est vide. En prenant la plus petite
+  // des deux pages connues, on trie par la position la plus fidèle possible
+  // à ce que le DAO indique lui-même, quel que soit le DAO. Une pièce dont
+  // aucune des deux pages n'est connue (générique non confirmée dans ce DAO
+  // précis, ou pièce sans page — ex. BDQE externe ajouté par l'application)
+  // reste à la fin de la liste, dans son ordre d'origine, pour rester
+  // visible sans fausser le contrôle.
+  const firstKnownPage = (item: TemplateDetectedItem) => {
+    const templatePages = item.template_page_numbers;
+    const fromTemplate = Array.isArray(templatePages) && templatePages.length ? templatePages[0] : undefined;
+    const fromReference = parsePageNumbersFromReference(item.source_reference)[0];
+    const known = [fromTemplate, fromReference].filter((page): page is number => typeof page === "number");
+    return known.length ? Math.min(...known) : Number.POSITIVE_INFINITY;
+  };
   return [...genericItemsWithoutRealMatch, ...aiItems]
-    .map((item, index) => ({ item, index, page: (item as TemplateDetectedItem).template_page_numbers?.[0] ?? Number.POSITIVE_INFINITY }))
+    .map((item, index) => ({ item, index, page: firstKnownPage(item as TemplateDetectedItem) }))
     .sort((a, b) => (a.page !== b.page ? a.page - b.page : a.index - b.index))
     .map((entry) => entry.item);
 }
