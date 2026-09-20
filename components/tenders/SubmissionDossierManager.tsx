@@ -923,7 +923,12 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
           : <div className="flex flex-wrap items-center justify-between gap-3"><strong>{item.title}</strong>{readyButton}</div>}
         <p className="mt-2 text-sm">{item.instructions}</p>
         {(readingOnly || printable) && <div className="mt-3 flex flex-wrap gap-2">
-          {readingOnly && <button type="button" className="tenderButton" disabled={!daoUrl || pendingAction === "read"} onClick={() => void openReadingDocument()}><ButtonLabel loading={pendingAction === "read"} label="Ouvrir le document à lire" /></button>}
+          {/* Quand la pièce a de vraies pages DAO connues (printable), le
+              bouton "à imprimer" extrait déjà exactement ce texte : proposer
+              en plus "à lire" n'ouvrirait alors que le DAO entier depuis le
+              début, sans aucun intérêt de plus. Ce bouton de lecture ne sert
+              donc que de repli quand on n'a AUCUNE page précise repérée. */}
+          {readingOnly && !printable && <button type="button" className="tenderButton" disabled={!daoUrl || pendingAction === "read"} onClick={() => void openReadingDocument()}><ButtonLabel loading={pendingAction === "read"} label="Ouvrir le document à lire" /></button>}
           {printable && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Ouvrir le document à imprimer" /></button>}
           {readingOnly
             ? <button type="button" className={`tenderButton ${ready ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => toggleAcknowledged(index)}>{ready ? "Lecture confirmée ✓ (annuler)" : "Prendre connaissance"}</button>
