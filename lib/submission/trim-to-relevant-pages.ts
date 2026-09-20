@@ -10,20 +10,19 @@ import { significantWords } from "@/lib/submission/title-match";
 // "A1 à A5"). Logique générale (valable pour toute pièce, pas seulement CCAP
 // ou les plans) : on part de la page qui nomme vraiment le sujet dans son
 // propre titre, puis on avance — même au-delà des pages initialement
-// données — tant qu'aucun NOUVEAU titre ne prend le relais. Un titre est
-// presque toujours en majuscules dans ce genre de DAO, mais pas
-// systématiquement (constaté : "Annexe 2" / calendrier cultural d'un DAO
-// réel a un titre en casse normale) — on ne peut donc pas exiger la casse ;
-// le signal fiable est qu'une ligne de titre est courte et ne se termine
-// jamais comme une phrase (pas de ponctuation de fin).
+// données — tant qu'aucun NOUVEAU titre ne prend le relais.
 //
-// La "zone de titre" utilisée pour comparer les mots-clés ne prend que les
-// 2 premières lignes de la page (un titre peut être coupé sur deux lignes),
-// jamais tout le haut de la page : sinon un simple sommaire ("a. MODELES DE
-// FICHES DE RENSEIGNEMENTS...") glissé sous un AUTRE titre ("PARTIE II —
-// FORMULAIRES DE SOUMISSION") se faisait passer à tort pour le vrai début du
-// document "Fiches de renseignements..." — constaté sur un DAO réel.
-const HEADING_LINE_COUNT = 2;
+// UNE SEULE RÈGLE pour reconnaître un vrai titre de document (à la place de
+// plusieurs règles séparées essayées précédemment — Article/Partie/Annexe,
+// sous-numérotation, casse seule... — devenues difficiles à suivre même pour
+// vérifier le résultat) : sur les DAO observés, un vrai titre de document est
+// TOUJOURS écrit à la fois EN MAJUSCULES ET EN GRAS, jamais l'un sans
+// l'autre. Une ligne qui ne remplit pas les deux conditions à la fois (un
+// numéro d'article, un simple retour à la ligne en milieu de phrase, un
+// sommaire, une mention en passant...) ne compte jamais comme un changement
+// de document, quel que soit son aspect par ailleurs — elle reste toujours
+// une continuation du document en cours, quel que soit le nombre de pages.
+const HEADING_SCAN_RUN_COUNT = 8;
 
 function normalizeText(value: string) {
   return value
@@ -32,37 +31,48 @@ function normalizeText(value: string) {
     .toLocaleLowerCase("fr-FR");
 }
 
-/** Une ligne "titre" est courte et ne se termine pas comme une phrase — la
- * casse (majuscule ou non) n'est qu'une indication, jamais une condition.
- * Signal volontairement large : sert seulement à REPÉRER le début (une
- * recherche rare, déjà protégée par la comparaison de mots-clés ci-dessous),
- * jamais à décider un arrêt — un simple retour à la ligne au milieu d'une
- * phrase ("...tion sera faite des acomptes...") passerait aussi ce test. */
-function isUppercaseHeading(line: string) {
-  const trimmed = line.trim();
-  const letters = trimmed.replace(/[^A-Za-zÀ-ÿ]/g, "");
-  if (letters.length < 4 || trimmed.length > 100) return false;
-  return !/[.,;]\s*$/.test(trimmed);
-}
-
-/** Une ligne réellement en majuscules — signal fort, sans faux positif possible sur du texte courant. */
-function isStrictUppercaseHeading(line: string) {
-  const trimmed = line.trim();
-  const letters = trimmed.replace(/[^A-Za-zÀ-ÿ]/g, "");
+/** Une ligne réellement en majuscules — sans lettre minuscule, au moins 4 lettres. */
+function isFullUppercase(line: string) {
+  const letters = line.replace(/[^A-Za-zÀ-ÿ]/g, "");
   return letters.length >= 4 && letters === letters.toLocaleUpperCase("fr-FR") && letters !== letters.toLocaleLowerCase("fr-FR");
 }
 
-async function pageHeadingLine(doc: Awaited<ReturnType<typeof getDocument>["promise"]>, pageNumber: number) {
+// Le nom de police d'un texte en gras contient presque toujours "Bold" (ex.
+// "ABCDEF+Arial-BoldMT", "TimesNewRomanPS-BoldMT") — pdf.js expose ce nom via
+// styles[fontName].fontFamily. Signal fiable pour repérer un VRAI titre de
+// document sans deviner sur sa position ou sa formulation exacte.
+function looksBold(fontFamily: string | undefined) {
+  return Boolean(fontFamily && /bold/i.test(fontFamily));
+}
+
+type PageTitle = { titleLine: string | null; heading: string };
+
+// Cherche, dans les toutes premières lignes de la page, la première portion
+// de texte à la fois EN MAJUSCULES ET EN GRAS — le vrai titre de la page,
+// s'il y en a un — puis y rattache les portions suivantes qui remplissent
+// aussi ces deux conditions (un titre peut être coupé sur deux lignes).
+// Aucune ligne trouvée : la page n'a pas de titre propre, elle appartient
+// donc au document déjà en cours (voir isStopBoundary plus bas).
+async function pageHeadingLine(doc: Awaited<ReturnType<typeof getDocument>["promise"]>, pageNumber: number): Promise<PageTitle> {
   const page = await doc.getPage(pageNumber);
   const content = await page.getTextContent();
-  const lines = (content.items as Array<{ str?: string }>)
-    .map((item) => (item.str ?? "").trim())
-    .filter(Boolean);
+  const styles = (content.styles ?? {}) as Record<string, { fontFamily?: string }>;
+  type RawItem = { str?: string; fontName?: string };
+  const items = (content.items as RawItem[]).filter((item) => (item.str ?? "").trim());
   // La toute première ligne est souvent juste le numéro de page imprimé.
-  const withoutPageNumber = lines[0] && /^\d{1,4}$/.test(lines[0]) ? lines.slice(1) : lines;
-  const firstLine = withoutPageNumber[0] ?? "";
-  const headingZone = withoutPageNumber.slice(0, HEADING_LINE_COUNT).join(" ");
-  return { firstLine, isHeading: isUppercaseHeading(firstLine), heading: normalizeText(headingZone) };
+  const withoutPageNumber = items[0] && /^\d{1,4}$/.test((items[0].str ?? "").trim()) ? items.slice(1) : items;
+  const zone = withoutPageNumber.slice(0, HEADING_SCAN_RUN_COUNT);
+  const isTitleRun = (item: RawItem) => {
+    const text = (item.str ?? "").trim();
+    if (!text || !isFullUppercase(text)) return false;
+    return looksBold(item.fontName ? styles[item.fontName]?.fontFamily : undefined);
+  };
+  const startIndex = zone.findIndex(isTitleRun);
+  if (startIndex === -1) return { titleLine: null, heading: "" };
+  const runs = [zone[startIndex]];
+  for (let index = startIndex + 1; index < zone.length && isTitleRun(zone[index]); index += 1) runs.push(zone[index]);
+  const titleLine = runs.map((item) => (item.str ?? "").trim()).join(" ");
+  return { titleLine, heading: normalizeText(titleLine) };
 }
 
 export async function trimToRelevantStart(pdfBytes: Uint8Array, candidatePages: number[], title: string, claimedByOtherPages?: Set<number>): Promise<number[]> {
@@ -128,40 +138,29 @@ function matchesTitle(heading: string, keywords: string[]) {
   return matched / keywords.length >= MIN_KEYWORD_MATCH_RATIO;
 }
 
-// Un CCAP (et les documents contractuels similaires) s'organise en Articles
-// et clauses numérotées (Article 4, 5.6, 6.3.1...) qui appartiennent tous au
-// MÊME chapitre : chacune ressemble à "un nouveau titre différent" alors que
-// ce n'est qu'une sous-partie du même document, jamais un signal d'arrêt. Un
-// VRAI changement de document est marqué par un repère de niveau supérieur
-// (PARTIE, ANNEXE, CHAPITRE, ou une nouvelle lettre de chapitre A-/B-/C-...).
-function isSubsectionContinuation(line: string) {
-  return /^(article\s*\d|\d+(?:\.\d+){0,3}\s*[-–.])/i.test(line.trim());
-}
-function isNewChapterMarker(line: string) {
-  const trimmed = line.trim();
-  return /^(partie|annexe|chapitre)\b/i.test(trimmed) || /^[a-z][-–.]\s/i.test(trimmed);
-}
-
 // Une page suivante marque-t-elle un VRAI changement de document (donc la
 // fin de la pièce en cours) ? Partagé entre l'extension DANS candidatePages
 // et l'extension AU-DELÀ (voir extractRelevantPageRange), pour appliquer
-// exactement la même règle dans les deux cas : un article/une clause
-// numéroté(e) ne compte jamais comme un arrêt, seul un vrai nouveau titre
-// (différent du sujet recherché) en compte un.
-function isStopBoundary(firstLine: string, heading: string, referenceHeading: string, keywords: string[]) {
-  const isBoundaryCandidate = isStrictUppercaseHeading(firstLine) || isSubsectionContinuation(firstLine) || isNewChapterMarker(firstLine);
-  if (!isBoundaryCandidate || heading === referenceHeading || matchesTitle(heading, keywords)) return false;
-  return isNewChapterMarker(firstLine) || !isSubsectionContinuation(firstLine);
+// exactement la même règle unique dans les deux cas : pas de titre (en
+// majuscules ET en gras) sur cette page = jamais un arrêt, quel que soit son
+// aspect par ailleurs (numéro d'article, saut de page...) ; un vrai titre
+// trouvé ne compte comme arrêt que s'il ne correspond pas au sujet en cours.
+function isStopBoundary(titleLine: string | null, heading: string, referenceHeading: string, keywords: string[]) {
+  if (!titleLine) return false;
+  if (heading === referenceHeading) return false; // Même titre répété (ex. en-tête courant) : pas un nouveau document.
+  return !matchesTitle(heading, keywords);
 }
 
 // Une fois la pièce trouvée, elle continue tant qu'aucun nouveau titre ne
 // prend le relais — MÊME au-delà des pages initialement données par l'IA ou
 // par le sommaire du DAO (celles-ci ne couvrent pas toujours tout le
 // document réel, ex. un formulaire "A1 à A5" dont l'IA n'a cité que la
-// première page). On plafonne cette extension pour éviter un balayage
-// interminable en cas de document illisible, et on s'arrête net dès qu'une
-// page est déjà revendiquée par une AUTRE pièce déjà identifiée dans ce DAO
-// (claimedByOtherPages), pour ne jamais avaler par erreur son contenu.
+// première page). MAX_EXTRA_PAGES_BEYOND_CANDIDATES n'est PAS une règle sur
+// ce qui compte comme le même document (un document peut légitimement faire
+// bien plus de pages) : c'est uniquement un filet de sécurité technique
+// contre un balayage interminable si un document est illisible de bout en
+// bout. On s'arrête aussi net dès qu'une page est déjà revendiquée par une
+// AUTRE pièce déjà identifiée dans ce DAO (claimedByOtherPages).
 const MAX_EXTRA_PAGES_BEYOND_CANDIDATES = 60;
 
 export async function extractRelevantPageRange(
@@ -204,8 +203,8 @@ export async function extractRelevantPageRange(
       const pageNumber = sorted[index];
       if (pageNumber < 1 || pageNumber > doc.numPages) continue;
       try {
-        const { heading, isHeading } = await pageHeadingLine(doc, pageNumber);
-        if (isHeading && matchesTitle(heading, keywords)) {
+        const { heading, titleLine } = await pageHeadingLine(doc, pageNumber);
+        if (titleLine && matchesTitle(heading, keywords)) {
           startIndex = index;
           referenceHeading = heading;
           break;
@@ -231,20 +230,23 @@ export async function extractRelevantPageRange(
       // laissé passer une page totalement étrangère au sujet (le Code de
       // Conduite, référencé par erreur par l'IA comme page de A3). On exige
       // donc ici un vrai mot-clé du sujet retrouvé sur CETTE page précise —
-      // l'absence de signal ne suffit plus, il faut un signal positif.
+      // l'absence de signal ne suffit plus, il faut un signal positif. Ce
+      // garde-fou est indépendant de la règle du titre ci-dessus : il ne
+      // concerne que les pages candidates données au départ, jamais
+      // l'extension naturelle page après page plus bas.
       const isIsolatedJump = pageNumber - previousPage > 1;
       try {
-        const { firstLine, heading, isHeading } = await pageHeadingLine(doc, pageNumber);
+        const { heading, titleLine } = await pageHeadingLine(doc, pageNumber);
         if (isIsolatedJump) {
           const fullPageHeading = normalizeText((await (await doc.getPage(pageNumber)).getTextContent()).items.map((item) => ("str" in item ? item.str : "")).join(" ").slice(0, 400));
           if (!matchesTitle(fullPageHeading, keywords)) { previousPage = pageNumber; continue; }
-        } else if (isStopBoundary(firstLine, heading, referenceHeading, keywords)) {
+        } else if (isStopBoundary(titleLine, heading, referenceHeading, keywords)) {
           stoppedEarly = true;
-          break; // Nouveau titre différent : un autre document (ou chapitre) commence ici.
+          break; // Nouveau titre différent : un autre document commence ici.
         }
         kept.push(pageNumber);
         previousPage = pageNumber;
-        if (isHeading) referenceHeading = heading;
+        if (titleLine) referenceHeading = heading;
       } catch {
         if (!isIsolatedJump) kept.push(pageNumber); // Page illisible au milieu d'un groupe contigu : gardée par prudence.
         previousPage = pageNumber;
@@ -264,10 +266,10 @@ export async function extractRelevantPageRange(
       while (pageNumber <= doc.numPages && extraChecked < MAX_EXTRA_PAGES_BEYOND_CANDIDATES) {
         if (options.claimedByOtherPages?.has(pageNumber)) break;
         try {
-          const { firstLine, heading, isHeading } = await pageHeadingLine(doc, pageNumber);
-          if (isStopBoundary(firstLine, heading, referenceHeading, keywords)) break;
+          const { heading, titleLine } = await pageHeadingLine(doc, pageNumber);
+          if (isStopBoundary(titleLine, heading, referenceHeading, keywords)) break;
           kept.push(pageNumber);
-          if (isHeading) referenceHeading = heading;
+          if (titleLine) referenceHeading = heading;
         } catch {
           kept.push(pageNumber); // Page illisible au milieu : gardée par prudence, comme ci-dessus.
         }
