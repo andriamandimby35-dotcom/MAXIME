@@ -3,7 +3,7 @@ import { PDFDocument } from "pdf-lib";
 import { createServerClient } from "@/lib/supabase/server";
 import { createPrintableSubmissionPdf } from "@/lib/submission/printable-pdf";
 import { appendDaoPagesToPdf, appendExternalFileAsPages, createFilledDaoTemplatePdf } from "@/lib/submission/dao-template-pdf";
-import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholders } from "@/lib/submission/locate-field-positions";
+import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholders, locateTableCellPositions } from "@/lib/submission/locate-field-positions";
 import { findBestTitleMatch } from "@/lib/submission/title-match";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
 import { trimToRelevantStart, extractRelevantPageRange, locateTitleInFullDocument } from "@/lib/submission/trim-to-relevant-pages";
@@ -46,6 +46,34 @@ function pagesNotClaimedByOtherItems(
 ) {
   const claimedByOthers = otherItemsClaimedPages(items, ownTitle);
   return candidatePages.filter((page) => !claimedByOthers.has(page));
+}
+
+type TableForCellTargets = { columns: string[]; rows: string[][]; organization_column_indexes?: number[] };
+
+// Un tableau comme "Chiffre d'affaires" est un vrai quadrillage sur la page
+// DAO (lignes "Travaux"/"Fournitures"/... × colonnes "Exercice du...") : les
+// vraies valeurs doivent aller DANS ce quadrillage, à l'intersection ligne ×
+// colonne — pas sur une page à part redessinée par-dessus, qui obligeait
+// jusqu'ici à montrer DEUX fois le même tableau (une fois vide, tirée du
+// DAO, une fois fabriquée avec les chiffres). On construit ici la liste des
+// cases à retrouver sur la vraie page, une par valeur connue.
+function buildTableCellTargets(tables: TableForCellTargets[]) {
+  const targets: Array<{ field_key: string; row_label: string; column_label: string; value: string }> = [];
+  tables.forEach((table, tableIndex) => {
+    const orgColumns = table.organization_column_indexes ?? table.columns.map((_, index) => index);
+    const labelColumnIndex = table.columns.findIndex((_, index) => !orgColumns.includes(index));
+    table.rows.forEach((row, rowIndex) => {
+      const rowLabel = (labelColumnIndex >= 0 ? row[labelColumnIndex] : row[0])?.trim();
+      if (!rowLabel) return;
+      orgColumns.forEach((columnIndex) => {
+        const value = row[columnIndex]?.trim();
+        const columnLabel = table.columns[columnIndex]?.trim();
+        if (!value || !columnLabel) return;
+        targets.push({ field_key: `__table_cell_${tableIndex}_${rowIndex}_${columnIndex}`, row_label: rowLabel, column_label: columnLabel, value });
+      });
+    });
+  });
+  return targets;
 }
 
 // Les planches de plans techniques sont presque toujours regroupées en un
@@ -446,6 +474,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             });
           const templateFields = detectedTemplate.fields ?? [];
           let pdf: Buffer;
+          let allTableCellsResolvedOnRealPage = false;
           if (/\bplans?\b/i.test(title)) {
             // Un plan est un dessin vectoriel sans texte à remplacer : la
             // page DAO reste extraite telle quelle, sans réécriture.
@@ -462,13 +491,33 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             // déborder le contenu sur une page en trop si le texte recréé est
             // un peu plus long que l'original).
             const fieldTargets = templateFields.map((field) => ({ field_key: field.key, label: field.label, description: field.description }));
-            const [positions, redactions] = await Promise.all([
+            // Un tableau (chiffre d'affaires, matériel, personnel...) est un
+            // vrai quadrillage sur la page DAO : ses cases doivent recevoir
+            // les valeurs directement, comme n'importe quel autre champ —
+            // sinon la page réelle affichée reste un tableau vide alors que
+            // les vraies valeurs existent déjà, obligeant (avant ce correctif)
+            // à ajouter une DEUXIÈME page fabriquée juste pour les montrer.
+            const tableCellTargets = buildTableCellTargets(templateTables);
+            const [positions, redactions, tablePositions] = await Promise.all([
               locateFieldPositions(bytes, verifiedPages, fieldTargets),
               locateBracketPlaceholders(bytes, verifiedPages, fieldTargets),
+              tableCellTargets.length ? locateTableCellPositions(bytes, verifiedPages, tableCellTargets) : Promise.resolve([]),
             ]);
-            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, templateValues, redactions);
+            const tableCellValues = Object.fromEntries(tableCellTargets.map((target) => [target.field_key, target.value]));
+            const foundTableFieldKeys = new Set(tablePositions.map((position) => position.field_key));
+            allTableCellsResolvedOnRealPage = tableCellTargets.length > 0 && tableCellTargets.every((target) => foundTableFieldKeys.has(target.field_key));
+            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions);
           }
-          if (templateTables.length) {
+          // La page fabriquée ci-dessous ne sert plus qu'en dernier recours :
+          // si toutes les cases du tableau ont été retrouvées et remplies
+          // directement sur la vraie page juste au-dessus, l'ajouter EN PLUS
+          // ferait apparaître le même tableau deux fois (une fois fidèle et
+          // vide en apparence pour qui ne voit pas les valeurs ajoutées, une
+          // fois fabriquée) — ce qui est justement le bug signalé. Elle ne
+          // reste utile que si une case n'a pas pu être localisée (libellé de
+          // ligne ou de colonne introuvable sur la page), pour ne jamais
+          // perdre une valeur déjà connue.
+          if (templateTables.length && !allTableCellsResolvedOnRealPage) {
             // Les colonnes d'un tableau reconstruit gardaient une largeur
             // égale arbitraire, très différente du vrai tableau du DAO (une
             // colonne de désignation bien plus large que les colonnes de
