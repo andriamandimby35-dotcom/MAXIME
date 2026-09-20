@@ -1,3 +1,9 @@
+// Doit rester le tout premier import de ce fichier : il installe la
+// variable globale DOMMatrix dont pdfjs-dist a besoin dès son propre
+// chargement (voir le commentaire dans dommatrix-polyfill.ts). Si l'import
+// de pdfjs-dist juste en dessous passait avant celui-ci, le polyfill
+// arriverait trop tard et pdfjs-dist planterait quand même.
+import "@/lib/submission/dommatrix-polyfill";
 import path from "path";
 import { existsSync } from "fs";
 import { pathToFileURL } from "url";
