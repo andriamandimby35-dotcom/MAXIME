@@ -64,7 +64,21 @@ export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDete
     .map((item) => (item.kind === "form_to_complete" && item.fields.length === 0 && !hasAppComputedContent(item.title)
       ? { ...item, kind: "document_to_provide" as const, instructions: "Récupérez le modèle correspondant dans le DAO, complétez-le à la main avec vos informations, faites-le signer si nécessaire, puis joignez la version scannée." }
       : item));
-  return [...genericItemsWithoutRealMatch, ...aiItems];
+  // Le contrôle visuel (vérifier une par une les pièces demandées par le
+  // DAO — voir son propre sommaire, ex. "Article 6 - Dossier d'Appel
+  // d'Offres") est bien plus simple quand l'application affiche les pièces
+  // EXACTEMENT dans l'ordre où le DAO les liste lui-même, plutôt que
+  // regroupées par catégorie. Chaque pièce détectée dans ce DAO précis porte
+  // déjà sa première page réelle (template_page_numbers, voir le prompt
+  // d'analyse) : trier par cette page reproduit donc automatiquement l'ordre
+  // du DAO, quel que soit le DAO. Une pièce dont la page n'est pas connue
+  // (générique non confirmée dans ce DAO précis, ou pièce sans page — ex.
+  // BDQE externe ajouté par l'application) reste à la fin de la liste, dans
+  // son ordre d'origine, pour rester visible mais ne pas fausser le contrôle.
+  return [...genericItemsWithoutRealMatch, ...aiItems]
+    .map((item, index) => ({ item, index, page: (item as TemplateDetectedItem).template_page_numbers?.[0] ?? Number.POSITIVE_INFINITY }))
+    .sort((a, b) => (a.page !== b.page ? a.page - b.page : a.index - b.index))
+    .map((entry) => entry.item);
 }
 
 // Reproduit exactement deduplicate() de SubmissionDossierManager.tsx : ajoute
