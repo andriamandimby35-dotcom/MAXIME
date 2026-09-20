@@ -334,7 +334,9 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     `Rémunération convenue : ${templateValues.worker_salary || "[montant à compléter]"}.`,
     "Les parties conviennent que le travailleur intervient pour les activités prévues au chantier, suivant les conditions du DAO et les consignes de sécurité applicables.",
     "Le présent document doit être vérifié, imprimé puis signé par les deux parties.",
-    "", "Signature de l’entreprise : ____________________", "", "Signature du travailleur : ____________________",
+    // Pas de pointillés inventés ici non plus : rien ne remplit jamais une
+    // signature automatiquement, donc l'espace après le libellé reste vide.
+    "", "Signature de l’entreprise :", "", "Signature du travailleur :",
     ...(workerCinPath ? ["", "La copie de la CIN du travailleur est jointe en dernière(s) page(s) de ce document."] : []),
   ] : [];
   const submissionLetterLines = detectedTemplate?.template_text?.trim()

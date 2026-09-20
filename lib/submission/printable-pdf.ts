@@ -53,7 +53,12 @@ export async function createPrintableSubmissionPdf(title: string, company: Recor
     `Fonction : ${company.representative_role || "À compléter"}`,
     `Adresse : ${company.address || "À compléter"}`, `NIF : ${company.nif || "À compléter"}   STAT : ${company.stat || "À compléter"}`,
     "", ...extraLines, "", "Document à lire, imprimer et signer ou parapher selon les exigences du DAO.",
-    "", "Lieu et date : ________________________________", "", "Signature et cachet :", "", "", "_______________________________",
+    // Ces pointillés/traits n'existent dans AUCUN vrai document du DAO — on
+    // les invente nous-mêmes juste pour "faire modèle". Comme rien n'est
+    // jamais rempli automatiquement ici (ni la date, ni la signature), on
+    // laisse ces zones simplement vides plutôt que d'inventer un remplissage
+    // qui n'a pas de valeur réelle derrière.
+    "", "Lieu et date :", "", "Signature et cachet :", "", "",
   ].flatMap((line) => wrapLine(cleanText(line)));
 
   let page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
