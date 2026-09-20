@@ -912,6 +912,22 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   // parties (voir renderDossierCard et hasDossierSections plus bas).
   const dossierItems = items.filter((item) => !isBdqe(item));
   const hasDossierSections = dossierItems.some((item) => item.dossierSection);
+  // Regroupe les pièces déjà triées dans l'ordre du DAO (dossierItems) en
+  // une carte par grande division ("Partie I", "Partie II"...), plutôt
+  // qu'un simple titre au-dessus d'une liste continue : chaque groupe de
+  // dossierItems partageant le même dossierSection consécutif devient sa
+  // propre carte, avec ce titre affiché en haut et uniquement les pièces de
+  // cette division à l'intérieur. dossierItems étant déjà dans l'ordre du
+  // DAO, deux pièces d'une même Partie ne peuvent être séparées par une
+  // pièce d'une autre Partie : le regroupement par simple consécutivité
+  // suffit, sans avoir besoin de refaire un tri.
+  const dossierGroups: Array<{ title: string | null; items: Item[] }> = [];
+  for (const item of dossierItems) {
+    const section = item.dossierSection ?? null;
+    const currentGroup = dossierGroups[dossierGroups.length - 1];
+    if (currentGroup && currentGroup.title === section) currentGroup.items.push(item);
+    else dossierGroups.push({ title: section, items: [item] });
+  }
 
   // Une seule fonction de rendu de carte, quel que soit le type de pièce
   // (document déjà préparé par l'appli, document à joindre, ou formulaire à
@@ -1126,27 +1142,25 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       </div>
     </section>
 
-    <section className="rounded-xl border bg-white p-5">
-      <h2 className="text-xl font-bold">Pièces du dossier ({dossierItems.length})</h2>
-      <p className="mt-1 text-sm text-gray-600">Dans l’ordre exact du sommaire du DAO{hasDossierSections ? ", avec les titres de ses parties" : ""}. Vérifiez chaque pièce une par une en suivant ce même ordre dans le DAO.</p>
-      {!dossierItems.length && <p className="mt-3 text-gray-600">Aucune pièce distincte n’a été explicitement détectée. Contrôlez tout de même les annexes du DAO.</p>}
-      <div className="mt-3 grid gap-3">
-        {(() => {
-          if (!hasDossierSections) return dossierItems.map((item) => renderDossierCard(item));
-          let previousSection: string | null | undefined;
-          return dossierItems.flatMap((item, position) => {
-            const currentSection = item.dossierSection ?? null;
-            const nodes: JSX.Element[] = [];
-            if (currentSection !== previousSection) {
-              previousSection = currentSection;
-              nodes.push(<h3 key={`section-${position}`} className="mt-4 mb-1 border-b pb-1 text-base font-bold text-emerald-900 first:mt-0">{currentSection ?? "Autres pièces (position non repérée dans le sommaire du DAO)"}</h3>);
-            }
-            nodes.push(renderDossierCard(item));
-            return nodes;
-          });
-        })()}
-      </div>
-    </section>
+    {!dossierItems.length && <section className="rounded-xl border bg-white p-5"><h2 className="text-xl font-bold">Pièces du dossier</h2><p className="mt-3 text-gray-600">Aucune pièce distincte n’a été explicitement détectée. Contrôlez tout de même les annexes du DAO.</p></section>}
+
+    {hasDossierSections
+      // Le DAO a un sommaire avec de grandes divisions : une carte par
+      // division, dans l'ordre exact où le DAO les présente — jamais une
+      // seule carte fourre-tout, précisément pour que la vérification pièce
+      // par pièce en suivant le DAO reste simple, quel que soit le DAO.
+      ? dossierGroups.map((group, groupIndex) => <section key={`partie-${groupIndex}`} className="mb-6 rounded-xl border bg-white p-5">
+          <h2 className="text-xl font-bold">{group.title ?? "Autres pièces (position non repérée dans le sommaire du DAO)"}</h2>
+          <div className="mt-3 grid gap-3">{group.items.map((item) => renderDossierCard(item))}</div>
+        </section>)
+      // Le DAO n'a pas de grandes divisions identifiables dans son sommaire
+      // (ou aucun sommaire trouvé) : une seule carte, mais toujours dans
+      // l'ordre exact du DAO (voir dossierItems).
+      : dossierItems.length > 0 && <section className="rounded-xl border bg-white p-5">
+          <h2 className="text-xl font-bold">Pièces du dossier ({dossierItems.length})</h2>
+          <p className="mt-1 text-sm text-gray-600">Dans l’ordre exact du DAO. Aucune grande division (Partie, Titre...) n’a été trouvée dans son sommaire.</p>
+          <div className="mt-3 grid gap-3">{dossierItems.map((item) => renderDossierCard(item))}</div>
+        </section>}
   </main>
   {viewingPdf && typeof document !== "undefined" && createPortal(
 <div className="modalBackdrop" onClick={closePdfModal}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(1000px,95vw)", height: "90vh", display: "flex", flexDirection: "column" }}>
