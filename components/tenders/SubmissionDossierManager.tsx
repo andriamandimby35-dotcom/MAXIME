@@ -35,6 +35,13 @@ type Item = {
   // que le sommaire du DAO. null si le DAO n'a pas de grandes divisions ou
   // si cette pièce n'a pas pu y être rattachée.
   dossierSection?: string | null;
+  // Pièce générique de secours qui fait presque toujours partie du DAO
+  // lui-même (voir lib/submission/build-dossier-items.ts) : autorise le
+  // bouton "Ouvrir le document à imprimer" à essayer de la RETROUVER dans le
+  // DAO même quand l'IA n'a identifié aucune page pour ce DAO précis (voir
+  // needsPrintableVersion) — jamais pour un document externe (CIN, RIB...)
+  // que le DAO ne contient de toute façon pas.
+  likely_in_dao?: boolean;
 };
 
 type DetectedItem = Omit<Item, "status" | "form_data">;
@@ -398,7 +405,14 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     // "plan") a un vrai contenu même sans template_origin=dao — le registre
     // des plans + les vraies pages du DAO, généré via un mécanisme séparé
     // (plan_register) côté serveur.
-    return /\bplans?\b/i.test(item.title);
+    if (/\bplans?\b/i.test(item.title)) return true;
+    // Pièce générique de secours dont on sait qu'elle fait presque toujours
+    // partie du DAO (CCAP, calendrier cultural, code de conduite...) même
+    // quand l'IA n'a retrouvé aucune page pour ce DAO précis : le bouton
+    // tente alors de la localiser automatiquement dans le document (voir
+    // locateTitleInFullDocument côté serveur) plutôt que de rester une carte
+    // sans aucun PDF — jamais pour un document externe (CIN, RIB...).
+    return Boolean(item.likely_in_dao);
   }
 
   function isBdqe(item: Item) {

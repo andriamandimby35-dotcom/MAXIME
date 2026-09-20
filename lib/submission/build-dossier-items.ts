@@ -19,6 +19,15 @@ export type DetectedItem = {
   instructions: string;
   required: boolean;
   fields: Field[];
+  // Uniquement sur les pièces génériques de secours (standardSubmissionItems
+  // ci-dessous) qui font presque toujours partie du DAO lui-même (CCAP,
+  // plans, calendrier cultural, code de conduite...) plutôt que d'être un
+  // document externe déjà en possession de l'entreprise (CIN, RIB...). Sert
+  // uniquement à proposer un bouton "Ouvrir le document à imprimer" qui
+  // tente de RETROUVER cette pièce dans le DAO (voir locateTitleInFullDocument)
+  // quand l'IA ne l'a pas identifiée pour ce DAO précis — jamais pour un
+  // document que le DAO ne contient de toute façon pas.
+  likely_in_dao?: boolean;
 };
 
 export type TemplateTable = { title: string; columns: string[]; rows: string[][]; organization_column_indexes?: number[]; repeatable?: boolean };
@@ -65,9 +74,19 @@ function normalize(value: string) {
   return value.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+// Pièces génériques de secours qui font presque toujours partie du DAO
+// lui-même (paraphées/signées sur ses propres pages) : quand l'IA ne les a
+// pas retrouvées pour un DAO précis, le bouton "Ouvrir le document à
+// imprimer" tente automatiquement de les localiser dans le document (voir
+// locateTitleInFullDocument et likely_in_dao ci-dessus) au lieu de rester
+// une carte sans aucun PDF.
+const daoSourcedGenericTitles = new Set([
+  "Plan à parapher", "Cahier des clauses administratives particulières (CCAP) signé", "Calendrier cultural", "Code de conduite signé",
+]);
+
 export const standardSubmissionItems: DetectedItem[] = [
-  "Plan à parapher", "CCAP paraphé", "Certificats de bonnes fins ou procès-verbaux de réception", "Photocopie certifiée conforme de la carte d’immatriculation fiscale", "Photocopie certifiée conforme de la carte statistique", "Reçu d’achat du Dossier d’Appel d’Offres", "Attestation de disponibilité de liquidité ou de ligne de crédit", "Relevé d’identité bancaire", "CIN légalisée du signataire", "Certificat de résidence du signataire", "Pièces justificatives des matériels", "Calendrier cultural", "Code de conduite signé", "Cahier des clauses administratives particulières (CCAP) signé",
-].map((title) => ({ kind: "document_to_provide" as const, title, source_reference: "À confirmer dans le DAO", instructions: "Joignez le document signé ou certifié conforme demandé par le DAO.", required: true, fields: [] }));
+  "Plan à parapher", "Certificats de bonnes fins ou procès-verbaux de réception", "Photocopie certifiée conforme de la carte d’immatriculation fiscale", "Photocopie certifiée conforme de la carte statistique", "Reçu d’achat du Dossier d’Appel d’Offres", "Attestation de disponibilité de liquidité ou de ligne de crédit", "Relevé d’identité bancaire", "CIN légalisée du signataire", "Certificat de résidence du signataire", "Pièces justificatives des matériels", "Calendrier cultural", "Code de conduite signé", "Cahier des clauses administratives particulières (CCAP) signé",
+].map((title) => ({ kind: "document_to_provide" as const, title, source_reference: "À confirmer dans le DAO", instructions: "Joignez le document signé ou certifié conforme demandé par le DAO.", required: true, fields: [], ...(daoSourcedGenericTitles.has(title) ? { likely_in_dao: true } : {}) }));
 
 standardSubmissionItems.push(
   { kind: "form_to_complete", title: "Lettre de soumission / acte d’engagement", source_reference: "À confirmer dans le DAO", instructions: "Complétez, imprimez, signez puis insérez la version signée.", required: true, fields: [{ key: "legal_name", label: "Entreprise soumissionnaire", required: true, description: "Raison sociale" }, { key: "representative_name", label: "Signataire", required: true, description: "Nom du signataire" }] },

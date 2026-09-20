@@ -7,7 +7,7 @@ import { rebuildTemplatePages, renderRebuiltPages } from "@/lib/submission/rebui
 import { measureTableColumnRatios } from "@/lib/submission/locate-field-positions";
 import { findBestTitleMatch } from "@/lib/submission/title-match";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
-import { trimToRelevantStart, extractRelevantPageRange } from "@/lib/submission/trim-to-relevant-pages";
+import { trimToRelevantStart, extractRelevantPageRange, locateTitleInFullDocument } from "@/lib/submission/trim-to-relevant-pages";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -491,6 +491,27 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
         }
       } catch (error) {
         console.error("Source-reference PDF generation failed", error);
+      }
+    } else {
+      // Ni l'IA ni le sommaire du DAO n'ont donné la moindre page pour cette
+      // pièce (cas des pièces génériques de secours, ex. « Cahier des
+      // clauses administratives particulières (CCAP) signé », quand l'IA ne
+      // l'a pas retrouvée dans CE DAO précis) : avant d'abandonner, on
+      // cherche son titre directement dans tout le document — utile pour
+      // n'importe quelle pièce quasi toujours présente dans un DAO, sur
+      // n'importe quel DAO, pas seulement celui-ci.
+      try {
+        const source = await fetch(tender.document_url);
+        if (source.ok) {
+          const bytes = new Uint8Array(await source.arrayBuffer());
+          const locatedPages = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], title, await locateTitleInFullDocument(bytes, title));
+          if (locatedPages.length) {
+            const pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, [], templateValues);
+            return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
+          }
+        }
+      } catch (error) {
+        console.error("Full-document title search PDF generation failed", error);
       }
     }
   }

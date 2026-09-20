@@ -62,6 +62,24 @@ export async function trimToRelevantStart(pdfBytes: Uint8Array, candidatePages: 
   return range;
 }
 
+// Dernier recours quand l'IA n'a retrouvé AUCUNE page pour une pièce
+// pourtant quasi toujours présente dans ce genre de DAO (CCAP, plans,
+// calendrier cultural, code de conduite...) : au lieu d'abandonner, on
+// cherche son titre directement dans TOUT le document, page par page,
+// exactement comme extractRelevantPageRange le fait déjà à partir d'une
+// plage connue — sauf qu'ici la "plage de départ" est le DAO entier.
+// Générique par construction (le titre cherché est un paramètre) : sert
+// n'importe quelle pièce, sur n'importe quel DAO, pas seulement le CCAP.
+export async function locateTitleInFullDocument(pdfBytes: Uint8Array, title: string): Promise<number[]> {
+  try {
+    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const allPages = Array.from({ length: doc.numPages }, (_, index) => index + 1);
+    return await extractRelevantPageRange(pdfBytes, allPages, title, { returnEmptyIfNotFound: true });
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Trouve, dans candidatePages, la page qui nomme vraiment "title" dans son
  * propre titre (en majuscules), puis prend toutes les pages suivantes tant
@@ -95,7 +113,20 @@ function isNewChapterMarker(line: string) {
   return /^(partie|annexe|chapitre)\b/i.test(trimmed) || /^[a-z][-–.]\s/i.test(trimmed);
 }
 
-export async function extractRelevantPageRange(pdfBytes: Uint8Array, candidatePages: number[], title: string): Promise<number[]> {
+export async function extractRelevantPageRange(
+  pdfBytes: Uint8Array,
+  candidatePages: number[],
+  title: string,
+  // Les deux appels historiques (trimToRelevantStart, et la référence
+  // textuelle du DAO dans printable-submission-document) partent d'une
+  // plage déjà probablement correcte (page citée par l'IA ou par le
+  // sommaire) : si le titre n'y est finalement pas retrouvé, mieux vaut
+  // rester sur cette plage de départ que de ne rien renvoyer du tout.
+  // locateTitleInFullDocument (recherche à l'aveugle sur TOUT le DAO,
+  // sans aucun indice de page au départ) a besoin du signal inverse :
+  // rien trouvé doit vouloir dire rien à imprimer, jamais "tout le DAO".
+  options: { returnEmptyIfNotFound?: boolean } = {},
+): Promise<number[]> {
   if (!candidatePages.length) return candidatePages;
   const keywords = [...significantWords(title)].filter((word) => word.length >= 4);
   if (!keywords.length) return candidatePages;
@@ -118,7 +149,10 @@ export async function extractRelevantPageRange(pdfBytes: Uint8Array, candidatePa
         // Page illisible : on continue d'essayer les suivantes.
       }
     }
-    if (startIndex === -1) return candidatePages; // Sujet non trouvé : on ne devine pas, on garde tout.
+    // Sujet non trouvé : on ne devine pas. Comportement historique (garder
+    // toute la plage de départ) sauf pour une recherche à l'aveugle, où
+    // "toute la plage" serait le DAO entier — voir options ci-dessus.
+    if (startIndex === -1) return options.returnEmptyIfNotFound ? [] : candidatePages;
     const kept = [sorted[startIndex]];
     let previousPage = sorted[startIndex];
     for (let index = startIndex + 1; index < sorted.length; index += 1) {
