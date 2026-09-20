@@ -62,12 +62,18 @@ async function pageHeadingLine(doc: Awaited<ReturnType<typeof getDocument>["prom
   // La toute première ligne est souvent juste le numéro de page imprimé.
   const withoutPageNumber = items[0] && /^\d{1,4}$/.test((items[0].str ?? "").trim()) ? items.slice(1) : items;
   const zone = withoutPageNumber.slice(0, HEADING_SCAN_RUN_COUNT);
-  const isTitleRun = (item: RawItem) => {
-    const text = (item.str ?? "").trim();
-    if (!text || !isFullUppercase(text)) return false;
-    return looksBold(item.fontName ? styles[item.fontName]?.fontFamily : undefined);
-  };
-  const startIndex = zone.findIndex(isTitleRun);
+  const isUppercaseRun = (item: RawItem) => isFullUppercase((item.str ?? "").trim());
+  const isBoldUppercaseRun = (item: RawItem) => isUppercaseRun(item) && looksBold(item.fontName ? styles[item.fontName]?.fontFamily : undefined);
+  // Priorité au signal le plus fiable (majuscules ET gras). Certains DAO ne
+  // marquent toutefois JAMAIS le gras dans le nom de police de leur PDF (gras
+  // "simulé" sans changer de police, ou export d'un autre logiciel) : sans
+  // filet de secours, aucun titre ne serait plus jamais trouvé sur CE DAO
+  // précis, ce qui annulerait complètement la détection. Dès qu'AUCUNE ligne
+  // en gras+majuscules n'est trouvée dans la zone, on retombe donc sur les
+  // majuscules seules (le signal utilisé avec succès avant ce correctif).
+  const boldStartIndex = zone.findIndex(isBoldUppercaseRun);
+  const isTitleRun = boldStartIndex !== -1 ? isBoldUppercaseRun : isUppercaseRun;
+  const startIndex = boldStartIndex !== -1 ? boldStartIndex : zone.findIndex(isUppercaseRun);
   if (startIndex === -1) return { titleLine: null, heading: "" };
   const runs = [zone[startIndex]];
   for (let index = startIndex + 1; index < zone.length && isTitleRun(zone[index]); index += 1) runs.push(zone[index]);
