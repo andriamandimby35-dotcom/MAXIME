@@ -7,6 +7,7 @@ import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholde
 import { findBestTitleMatch } from "@/lib/submission/title-match";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
 import { trimToRelevantStart, extractRelevantPageRange, locateTitleInFullDocument } from "@/lib/submission/trim-to-relevant-pages";
+import { daoSourcedGenericTitles } from "@/lib/submission/build-dossier-items";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -336,6 +337,18 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // stricte, sinon les vraies pages/le vrai modèle du DAO ne sont jamais
   // utilisés pour les pièces de la liste générique.
   const detectedTemplate = findBestTitleMatch(title, analysis?.submission_items ?? []);
+  // Ces quelques pièces génériques (Plan à parapher, CCAP, Calendrier
+  // cultural, Code de conduite) sont censées presque toujours faire partie
+  // du DAO lui-même. Si, après TOUTES les méthodes de recherche ci-dessous
+  // (titre IA, référence du dossier, recherche à l'aveugle dans tout le
+  // document), rien n'a été trouvé, ce n'est presque jamais une panne de
+  // l'extraction : c'est que ce DAO précis ne demande simplement pas ce
+  // document. Fabriquer quand même un PDF générique (juste les coordonnées
+  // de l'entreprise et des lignes de signature vides) faisait croire que ce
+  // document existait et était prêt, alors qu'il ne fallait pas le
+  // demander du tout pour ce marché.
+  const isDaoSourcedGenericDocument = kind === "document_to_provide"
+    && Boolean(findBestTitleMatch(title, daoSourcedGenericTitles.map((candidateTitle) => ({ title: candidateTitle }))));
   const companyName = profileData.legal_name || profileData.trade_name || "[raison sociale à compléter]";
   const signer = profileData.representative_name || "[nom du signataire à compléter]";
   const signerRole = profileData.representative_role || "[fonction à compléter]";
@@ -374,13 +387,28 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       "Informations du formulaire :", ...filledFields,
     ]
     : generatedLetterLines;
-  const formLines = isSubmissionLetter
-    ? submissionLetterLines
-    : isWorkerContract
-      ? generatedWorkerContractLines
-      : kind === "form_to_complete"
-        ? ["FORMULAIRE À SIGNER OU PARAPHER", "", ...filledFields]
-        : [];
+  const isPersonnelRoster = /personnel|personnels|ressources humaines|equipe/i.test(title) && !isWorkerContract;
+  const isMaterialRoster = /materiel|matériels|equipement|équipement|engins/i.test(title);
+  // Une liste de personnel/matériel a des champs GÉNÉRIQUES ("Nom et
+  // prénoms", "Diplôme"...) qui ne correspondent à AUCUNE valeur unique
+  // enregistrée : les vraies valeurs sont dans le tableau (rosterTable,
+  // plus bas — une ligne par personne/matériel, ajoutée via "+ Ajouter une
+  // ligne" dans le dossier), jamais dans formData sous ces clés précises.
+  // Avant, filledFields écrivait quand même "Nom et prénoms : À compléter"
+  // pour chacun de ces champs vides — un texte qui donnait l'impression que
+  // rien n'avait été rempli, alors que les vraies informations existaient
+  // bien, juste ailleurs (dans le tableau affiché juste après). On n'écrit
+  // donc plus ces lignes génériques pour ce genre de pièce du tout : seul le
+  // tableau, avec les vraies lignes entrées, sert de contenu.
+  const formLines = isPersonnelRoster || isMaterialRoster
+    ? []
+    : isSubmissionLetter
+      ? submissionLetterLines
+      : isWorkerContract
+        ? generatedWorkerContractLines
+        : kind === "form_to_complete"
+          ? ["FORMULAIRE À SIGNER OU PARAPHER", "", ...filledFields]
+          : [];
   const templateTables = (detectedTemplate?.template_tables ?? []).map((table, tableIndex) => {
     if (table.repeatable) {
       // Le DAO ne montre qu'une ligne d'exemple pour ce genre de rubrique
@@ -408,8 +436,6 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
         : cell.replace(/\{\{[a-z0-9_]+\}\}/gi, ""))),
     };
   });
-  const isPersonnelRoster = /personnel|personnels|ressources humaines|equipe/i.test(title) && !isWorkerContract;
-  const isMaterialRoster = /materiel|matériels|equipement|équipement|engins/i.test(title);
   const rosterTable = (() => {
     if (!isPersonnelRoster && !isMaterialRoster) return [];
     const key = isPersonnelRoster ? "__personnel" : "__materiel";
@@ -632,45 +658,25 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       }
     }
   }
-  // Diagnostic TEMPORAIRE : on arrive ici seulement quand aucune des méthodes
-  // ci-dessus n'a réussi à utiliser une vraie page du DAO — donc juste avant
-  // de retomber sur la feuille générique. Plutôt que de deviner à l'aveugle
-  // pourquoi (déjà 3 corrections sans effet visible), on affiche directement
-  // dans le PDF généré ce que chaque étape a vu, pour comprendre d'un coup où
-  // ça bloque réellement. À retirer une fois le vrai problème confirmé.
-  const debugLines: string[] = [];
-  if (tender.document_url) {
-    try {
-      debugLines.push(
-        "— DIAGNOSTIC TEMPORAIRE (à retirer après résolution) —",
-        `Pièce IA trouvée par titre : ${detectedTemplate ? "oui" : "non"}`,
-      );
-      if (detectedTemplate) {
-        debugLines.push(
-          `  Titre IA : ${detectedTemplate.title ?? "(vide)"}`,
-          `  Origine (template_origin) : ${detectedTemplate.template_origin ?? "(vide)"}`,
-          `  Pages numériques (template_page_numbers) : ${(detectedTemplate.template_page_numbers ?? []).join(", ") || "(aucune)"}`,
-          `  Référence texte (source_reference) : ${detectedTemplate.source_reference || "(vide)"}`,
-        );
-      }
-      debugLines.push(`Pages connues combinées (detectedTemplateKnownPages) : ${detectedTemplateKnownPages.join(", ") || "(aucune)"}`);
-      if (detectedTemplateKnownPages.length) {
-        const claimedByOthers1 = otherItemsClaimedPages(analysis?.submission_items ?? [], detectedTemplate?.title ?? title);
-        debugLines.push(`  Réclamées par une AUTRE pièce : ${detectedTemplateKnownPages.filter((page) => claimedByOthers1.has(page)).join(", ") || "(aucune)"}`);
-      }
-      debugLines.push(`Référence du dossier (sourceReference client) : ${clientSourceReference || "(vide)"}`);
-      const referencedPagesDebug = parsePageNumbersFromReference(clientSourceReference);
-      debugLines.push(`  Pages extraites de cette référence : ${referencedPagesDebug.join(", ") || "(aucune)"}`);
-      const source = await fetch(tender.document_url);
-      if (source.ok) {
-        const bytes = new Uint8Array(await source.arrayBuffer());
-        const blindSearch = await locateTitleInFullDocument(bytes, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title));
-        debugLines.push(`Recherche à l'aveugle dans tout le DAO : ${blindSearch.pages.join(", ") || "(rien trouvé)"}`);
-        debugLines.push(`  Titre confirmé (majuscules + gras) : ${blindSearch.title || "(aucun)"}`);
-      }
-    } catch (error) {
-      debugLines.push(`Diagnostic interrompu par une erreur : ${error instanceof Error ? error.message : String(error)}`);
-    }
+  // On arrive ici seulement quand aucune des méthodes ci-dessus n'a réussi à
+  // utiliser une vraie page du DAO pour cette pièce. Pour les quelques
+  // pièces génériques censées presque toujours faire partie du DAO
+  // lui-même (isDaoSourcedGenericDocument), on ne fabrique plus de PDF
+  // générique dans ce cas : ça n'a jamais été un vrai document du DAO, donc
+  // rien de fiable à imprimer, et ça laissait croire à tort que la pièce
+  // était prête. On journalise seulement les pages regardées côté serveur
+  // (utile pour vérifier une extraction qui semblerait ratée sur un DAO
+  // précis) et on répond clairement à la place d'un PDF.
+  if (isDaoSourcedGenericDocument) {
+    console.error("PRINTABLE_PDF_NOT_FOUND_IN_DAO", {
+      title,
+      detectedTemplateTitle: detectedTemplate?.title ?? null,
+      detectedTemplateKnownPages,
+      clientSourceReference,
+    });
+    return NextResponse.json({
+      error: "Ce document n'a pas été retrouvé dans le DAO. Il n'est probablement pas demandé pour ce marché précis — vérifiez dans le DAO, et joignez-le vous-même seulement s'il est bien exigé.",
+    }, { status: 404 });
   }
   const transportTables = /mat.riaux.*transport/i.test(title) && hasTransportWeightTable && transportWeightTable
     ? [{ title: transportWeightTable.title || title, columns: transportWeightTable.columns || [], rows: transportWeightTable.rows || [] }]
@@ -678,7 +684,25 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   const planTables = /\bplans?\b/i.test(title) && hasPlanRegister && planRegister
     ? [{ title: planRegister.title || title, columns: planRegister.columns || [], rows: planRegister.rows || [] }]
     : [];
-  let pdf = await createPrintableSubmissionPdf(title, profileData, [...formLines, ...extraLines, "", ...debugLines], isExecutionPlanning && executionPlanningTable ? [executionPlanningTable] : templateTables.length ? templateTables : transportTables.length ? transportTables : planTables.length ? planTables : rosterTable);
+  // Même RÈGLE UNIQUE que plus haut (isAppComputedTableItem) appliquée ICI
+  // aussi : un tableau que l'application construit elle-même à partir des
+  // vraies valeurs entrées (rosterTable, executionPlanningTable) doit
+  // TOUJOURS passer avant un tableau juste ressemblant trouvé par titre dans
+  // le DAO (templateTables) — sinon ce dernier prenait la priorité et
+  // affichait un tableau vide (le modèle du DAO, sans les vraies lignes)
+  // à la place du tableau réellement rempli par l'entreprise.
+  const finalTables = isExecutionPlanning && executionPlanningTable
+    ? [executionPlanningTable]
+    : isPersonnelRoster || isMaterialRoster
+      ? rosterTable
+      : templateTables.length
+        ? templateTables
+        : transportTables.length
+          ? transportTables
+          : planTables.length
+            ? planTables
+            : rosterTable;
+  let pdf = await createPrintableSubmissionPdf(title, profileData, [...formLines, ...extraLines], finalTables);
   // planRegister.page_numbers ne liste que quelques pages éparses au lieu de
   // la vraie plage complète des planches (vérifié : sur un DAO réel, les
   // plans couvraient ~110 pages consécutives alors que l'IA n'en avait cité
