@@ -544,7 +544,7 @@ mb-6
 </h2>
 
 {parsedAnalysis && tender && (
-<div className="mb-5 flex flex-wrap gap-2">
+<div className="buttonRow">
   <button
     onClick={() => router.push(`/estimates/new?tenderId=${tender.id}`)}
     className="tenderButton tenderButtonPrimary"
