@@ -349,6 +349,12 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // demander du tout pour ce marché.
   const isDaoSourcedGenericDocument = kind === "document_to_provide"
     && Boolean(findBestTitleMatch(title, daoSourcedGenericTitles.map((candidateTitle) => ({ title: candidateTitle }))));
+  // Reconstruire une page en texte (voir createFilledDaoTemplatePdf) n'a de
+  // sens QUE pour une page de texte : un modèle de panneau de chantier, une
+  // plaque ou un logo est un document GRAPHIQUE (voir le prompt d'analyse),
+  // jamais un texte à retranscrire — on garde alors toujours la copie exacte
+  // de la vraie page du DAO pour ce genre de pièce, quel que soit le DAO.
+  const isGraphicOnlyDocument = /panneau|plaque|logo/i.test(title);
   const companyName = profileData.legal_name || profileData.trade_name || "[raison sociale à compléter]";
   const signer = profileData.representative_name || "[nom du signataire à compléter]";
   const signerRole = profileData.representative_role || "[fonction à compléter]";
@@ -524,7 +530,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           if (/\bplans?\b/i.test(title)) {
             // Un plan est un dessin vectoriel sans texte à remplacer : la
             // page DAO reste extraite telle quelle, sans réécriture.
-            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [], templateValues, [], verifiedTitle);
+            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [], templateValues, [], verifiedTitle, { rebuildAsText: false });
           } else {
             // La page DAO reste copiée EXACTEMENT telle quelle (cadres,
             // tableaux, toutes les décorations d'origine intactes) : on ne
@@ -552,7 +558,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             const tableCellValues = Object.fromEntries(tableCellTargets.map((target) => [target.field_key, target.value]));
             const foundTableFieldKeys = new Set(tablePositions.map((position) => position.field_key));
             allTableCellsResolvedOnRealPage = tableCellTargets.length > 0 && tableCellTargets.every((target) => foundTableFieldKeys.has(target.field_key));
-            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions, verifiedTitle);
+            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
           }
           // La page fabriquée ci-dessous ne sert plus qu'en dernier recours :
           // si toutes les cases du tableau ont été retrouvées et remplies
@@ -624,7 +630,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             locateFieldPositions(bytes, verifiedPages, fieldTargets),
             locateBracketPlaceholders(bytes, verifiedPages, fieldTargets),
           ]);
-          const pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, templateValues, redactions, verifiedTitle);
+          const pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, templateValues, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
           return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
         }
       } catch (error) {
@@ -649,7 +655,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
               locateFieldPositions(bytes, locatedPages, fieldTargets),
               locateBracketPlaceholders(bytes, locatedPages, fieldTargets),
             ]);
-            const pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, positions, templateValues, redactions, blindSearchResult.title);
+            const pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, positions, templateValues, redactions, blindSearchResult.title, { rebuildAsText: !isGraphicOnlyDocument });
             return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
           }
         }

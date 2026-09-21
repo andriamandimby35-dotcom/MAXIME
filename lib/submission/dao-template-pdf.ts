@@ -1,8 +1,99 @@
-import { PDFDocument, rgb } from "pdf-lib";
+import { PDFDocument, PDFFont, rgb } from "pdf-lib";
 import { embedUnicodeFonts } from "./pdf-font";
+import "@/lib/submission/pdfjs-worker-setup";
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 type FillPosition = { page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number };
 type RedactionZone = { page: number; field_key: string | null; x_percent: number; y_percent: number; width_percent: number; height_percent: number };
+type Rect = { x: number; y: number; width: number; height: number };
+
+// Un texte composé UNIQUEMENT de points, tirets ou soulignés répétés
+// (".........", "______", "- - - -") est TOUJOURS un simple repère visuel de
+// blanc à compléter sur un modèle DAO, jamais du vrai contenu, quel que soit
+// le DAO : on ne le redessine donc jamais lors de la reconstruction d'une
+// page en texte (voir rebuildPageAsText plus bas) — qu'une valeur vienne le
+// remplacer ou non, ça libère systématiquement la place prévue pour la case
+// à remplir sans jamais superposer notre texte à ces pointillés.
+function isBlankMarkerRun(text: string) {
+  const trimmed = text.trim();
+  return trimmed.length >= 2 && /^[.\-_·•∙]+$/.test(trimmed);
+}
+
+function looksBoldFont(fontFamily: string | undefined) {
+  return Boolean(fontFamily && /bold/i.test(fontFamily));
+}
+
+function rectsOverlap(a: Rect, b: Rect) {
+  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
+// Même calcul que la boucle "redactions" plus bas (garde le même rectangle
+// blanchi), mais renvoyé comme zone à NE PAS redessiner pendant la
+// reconstruction de la page, au lieu d'un rectangle dessiné par-dessus.
+function redactionRect(width: number, height: number, zone: RedactionZone): Rect {
+  const x = width * Math.max(0, Math.min(100, zone.x_percent)) / 100;
+  const boxHeight = height * Math.max(0, Math.min(100, zone.height_percent)) / 100;
+  const y = height - (height * Math.max(0, Math.min(100, zone.y_percent)) / 100) - boxHeight;
+  const boxWidth = width * Math.max(1, Math.min(100, zone.width_percent)) / 100;
+  return { x: x - 1, y: y - 1, width: boxWidth + 2, height: boxHeight + 2 };
+}
+
+// Même calcul que la boucle "positions" plus bas (garde le même rectangle
+// blanchi), en zone à ne pas redessiner plutôt qu'en rectangle dessiné.
+function positionRect(width: number, height: number, position: FillPosition): Rect {
+  const fontSize = 8;
+  const coverHeight = fontSize * 1.5;
+  const available = Math.max(10, width * Math.max(1, Math.min(90, position.width_percent)) / 100);
+  const x = width * Math.max(0, Math.min(100, position.x_percent)) / 100;
+  const y = height - (height * Math.max(0, Math.min(100, position.y_percent)) / 100) - fontSize;
+  return { x: x - 1, y: y - coverHeight * 0.25, width: available + 2, height: coverHeight };
+}
+
+// Reconstruit une page ENTIÈREMENT en texte (au lieu de copier l'image de la
+// page du DAO et d'écrire par-dessus) : on redessine nous-mêmes chaque
+// portion de texte lue sur la vraie page, à sa position et sa taille
+// d'origine (gras conservé), sauf les pointillés/traits de blanc et les
+// zones qui vont recevoir une valeur remplie. Comme on ne dessine plus RIEN
+// à l'endroit d'un blanc, notre valeur ne peut plus jamais chevaucher un
+// pointillé ou un texte déjà imprimé — le risque de superposition disparaît
+// par construction plutôt que d'être corrigé au cas par cas. Les dessins
+// (plans, logos, modèles de panneaux...) ne passent jamais par ici : voir
+// l'appelant, qui garde la copie exacte de la page pour ce genre de pièce.
+async function rebuildPageAsText(
+  pdfJsDoc: Awaited<ReturnType<typeof getDocument>["promise"]>,
+  pageNumber: number,
+  target: PDFDocument,
+  font: PDFFont,
+  boldFont: PDFFont,
+  suppressZones: Rect[],
+) {
+  const page = await pdfJsDoc.getPage(pageNumber);
+  const viewport = page.getViewport({ scale: 1 });
+  const content = await page.getTextContent();
+  const styles = (content.styles ?? {}) as Record<string, { fontFamily?: string }>;
+  type RawItem = { str?: string; transform?: number[]; width?: number; height?: number; fontName?: string };
+  const items = (content.items as RawItem[]).filter((item) => (item.str ?? "").length > 0);
+  const newPage = target.addPage([viewport.width, viewport.height]);
+  for (const item of items) {
+    const text = item.str ?? "";
+    if (isBlankMarkerRun(text)) continue;
+    const transform = item.transform ?? [10, 0, 0, 10, 0, 0];
+    const x = transform[4] ?? 0;
+    const y = transform[5] ?? 0;
+    const fontSize = Math.max(4, Math.hypot(transform[2] ?? 0, transform[3] ?? 10));
+    const itemBox: Rect = { x, y, width: item.width || fontSize * text.length * 0.55, height: item.height || fontSize };
+    if (suppressZones.some((zone) => rectsOverlap(zone, itemBox))) continue;
+    const bold = looksBoldFont(item.fontName ? styles[item.fontName]?.fontFamily : undefined);
+    try {
+      newPage.drawText(sanitizeForPdf(text), { x, y, size: fontSize, font: bold ? boldFont : font, color: rgb(0, 0, 0) });
+    } catch {
+      // Un caractère non couvert même par notre police Unicode ne doit
+      // jamais faire échouer toute la page : ce mot précis reste simplement
+      // absent plutôt que de perdre tout le reste de la reconstruction.
+    }
+  }
+  return newPage;
+}
 
 // drawText lève une exception (qui fait échouer TOUT le PDF en silence,
 // repli sur un résumé générique sans page réelle) dès qu'un caractère n'est
@@ -38,15 +129,49 @@ function compact(value: string, maximum: number) {
  * ajouter, tout en donnant au PDF final un titre visible (onglet du
  * navigateur, propriétés du fichier) au lieu de rester sans titre.
  */
-export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers: number[], positions: FillPosition[], values: Record<string, string>, redactions: RedactionZone[] = [], documentTitle?: string | null) {
+export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers: number[], positions: FillPosition[], values: Record<string, string>, redactions: RedactionZone[] = [], documentTitle?: string | null, options: { rebuildAsText?: boolean } = {}) {
   const sourcePdf = await PDFDocument.load(source);
   const validPages = [...new Set(pageNumbers.map((page) => Math.floor(page)).filter((page) => page >= 1 && page <= sourcePdf.getPageCount()))];
   if (!validPages.length) throw new Error("Aucune page de modèle exploitable.");
   const result = await PDFDocument.create();
   if (documentTitle?.trim()) result.setTitle(compact(documentTitle.trim(), 200));
-  const pages = await result.copyPages(sourcePdf, validPages.map((page) => page - 1));
-  pages.forEach((page) => result.addPage(page));
-  const { font } = await embedUnicodeFonts(result);
+  const { font, boldFont } = await embedUnicodeFonts(result);
+  // Reconstruire la page en texte n'a de sens QUE s'il y a vraiment quelque
+  // chose à écrire dessus (sinon la copie exacte reste strictement
+  // meilleure : fidélité parfaite, aucun risque). Un plan technique ou un
+  // modèle de panneau/logo n'a de toute façon jamais de position à remplir
+  // (voir l'appelant) : ce garde-fou suffit donc à les exclure aussi, sans
+  // dépendre d'un indicateur séparé passé depuis la route.
+  const shouldRebuild = Boolean(options.rebuildAsText) && (positions.length > 0 || redactions.length > 0);
+  let pdfJsDoc: Awaited<ReturnType<typeof getDocument>["promise"]> | null = null;
+  if (shouldRebuild) {
+    try {
+      pdfJsDoc = await getDocument({ data: source.slice(), useSystemFonts: true }).promise;
+    } catch {
+      pdfJsDoc = null; // Repli automatique sur la copie exacte ci-dessous.
+    }
+  }
+  if (pdfJsDoc) {
+    const readyDoc = pdfJsDoc;
+    for (const pageNumber of validPages) {
+      const sourcePageSize = sourcePdf.getPage(pageNumber - 1).getSize();
+      const pageRedactions = redactions.filter((zone) => Math.floor(zone.page) === pageNumber)
+        .map((zone) => redactionRect(sourcePageSize.width, sourcePageSize.height, zone));
+      const pagePositions = positions.filter((position) => Math.floor(position.page) === pageNumber)
+        .map((position) => positionRect(sourcePageSize.width, sourcePageSize.height, position));
+      try {
+        await rebuildPageAsText(readyDoc, pageNumber, result, font, boldFont, [...pageRedactions, ...pagePositions]);
+      } catch {
+        // Page illisible pour pdf.js : on ne perd jamais cette page, on
+        // revient à la copie exacte pour elle uniquement.
+        const [copiedPage] = await result.copyPages(sourcePdf, [pageNumber - 1]);
+        result.addPage(copiedPage);
+      }
+    }
+  } else {
+    const pages = await result.copyPages(sourcePdf, validPages.map((page) => page - 1));
+    pages.forEach((page) => result.addPage(page));
+  }
   // Une instruction entre crochets du DAO ("[insérer nom de la banque]") est
   // d'abord effacée par un rectangle blanc, puis remplacée par la vraie
   // valeur si un champ correspond — sinon elle reste simplement blanche,
