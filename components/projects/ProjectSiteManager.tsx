@@ -285,7 +285,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   const canManageStock = canOperate && ownAssignment?.permissions?.stock === true;
   const canManageExpenses = !projectFinished && (isAdmin || (canOperate && ownAssignment?.permissions?.stock === true));
   const canUploadPurchaseEvidence = !projectFinished && (isAdmin || (canOperate && ownAssignment?.permissions?.photos === true));
-  const canRecordAttendance = canOperate && ownAssignment?.permissions?.reports === true;
+  const canRecordAttendance = !projectFinished && (isAdmin || (canOperate && ownAssignment?.permissions?.reports === true));
   const canUseReportStock = canRecordAttendance && ownAssignment?.permissions?.stock === true;
   const canEditOwnCurrentRecord = (record: { created_by?: string | null; created_at?: string }) => canOperate && record.created_by === userId && !isLocked(record.created_at);
   const noteTargets = [
