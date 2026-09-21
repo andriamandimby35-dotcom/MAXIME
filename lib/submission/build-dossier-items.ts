@@ -80,13 +80,22 @@ function normalize(value: string) {
 // imprimer" tente automatiquement de les localiser dans le document (voir
 // locateTitleInFullDocument et likely_in_dao ci-dessus) au lieu de rester
 // une carte sans aucun PDF.
-const daoSourcedGenericTitles = new Set([
+//
+// Exportée (pas seulement un Set interne) pour que la route qui génère
+// vraiment le PDF (printable-submission-document/route.ts) reconnaisse CES
+// MÊMES pièces : si aucune des méthodes de recherche ne retrouve l'une
+// d'elles nulle part dans le DAO, ce n'est presque toujours pas une panne de
+// l'extraction, mais le signe que ce DAO précis ne demande simplement pas ce
+// document — mieux vaut le dire clairement que fabriquer un faux PDF vide
+// avec juste les coordonnées de l'entreprise et des lignes de signature.
+export const daoSourcedGenericTitles = [
   "Plan à parapher", "Cahier des clauses administratives particulières (CCAP) signé", "Calendrier cultural", "Code de conduite signé",
-]);
+];
+const daoSourcedGenericTitleSet = new Set(daoSourcedGenericTitles);
 
 export const standardSubmissionItems: DetectedItem[] = [
   "Plan à parapher", "Certificats de bonnes fins ou procès-verbaux de réception", "Photocopie certifiée conforme de la carte d’immatriculation fiscale", "Photocopie certifiée conforme de la carte statistique", "Reçu d’achat du Dossier d’Appel d’Offres", "Attestation de disponibilité de liquidité ou de ligne de crédit", "Relevé d’identité bancaire", "CIN légalisée du signataire", "Certificat de résidence du signataire", "Pièces justificatives des matériels", "Calendrier cultural", "Code de conduite signé", "Cahier des clauses administratives particulières (CCAP) signé",
-].map((title) => ({ kind: "document_to_provide" as const, title, source_reference: "À confirmer dans le DAO", instructions: "Joignez le document signé ou certifié conforme demandé par le DAO.", required: true, fields: [], ...(daoSourcedGenericTitles.has(title) ? { likely_in_dao: true } : {}) }));
+].map((title) => ({ kind: "document_to_provide" as const, title, source_reference: "À confirmer dans le DAO", instructions: "Joignez le document signé ou certifié conforme demandé par le DAO.", required: true, fields: [], ...(daoSourcedGenericTitleSet.has(title) ? { likely_in_dao: true } : {}) }));
 
 standardSubmissionItems.push(
   { kind: "form_to_complete", title: "Lettre de soumission / acte d’engagement", source_reference: "À confirmer dans le DAO", instructions: "Complétez, imprimez, signez puis insérez la version signée.", required: true, fields: [{ key: "legal_name", label: "Entreprise soumissionnaire", required: true, description: "Raison sociale" }, { key: "representative_name", label: "Signataire", required: true, description: "Nom du signataire" }] },
