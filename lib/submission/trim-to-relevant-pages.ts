@@ -21,12 +21,6 @@ import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 // sommaire, une mention en passant...) ne compte jamais comme un changement
 // de document, quel que soit son aspect par ailleurs — elle reste toujours
 // une continuation du document en cours, quel que soit le nombre de pages.
-// Large volontairement : une page peut contenir quelques éléments avant son
-// titre (numéro de page déjà retiré séparément, une mention discrète...) —
-// un seuil trop court ratait alors le vrai titre (ex. "ANNEXE 1 / AU CCAP")
-// sur une page pourtant presque vide juste avant.
-const HEADING_SCAN_RUN_COUNT = 20;
-
 function normalizeText(value: string) {
   return value
     .normalize("NFD")
@@ -50,12 +44,19 @@ function looksBold(fontFamily: string | undefined) {
 
 type PageTitle = { titleLine: string | null; heading: string };
 
-// Cherche, dans les toutes premières lignes de la page, la première portion
-// de texte à la fois EN MAJUSCULES ET EN GRAS — le vrai titre de la page,
-// s'il y en a un — puis y rattache les portions suivantes qui remplissent
-// aussi ces deux conditions (un titre peut être coupé sur deux lignes).
-// Aucune ligne trouvée : la page n'a pas de titre propre, elle appartient
-// donc au document déjà en cours (voir isStopBoundary plus bas).
+// Cherche, sur TOUTE la page (pas seulement ses toutes premières lignes), la
+// première portion de texte à la fois EN MAJUSCULES ET EN GRAS — le vrai
+// titre, s'il y en a un — puis y rattache les portions suivantes qui
+// remplissent aussi ces deux conditions (un titre peut être coupé sur deux
+// lignes). Balayer la page ENTIÈRE, pas juste son début, est nécessaire car
+// deux pièces du DAO peuvent se partager la MÊME page sans saut de page entre
+// elles (ex. la fin de l'Annexe 5 et le titre de l'Annexe 6 juste en dessous,
+// sur la même page) : un titre plus loin dans la page compte tout autant
+// qu'un titre tout en haut, sinon la fin d'une pièce était mal coupée alors
+// qu'un nouveau titre pourtant bien en gras et en majuscules était déjà là,
+// juste plus bas sur la page. Aucune ligne trouvée : la page n'a pas de
+// titre propre, elle appartient donc au document déjà en cours (voir
+// isStopBoundary plus bas).
 async function pageHeadingLine(doc: Awaited<ReturnType<typeof getDocument>["promise"]>, pageNumber: number): Promise<PageTitle> {
   const page = await doc.getPage(pageNumber);
   const content = await page.getTextContent();
@@ -64,7 +65,7 @@ async function pageHeadingLine(doc: Awaited<ReturnType<typeof getDocument>["prom
   const items = (content.items as RawItem[]).filter((item) => (item.str ?? "").trim());
   // La toute première ligne est souvent juste le numéro de page imprimé.
   const withoutPageNumber = items[0] && /^\d{1,4}$/.test((items[0].str ?? "").trim()) ? items.slice(1) : items;
-  const zone = withoutPageNumber.slice(0, HEADING_SCAN_RUN_COUNT);
+  const zone = withoutPageNumber;
   const isUppercaseRun = (item: RawItem) => isFullUppercase((item.str ?? "").trim());
   const isBoldUppercaseRun = (item: RawItem) => isUppercaseRun(item) && looksBold(item.fontName ? styles[item.fontName]?.fontFamily : undefined);
   // Priorité au signal le plus fiable (majuscules ET gras). Certains DAO ne
