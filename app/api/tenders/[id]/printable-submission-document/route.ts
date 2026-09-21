@@ -702,7 +702,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           : planTables.length
             ? planTables
             : rosterTable;
-  let pdf = await createPrintableSubmissionPdf(title, profileData, [...formLines, ...extraLines], finalTables);
+  let pdf = await createPrintableSubmissionPdf(title, profileData, [...formLines, ...extraLines], finalTables, { tableOnly: isAppComputedTableItem });
   // planRegister.page_numbers ne liste que quelques pages éparses au lieu de
   // la vraie plage complète des planches (vérifié : sur un DAO réel, les
   // plans couvraient ~110 pages consécutives alors que l'IA n'en avait cité

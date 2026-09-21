@@ -43,12 +43,21 @@ const MARGIN_X = 54;
 const TOP_Y = 790;
 const BOTTOM_Y = 50;
 
-export async function createPrintableSubmissionPdf(title: string, company: Record<string, unknown>, extraLines: string[] = [], tables: PrintableTable[] = []) {
+export async function createPrintableSubmissionPdf(title: string, company: Record<string, unknown>, extraLines: string[] = [], tables: PrintableTable[] = [], options: { tableOnly?: boolean } = {}) {
   const doc = await PDFDocument.create();
   doc.setTitle(cleanText(title).slice(0, 200));
   const { font, boldFont } = await embedUnicodeFonts(doc);
 
-  const lines = [
+  // tableOnly : pour une pièce dont le SEUL vrai contenu est un tableau que
+  // l'application construit elle-même à partir de vraies valeurs entrées
+  // (liste de personnel/matériel, planning d'exécution, poids du transport,
+  // registre des plans) — jamais un document à signer. Le titre en lettre,
+  // les coordonnées de l'entreprise, "Document à lire, imprimer et signer...",
+  // "Lieu et date"/"Signature et cachet" n'existent dans AUCUN DAO pour ce
+  // genre de pièce et faisaient doublon avec le titre et les colonnes déjà
+  // affichés par le tableau juste en dessous : on ne les ajoute donc plus du
+  // tout ici, seul le tableau reste.
+  const lines = options.tableOnly ? [...extraLines].flatMap((line) => wrapLine(cleanText(line))) : [
     title.toUpperCase(), "", `Entreprise : ${company.legal_name || company.trade_name || "À compléter"}`,
     `Représentant : ${company.representative_name || "À compléter"}`,
     `Fonction : ${company.representative_role || "À compléter"}`,
