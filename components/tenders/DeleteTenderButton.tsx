@@ -25,7 +25,7 @@ export default function DeleteTenderButton({ tenderId, tenderName }: { tenderId:
       type="button"
       onClick={deleteTender}
       disabled={deleting}
-      className="text-red-700 underline disabled:opacity-50"
+      className="tenderButton tenderButtonDanger"
     >
       {deleting ? "Suppression…" : "Supprimer"}
     </button>

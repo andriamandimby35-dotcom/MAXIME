@@ -918,10 +918,10 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     const ready = isItemReady(item);
     const readyButton = <button type="button" className={`tenderButton ${ready ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => toggleReady(index)}>{ready ? "Prêt ✓ (annuler)" : "Marquer comme prêt"}</button>;
     if (isAiGenerated(item)) {
-      return <article key={`${item.kind}-${normalize(item.title)}-${index}`} className="rounded-lg border p-4">
+      return <article key={`${item.kind}-${normalize(item.title)}-${index}`} className="simpleCard">
         <strong>{item.title}</strong>
         <p className="mt-2 text-sm">{item.instructions || "Document établi à partir des postes, quantités et du délai du DAO."}</p>
-        <div className="mt-3 flex flex-wrap gap-2">
+        <div className="buttonRow" style={{ marginBottom: 0, marginTop: 12 }}>
           <button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Ouvrir le PDF" /></button>
           {readyButton}
         </div>
@@ -931,12 +931,12 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     if (item.kind === "document_to_provide") {
       const readingOnly = isReadingOnly(item);
       const printable = needsPrintableVersion(item);
-      return <article key={`${item.kind}-${item.title}`} className="rounded-lg border p-4">
+      return <article key={`${item.kind}-${item.title}`} className="simpleCard">
         {readingOnly || printable
           ? <strong>{item.title}</strong>
-          : <div className="flex flex-wrap items-center justify-between gap-3"><strong>{item.title}</strong>{readyButton}</div>}
+          : <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}><strong>{item.title}</strong>{readyButton}</div>}
         <p className="mt-2 text-sm">{item.instructions}</p>
-        {(readingOnly || printable) && <div className="mt-3 flex flex-wrap gap-2">
+        {(readingOnly || printable) && <div className="buttonRow" style={{ marginBottom: 0, marginTop: 12 }}>
           {/* Quand la pièce a de vraies pages DAO connues (printable), le
               bouton "à imprimer" extrait déjà exactement ce texte : proposer
               en plus "à lire" n'ouvrirait alors que le DAO entier depuis le
@@ -960,8 +960,8 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     const roster = personnel || material ? rosterFor(item, rosterKey) : workerContract ? personnelRoster : [];
     const missingFields = (personnel || material || workerContract) ? [] : item.fields.filter((field) => !resolvedFieldValue(item, field).trim());
     const formState = ready ? "Prêt ✓" : (personnel || material || workerContract) && !roster.length ? "Ajoutez au moins une ligne" : missingFields.length ? "Informations à compléter" : "Prêt à imprimer et signer";
-    return <article key={`${item.kind}-${item.title}`} className="rounded-lg border p-4">
-      <div className="flex flex-wrap items-center justify-between gap-3"><strong>{workerContract ? "Contrat individuel de travail — un PDF par personnel" : item.title}</strong><span className={ready ? "text-sm font-semibold text-green-700" : "text-sm font-semibold text-amber-700"}>{formState}</span></div>
+    return <article key={`${item.kind}-${item.title}`} className="simpleCard">
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}><strong>{workerContract ? "Contrat individuel de travail — un PDF par personnel" : item.title}</strong><span style={{ fontSize: ".9rem", fontWeight: 700, color: ready ? "#15803d" : "#b45309" }}>{formState}</span></div>
       <p className="mt-2 text-sm">{item.instructions}</p>
       {!ready && <>
         {!personnel && !material && !workerContract && item.fields.length > 0 && missingFields.length === 0 && <p className="mt-3 rounded-md bg-green-50 p-3 text-sm font-medium text-green-800">Les informations de ce formulaire sont déjà préremplies depuis le profil de l’entreprise.</p>}
@@ -971,11 +971,11 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
         {!personnel && !material && !workerContract && (item.template_tables ?? []).map((table, tableIndex) => {
           if (!table.repeatable) return null;
           const rows = tableRowsFor(item, tableIndex);
-          return <div key={tableIndex} className="mt-4 rounded-lg border bg-gray-50 p-3">
+          return <div key={tableIndex} className="simpleCardMuted">
             <strong>{table.title}</strong>
             <p className="mt-1 text-xs text-gray-600">Le DAO ne montre qu’une ligne d’exemple : ajoutez-en autant que nécessaire.</p>
             <div className="mt-2 grid gap-3">
-              {rows.map((row, rowIndex) => <div key={rowIndex} className="rounded-lg border bg-white p-3">
+              {rows.map((row, rowIndex) => <div key={rowIndex} className="simpleCardNested" style={{ marginTop: 10 }}>
                 <div className="grid gap-2 md:grid-cols-2">
                   {table.columns.map((column, columnIndex) => <label key={columnIndex} className="grid gap-1 text-sm font-semibold">{column || `Colonne ${columnIndex + 1}`}
                     <input value={row[String(columnIndex)] ?? ""} onChange={(event) => {
@@ -990,7 +990,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
             <button type="button" className="tenderButton tenderButtonPrimary mt-2" onClick={() => updateTableRows(index, tableIndex, [...rows, {}])}>+ Ajouter une ligne</button>
           </div>;
         })}
-        {(personnel || material) && <div className="mt-3 grid gap-3">{roster.map((entry, rosterIndex) => <div key={rosterIndex} className="rounded-lg border bg-gray-50 p-3">
+        {(personnel || material) && <div className="mt-3 grid gap-3">{roster.map((entry, rosterIndex) => <div key={rosterIndex} className="simpleCardMuted" style={{ marginTop: 0 }}>
           <div className="grid gap-2 md:grid-cols-2">
             <label className="grid gap-1 text-sm font-semibold">{personnel ? "Nom et prénoms" : "Matériel / engin"}<input value={entry.name} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, name: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>
             <label className="grid gap-1 text-sm font-semibold">{personnel ? "Poste sur chantier" : "Fonction / usage"}<input value={entry.role} onChange={(event) => { const next = [...roster]; next[rosterIndex] = { ...entry, role: event.target.value }; updateRoster(index, rosterKey, next); }} /></label>
@@ -1009,7 +1009,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
         {workerContract && <div className="mt-3 grid gap-3">{!personnelRoster.length && <p className="text-sm text-amber-700">Ajoutez d’abord le personnel affecté au chantier dans la liste ci-dessus.</p>}{personnelRoster.map((worker, workerIndex) => <div key={workerIndex} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-gray-50 p-3"><span><strong>{worker.name || "Personnel sans nom"}</strong>{worker.role ? ` — ${worker.role}` : ""}</span><button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `pdf:${item.title}:${workerIndex}`} onClick={() => openWorkerContract(item, workerIndex)}><ButtonLabel loading={pendingAction === `pdf:${item.title}:${workerIndex}`} label="Ouvrir le contrat PDF" /></button></div>)}</div>}
         {!item.fields.length && !personnel && !material && !workerContract && <p className="mt-3 text-sm text-amber-700">Aucune valeur n’a été identifiée à préremplir. Le PDF à imprimer reprend néanmoins le document demandé et doit être vérifié avant signature.</p>}
       </>}
-      <div className="mt-3 flex flex-wrap gap-2">
+      <div className="buttonRow" style={{ marginBottom: 0, marginTop: 12 }}>
         {(needsPrintableVersion(item) || personnel || material) && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Ouvrir le PDF à imprimer" /></button>}
         {ready && <button type="button" className="tenderButton" onClick={() => toggleReady(index)}>Modifier</button>}
         {readyButton}

@@ -2487,13 +2487,13 @@ export default function EstimateBuilder({
 
   return (
     <div className="space-y-4">
-      {showHistory ? <section className="rounded border p-4">
-        <div className="flex items-center justify-between gap-4">
+      {showHistory ? <section className="panel">
+        <div className="panelHead">
           <div>
             <h2 className="text-xl font-bold">Historique des devis</h2>
             <p className="text-sm text-gray-600">Devis de votre organisation, liés à leur modèle DAO.</p>
           </div>
-          <button type="button" onClick={startNewEstimate} className="rounded border px-4 py-2">
+          <button type="button" onClick={startNewEstimate} className="button">
             Nouveau devis
           </button>
         </div>
@@ -2526,20 +2526,22 @@ export default function EstimateBuilder({
                       {Number(estimate.total ?? 0).toLocaleString("fr-FR")} Ar
                     </td>
                     <td className="border p-2 text-center">
-                      <button
-                        type="button"
-                        onClick={() => router.push(`/estimates/${estimate.id}`)}
-                        className="text-blue-700 underline"
-                      >
-                        Ouvrir
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void deleteEstimate(estimate)}
-                        className="ml-4 text-red-700 underline"
-                      >
-                        Supprimer
-                      </button>
+                      <div className="buttonRow" style={{ justifyContent: "center", marginBottom: 0 }}>
+                        <button
+                          type="button"
+                          onClick={() => router.push(`/estimates/${estimate.id}`)}
+                          className="tenderButton"
+                        >
+                          Ouvrir
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void deleteEstimate(estimate)}
+                          className="tenderButton tenderButtonDanger"
+                        >
+                          Supprimer
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -2986,7 +2988,7 @@ export default function EstimateBuilder({
                 </>}
                 <td className="border p-2">
                   {selectedLine === index && (
-                    <>
+                    <div className="buttonRow" style={{ marginBottom: 0 }}>
                       <button
                         type="button"
                         onClick={(event) => {
@@ -2994,7 +2996,7 @@ export default function EstimateBuilder({
                           if (editingLine === index) void saveLine(index);
                           else setEditingLine(index);
                         }}
-                        className="mr-3 text-blue-600"
+                        className="ghostButton"
                       >
                         {editingLine === index ? "Enregistrer" : "Modifier"}
                       </button>
@@ -3008,7 +3010,7 @@ export default function EstimateBuilder({
                             setEditingLine(index);
                             setMessage("Prix partagé appliqué. Cliquez sur Enregistrer pour confirmer votre choix.");
                           }}
-                          className="mr-3 text-emerald-700"
+                          className="ghostButton"
                         >
                           Appliquer le prix moins cher ({Number(item.__proposedLowerPrice).toLocaleString("fr-FR")} Ar)
                         </button>
@@ -3023,7 +3025,7 @@ export default function EstimateBuilder({
                             event.stopPropagation();
                             openCompositePriceDetail(index);
                           }}
-                          className="mr-3 text-emerald-700"
+                          className="ghostButton"
                         >
                           Détail du prix
                         </button>
@@ -3034,7 +3036,7 @@ export default function EstimateBuilder({
                           event.stopPropagation();
                           void searchEquivalentsForLine(index);
                         }}
-                        className="mr-3 text-violet-700"
+                        className="ghostButton"
                       >
                         Chercher les équivalents
                       </button>
@@ -3044,11 +3046,11 @@ export default function EstimateBuilder({
                           event.stopPropagation();
                           removeLine(index);
                         }}
-                        className="text-red-600"
+                        className="dangerButton"
                       >
                         Supprimer
                       </button>
-                    </>
+                    </div>
                   )}
                 </td>
               </tr>

@@ -144,7 +144,7 @@ export function DashboardNav({
           </p>
 
           <form action="/auth/signout" method="post">
-            <button type="submit" className="mt-4 w-full rounded border px-3 py-2 text-left">
+            <button type="submit" className="ghostButton" style={{ width: "100%", marginTop: 14 }}>
               Déconnexion
             </button>
           </form>
