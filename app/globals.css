@@ -501,10 +501,10 @@ button,.button,.historyButton,.addPriceButton,.ghost,.ghostButton{transition:tra
 
 /* Système visuel commun : mêmes contrôles dans tous les modules. */
 :focus-visible { outline: 3px solid rgba(36, 94, 65, .28); outline-offset: 2px; }
-button { min-height: 40px; border-radius: 10px; font-weight: 750; letter-spacing: -.01em; }
-button:not([class]), button[class="active"] { border: 1px solid #153f2b; background: #153f2b; color: #fff; padding: 9px 14px; cursor: pointer; box-shadow: 0 3px 0 #0b2c1d; }
-button:not([class]):hover, button[class="active"]:hover { background: #245e41; }
-button:not([class]):active, button[class="active"]:active { box-shadow: 0 1px 0 #0b2c1d; }
+button { min-height: 40px; border-radius: 999px; font-weight: 750; letter-spacing: -.01em; }
+button:not([class]), button[class="active"] { border: 0; background: linear-gradient(135deg,var(--accentGreen),var(--accentGreenDk)); color: #fff; padding: 10px 16px; cursor: pointer; box-shadow: 0 3px 0 var(--accentGreenDk); }
+button:not([class]):hover, button[class="active"]:hover { background: linear-gradient(135deg,var(--accentGreen),var(--accentGreenDk)); box-shadow: 0 5px 12px rgba(11,58,38,.18), 0 3px 0 var(--accentGreenDk); }
+button:not([class]):active, button[class="active"]:active { box-shadow: 0 1px 0 var(--accentGreenDk); }
 button:disabled { cursor: not-allowed !important; box-shadow: none !important; filter: grayscale(.18); }
 input:not([type="checkbox"]):not([type="radio"]), select, textarea { border-color: #c8d8cd; box-shadow: 0 1px 2px rgba(16, 65, 39, .03); transition: border-color .16s ease, box-shadow .16s ease, background .16s ease; }
 input:not([type="checkbox"]):not([type="radio"]):hover, select:hover, textarea:hover { border-color: #96b9a3; }
