@@ -42,6 +42,117 @@ function looksBold(fontFamily: string | undefined) {
   return Boolean(fontFamily && /bold/i.test(fontFamily));
 }
 
+// Certains DAO (contrats-cadres de fournitures notamment) ne mettent JAMAIS
+// leurs titres de pièce en majuscules ("Annexe 1", "Annexe 2 : Bordereau De
+// Prix Unitaires...") : seule une couleur distincte (bleu, le plus souvent)
+// les distingue du corps de texte, toujours noir. isFullUppercase/looksBold
+// seuls ne les voient donc jamais. pdf.js ne donne pas la couleur directement
+// dans getTextContent() (aucune clé "color" sur un TextItem) : on la
+// retrouve en rejouant la liste d'opérateurs de la page (getOperatorList),
+// qui contient un ordre de dessin identique à celui des items de texte —
+// chaque "showText" y est précédé de l'instruction de couleur de remplissage
+// en vigueur à ce moment (setFillRGBColor le plus souvent). On associe donc,
+// dans l'ORDRE, chaque item de texte non vide au N-ième "showText" rencontré
+// — un léger décalage est possible sur de rares pages (quelques opérations
+// de dessin sans texte associé), sans conséquence pratique : ce signal ne
+// sert qu'en dernier recours, jamais comme seule source de vérité.
+async function buildItemColorMap<T extends { str?: string }>(page: Awaited<ReturnType<Awaited<ReturnType<typeof getDocument>["promise"]>["getPage"]>>, items: T[]): Promise<Map<T, string>> {
+  // Indexé par référence d'objet (pas par position numérique) : le tableau
+  // "zone" passé par l'appelant est un sous-ensemble filtré/tronqué de
+  // "items" (items vides retirés, éventuel numéro de page en tête retiré) —
+  // une correspondance par simple décalage numérique serait fausse dès qu'un
+  // seul item vide a été filtré avant la zone de titre.
+  const colorByItem = new Map<T, string>();
+  try {
+    const opList = await page.getOperatorList();
+    const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const OPS = (pdfjsLib as unknown as { OPS: Record<string, number> }).OPS;
+    const opNames = new Map<number, string>();
+    for (const key of Object.keys(OPS)) opNames.set(OPS[key], key);
+    let currentColor: string | null = null;
+    const colorPerShow: (string | null)[] = [];
+    for (let index = 0; index < opList.fnArray.length; index += 1) {
+      const name = opNames.get(opList.fnArray[index]);
+      if (name === "setFillRGBColor" && typeof opList.argsArray[index]?.[0] === "string") {
+        currentColor = opList.argsArray[index][0];
+      } else if (name === "setFillColorN" || name === "setFillGray" || name === "setFillCMYKColor" || name === "setFillColorSpace") {
+        // Espace de couleur non directement convertible ici : signal inconnu
+        // plutôt qu'une fausse couleur — jamais traité comme "coloré".
+        currentColor = null;
+      } else if (name === "showText" || name === "showSpacedText") {
+        colorPerShow.push(currentColor);
+      }
+    }
+    let showIndex = 0;
+    for (const item of items) {
+      if (!(item.str ?? "").trim()) continue;
+      if (showIndex < colorPerShow.length) {
+        const color = colorPerShow[showIndex];
+        if (color) colorByItem.set(item, color);
+      }
+      showIndex += 1;
+    }
+  } catch {
+    // Page illisible pour la liste d'opérateurs : aucune couleur connue,
+    // les autres signaux (majuscules, gras) restent seuls utilisés.
+  }
+  return colorByItem;
+}
+
+// Un titre distinctement coloré tranche toujours nettement sur le noir
+// (quasi universel pour le corps de texte d'un DAO) : on ne cherche pas une
+// teinte précise (bleu, vert...), seulement un écart net avec le noir ET le
+// blanc (une couleur presque blanche serait de toute façon invisible sur la
+// page et n'est donc jamais un vrai titre imprimé).
+function isDistinctColor(color: string | undefined) {
+  if (!color) return false;
+  const match = /^#([0-9a-f]{6})$/i.exec(color.trim());
+  if (!match) return false;
+  const value = match[1];
+  const r = parseInt(value.slice(0, 2), 16);
+  const g = parseInt(value.slice(2, 4), 16);
+  const b = parseInt(value.slice(4, 6), 16);
+  const nearBlack = r <= 60 && g <= 60 && b <= 60;
+  const nearWhite = r >= 235 && g >= 235 && b >= 235;
+  return !nearBlack && !nearWhite;
+}
+
+function fontSizeOf(item: { transform?: number[] }) {
+  const transform = item.transform;
+  return transform ? Math.hypot(transform[2] ?? 0, transform[3] ?? 0) : null;
+}
+
+// Un DAO exporté par un logiciel de bureautique (Word/LibreOffice → PDF) ne
+// nomme presque jamais sa police "Bold" même quand le texte est visuellement
+// gras (pdf.js ne rapporte alors qu'une famille générique "serif"/
+// "sans-serif", constaté sur un vrai contrat-cadre de fournitures) :
+// looksBold() reste alors bloqué à faux pour TOUT le document, y compris ses
+// vrais titres. La taille de police, elle, reste toujours lisible quel que
+// soit le logiciel d'export : un titre de section y est presque toujours
+// visiblement plus grand que le corps de texte qui l'entoure sur la MÊME
+// page (ex. 14pt de titre contre 10pt de corps). On calcule ici la taille la
+// plus fréquente de la page (le corps de texte), pour comparer chaque
+// candidat à SA propre page plutôt qu'à un seuil absolu arbitraire.
+function dominantFontSize(items: { str?: string; transform?: number[] }[]) {
+  const counts = new Map<number, number>();
+  for (const item of items) {
+    if (!(item.str ?? "").trim()) continue;
+    const size = fontSizeOf(item);
+    if (size === null) continue;
+    const rounded = Math.round(size * 2) / 2;
+    counts.set(rounded, (counts.get(rounded) ?? 0) + 1);
+  }
+  let best = 0;
+  let bestCount = 0;
+  for (const [size, count] of counts) if (count > bestCount) { bestCount = count; best = size; }
+  return best;
+}
+
+function isNoticeablyLarger(item: { transform?: number[] }, bodySize: number) {
+  const size = fontSizeOf(item);
+  return size !== null && bodySize > 0 && size >= bodySize * 1.15;
+}
+
 type PageTitle = { titleLine: string | null; heading: string };
 
 // Cherche, sur TOUTE la page (pas seulement ses toutes premières lignes), la
@@ -61,26 +172,90 @@ async function pageHeadingLine(doc: Awaited<ReturnType<typeof getDocument>["prom
   const page = await doc.getPage(pageNumber);
   const content = await page.getTextContent();
   const styles = (content.styles ?? {}) as Record<string, { fontFamily?: string }>;
-  type RawItem = { str?: string; fontName?: string };
-  const items = (content.items as RawItem[]).filter((item) => (item.str ?? "").trim());
+  type RawItem = { str?: string; fontName?: string; transform?: number[] };
+  const allItems = content.items as RawItem[];
+  const items = allItems.filter((item) => (item.str ?? "").trim());
   // La toute première ligne est souvent juste le numéro de page imprimé.
   const withoutPageNumber = items[0] && /^\d{1,4}$/.test((items[0].str ?? "").trim()) ? items.slice(1) : items;
   const zone = withoutPageNumber;
+  const isBlankRun = (item: RawItem) => !(item.str ?? "").trim();
   const isUppercaseRun = (item: RawItem) => isFullUppercase((item.str ?? "").trim());
   const isBoldUppercaseRun = (item: RawItem) => isUppercaseRun(item) && looksBold(item.fontName ? styles[item.fontName]?.fontFamily : undefined);
-  // Priorité au signal le plus fiable (majuscules ET gras). Certains DAO ne
-  // marquent toutefois JAMAIS le gras dans le nom de police de leur PDF (gras
-  // "simulé" sans changer de police, ou export d'un autre logiciel) : sans
-  // filet de secours, aucun titre ne serait plus jamais trouvé sur CE DAO
-  // précis, ce qui annulerait complètement la détection. Dès qu'AUCUNE ligne
-  // en gras+majuscules n'est trouvée dans la zone, on retombe donc sur les
-  // majuscules seules (le signal utilisé avec succès avant ce correctif).
-  const boldStartIndex = zone.findIndex(isBoldUppercaseRun);
-  const isTitleRun = boldStartIndex !== -1 ? isBoldUppercaseRun : isUppercaseRun;
-  const startIndex = boldStartIndex !== -1 ? boldStartIndex : zone.findIndex(isUppercaseRun);
+  // La taille de police ne coûte rien à calculer (déjà dans le "transform" de
+  // chaque item, aucun appel supplémentaire) : autant s'en servir tout de
+  // suite pour départager DEUX runs en majuscules ET en gras sur la même
+  // page — un vrai titre de section est presque toujours agrandi par rapport
+  // au corps de texte, alors qu'un simple en-tête de colonne de tableau
+  // ("DESIGNATIONS", "DELAI DE LIVRAISON"...) ou une locution juridique
+  // ("EN CONSEQUENCE") reste à la taille du corps. Sans cette préférence, le
+  // premier en-tête de tableau rencontré (souvent bien avant le vrai titre
+  // dans l'ordre de lecture) gagnait à tort, et le vrai titre plus bas sur la
+  // page n'était plus jamais vu par l'appelant.
+  const bodySize = dominantFontSize(items);
+  const isBoldUppercaseTitleRun = (item: RawItem) => isBoldUppercaseRun(item) && isNoticeablyLarger(item, bodySize);
+  // Priorité au signal le plus fiable (majuscules ET gras ET agrandi) ; à
+  // défaut, on retombe sur n'importe quel majuscules+gras (comportement
+  // historique, toujours nécessaire pour les DAO dont les titres ne sont
+  // jamais agrandis par rapport au corps).
+  const enlargedBoldStartIndex = zone.findIndex(isBoldUppercaseTitleRun);
+  const plainBoldStartIndex = enlargedBoldStartIndex === -1 ? zone.findIndex(isBoldUppercaseRun) : -1;
+  let isTitleRun = enlargedBoldStartIndex !== -1 ? isBoldUppercaseTitleRun : isBoldUppercaseRun;
+  let startIndex = enlargedBoldStartIndex !== -1 ? enlargedBoldStartIndex : plainBoldStartIndex;
+  if (startIndex === -1) {
+    // Un contrat-cadre de fournitures, par exemple, n'écrit jamais ses titres
+    // de pièce en majuscules ("Annexe 1", "Annexe 2 : Bordereau De Prix
+    // Unitaires...") — seule une couleur distincte du corps de texte (noir)
+    // les repère (constaté : bleu). D'autres titres du même DAO, eux, restent
+    // en noir mais sont simplement écrits nettement plus grand que le corps
+    // de texte qui les entoure (constaté : 14pt de titre contre 10-11pt de
+    // corps). On calcule la couleur ET la taille dominante de la page ICI
+    // seulement (jamais pour les DAO où le premier signal a déjà réussi) pour
+    // ne payer le coût de la liste d'opérateurs que quand c'est vraiment
+    // nécessaire. On exige un deuxième signal quand la couleur est le seul
+    // indice disponible (gras) pour ne jamais confondre un vrai titre avec
+    // une simple instruction ou un champ à remplir écrit dans la même
+    // couleur mais à la même taille que le reste du paragraphe (constaté sur
+    // un vrai DAO : "Dénomination sociale : <...>" en bleu, jamais agrandi
+    // comme un vrai titre de section) — une taille nettement plus grande, en
+    // revanche, suffit à elle seule, coloré ou non (looksBold() reste tenté
+    // en premier pour la combinaison avec la couleur ; il ne peut pas servir
+    // seul, une police "gras" n'étant pas toujours nommée comme telle par le
+    // logiciel d'export, cas observé d'un export LibreOffice où toutes les
+    // polices ne sont que "serif"/"sans-serif").
+    const colorByItem = await buildItemColorMap(page, allItems);
+    const isEmphasizedRun = (item: RawItem) => {
+      const big = isNoticeablyLarger(item, bodySize);
+      if (big) return true;
+      const bold = looksBold(item.fontName ? styles[item.fontName]?.fontFamily : undefined);
+      return bold && isDistinctColor(colorByItem.get(item));
+    };
+    const emphasizedStartIndex = zone.findIndex(isEmphasizedRun);
+    if (emphasizedStartIndex !== -1) {
+      isTitleRun = isEmphasizedRun;
+      startIndex = emphasizedStartIndex;
+    } else {
+      // Certains DAO ne marquent JAMAIS le gras dans le nom de police de leur
+      // PDF (gras "simulé" sans changer de police, export d'un autre
+      // logiciel) : sans filet de secours, aucun titre ne serait plus jamais
+      // trouvé sur ce DAO précis. Dernier recours : les majuscules seules
+      // (signal le moins fiable — un simple "ATTENDU QUE" en plein milieu
+      // d'un formulaire peut le déclencher — mais mieux que rien trouver).
+      isTitleRun = isUppercaseRun;
+      startIndex = zone.findIndex(isUppercaseRun);
+    }
+  }
   if (startIndex === -1) return { titleLine: null, heading: "" };
   const runs = [zone[startIndex]];
-  for (let index = startIndex + 1; index < zone.length && isTitleRun(zone[index]); index += 1) runs.push(zone[index]);
+  // Un titre de pièce colorée s'étale souvent sur deux paragraphes séparés
+  // ("Annexe 1" puis "Modèle de garantie bancaire de soumission" juste en
+  // dessous) avec un item vide entre les deux (retour à la ligne) : on
+  // saute ces items vides sans arrêter la lecture du titre, pour ne perdre
+  // ni l'un ni l'autre des deux morceaux du même titre.
+  for (let index = startIndex + 1; index < zone.length; index += 1) {
+    if (isBlankRun(zone[index])) continue;
+    if (!isTitleRun(zone[index])) break;
+    runs.push(zone[index]);
+  }
   const titleLine = runs.map((item) => (item.str ?? "").trim()).join(" ");
   return { titleLine, heading: normalizeText(titleLine) };
 }

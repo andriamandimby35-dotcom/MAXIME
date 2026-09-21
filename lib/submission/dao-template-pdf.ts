@@ -80,12 +80,31 @@ async function rebuildPageAsText(
     const transform = item.transform ?? [10, 0, 0, 10, 0, 0];
     const x = transform[4] ?? 0;
     const y = transform[5] ?? 0;
-    const fontSize = Math.max(4, Math.hypot(transform[2] ?? 0, transform[3] ?? 10));
+    let fontSize = Math.max(4, Math.hypot(transform[2] ?? 0, transform[3] ?? 10));
     const itemBox: Rect = { x, y, width: item.width || fontSize * text.length * 0.55, height: item.height || fontSize };
     if (suppressZones.some((zone) => rectsOverlap(zone, itemBox))) continue;
     const bold = looksBoldFont(item.fontName ? styles[item.fontName]?.fontFamily : undefined);
+    const chosenFont = bold ? boldFont : font;
+    const cleanedText = sanitizeForPdf(text);
+    // Notre police de substitution (DejaVu Sans, seule à couvrir tout
+    // l'Unicode nécessaire — voir pdf-font.ts) n'a pas forcément la même
+    // largeur de caractère que la police d'origine du DAO. Comme chaque item
+    // est redessiné à sa position d'origine SANS recalculer celle des items
+    // suivants, un texte qui s'avère plus large avec notre police peut
+    // déborder sur le début de l'item suivant, souvent collé juste derrière
+    // (ex. la fin d'une phrase juste avant une instruction entre crochets) —
+    // constaté sur un vrai DAO ("...la limite de [insérer..." devenu
+    // illisible, les deux bouts de texte fusionnés). pdf.js connaît la
+    // largeur RÉELLE de cet item sur la page d'origine (item.width) : on
+    // réduit la taille jusqu'à rentrer dedans plutôt que de laisser déborder
+    // sur le texte voisin — jamais l'inverse (agrandir), pour ne jamais
+    // perdre en lisibilité un texte qui tenait déjà très bien.
+    if (item.width && item.width > 0 && cleanedText.trim()) {
+      const measuredWidth = chosenFont.widthOfTextAtSize(cleanedText, fontSize);
+      if (measuredWidth > item.width) fontSize = Math.max(4, fontSize * (item.width / measuredWidth));
+    }
     try {
-      newPage.drawText(sanitizeForPdf(text), { x, y, size: fontSize, font: bold ? boldFont : font, color: rgb(0, 0, 0) });
+      newPage.drawText(cleanedText, { x, y, size: fontSize, font: chosenFont, color: rgb(0, 0, 0) });
     } catch {
       // Un caractère non couvert même par notre police Unicode ne doit
       // jamais faire échouer toute la page : ce mot précis reste simplement
@@ -133,6 +152,19 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
   const sourcePdf = await PDFDocument.load(source);
   const validPages = [...new Set(pageNumbers.map((page) => Math.floor(page)).filter((page) => page >= 1 && page <= sourcePdf.getPageCount()))];
   if (!validPages.length) throw new Error("Aucune page de modèle exploitable.");
+  // positions (recherche du libellé sur la page, une estimation "à côté ou en
+  // dessous du texte") et redactions (un "[...]" repéré et effacé) sont
+  // calculés INDÉPENDAMMENT, à partir des mêmes champs — un même champ peut
+  // donc très bien être retrouvé par les deux méthodes à la fois. Sans ce
+  // filtre, sa valeur était alors écrite DEUX FOIS sur la page, à deux
+  // endroits différents (l'un des deux forcément un peu à côté de la vraie
+  // case) — la cause la plus fréquente de chevauchement de texte constatée,
+  // bien avant même la question de reconstruire la page ou non. Le crochet
+  // repéré marque toujours l'emplacement exact de la case sur le modèle du
+  // DAO (plus fiable qu'une estimation par libellé) : c'est donc toujours
+  // lui qui l'emporte quand les deux se disputent le même champ.
+  const fieldKeysHandledByRedaction = new Set(redactions.map((zone) => zone.field_key).filter((key): key is string => Boolean(key)));
+  const dedupedPositions = positions.filter((position) => !fieldKeysHandledByRedaction.has(position.field_key));
   const result = await PDFDocument.create();
   if (documentTitle?.trim()) result.setTitle(compact(documentTitle.trim(), 200));
   const { font, boldFont } = await embedUnicodeFonts(result);
@@ -142,7 +174,7 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
   // modèle de panneau/logo n'a de toute façon jamais de position à remplir
   // (voir l'appelant) : ce garde-fou suffit donc à les exclure aussi, sans
   // dépendre d'un indicateur séparé passé depuis la route.
-  const shouldRebuild = Boolean(options.rebuildAsText) && (positions.length > 0 || redactions.length > 0);
+  const shouldRebuild = Boolean(options.rebuildAsText) && (dedupedPositions.length > 0 || redactions.length > 0);
   let pdfJsDoc: Awaited<ReturnType<typeof getDocument>["promise"]> | null = null;
   if (shouldRebuild) {
     try {
@@ -157,7 +189,7 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
       const sourcePageSize = sourcePdf.getPage(pageNumber - 1).getSize();
       const pageRedactions = redactions.filter((zone) => Math.floor(zone.page) === pageNumber)
         .map((zone) => redactionRect(sourcePageSize.width, sourcePageSize.height, zone));
-      const pagePositions = positions.filter((position) => Math.floor(position.page) === pageNumber)
+      const pagePositions = dedupedPositions.filter((position) => Math.floor(position.page) === pageNumber)
         .map((position) => positionRect(sourcePageSize.width, sourcePageSize.height, position));
       try {
         await rebuildPageAsText(readyDoc, pageNumber, result, font, boldFont, [...pageRedactions, ...pagePositions]);
@@ -193,7 +225,7 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
       page.drawText(compact(value, maxChars), { x, y: y + boxHeight * 0.18, size: fontSize, font, color: rgb(0, 0, 0) });
     }
   }
-  for (const position of positions) {
+  for (const position of dedupedPositions) {
     const outputIndex = validPages.indexOf(Math.floor(position.page));
     if (outputIndex < 0) continue;
     const value = values[position.field_key]?.trim();

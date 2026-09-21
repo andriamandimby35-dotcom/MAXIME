@@ -144,7 +144,14 @@ export async function locateBracketPlaceholders(pdfBytes: Uint8Array, candidateP
           fullText += item.str;
         }
         const usedFieldKeys = new Set<string>();
-        const bracketPattern = /\[([^[\]]{3,220})\]/g;
+        // Certaines instructions entre crochets sont de longs paragraphes
+        // explicatifs (ex. "[La compagnie de garantie remplit cette garantie
+        // d'offre conformément aux indications entre crochets...]" sur un
+        // modèle de caution) : la limite précédente (220 caractères) était
+        // trop courte pour ces cas-là, donc le crochet n'était jamais détecté
+        // et son texte d'instruction restait visible tel quel dans le PDF
+        // généré au lieu d'être effacé comme le DAO le demande lui-même.
+        const bracketPattern = /\[([^[\]]{3,1200})\]/g;
         let match: RegExpExecArray | null;
         while ((match = bracketPattern.exec(fullText))) {
           const innerStart = match.index + 1;
@@ -154,6 +161,19 @@ export async function locateBracketPlaceholders(pdfBytes: Uint8Array, candidateP
           const minX = spanItems.reduce((min, item) => Math.min(min, item.transform?.[4] ?? min), spanItems[0].transform?.[4] ?? 0);
           const maxX = spanItems.reduce((max, item) => Math.max(max, (item.transform?.[4] ?? 0) + (item.width ?? 0)), 0);
           const minY = spanItems.reduce((min, item) => Math.min(min, item.transform?.[5] ?? min), spanItems[0].transform?.[5] ?? 0);
+          // Une instruction entre crochets peut s'étaler sur PLUSIEURS lignes
+          // ("[insérer la somme en chiffres dans la monnaie du pays du Maître
+          // de l'Ouvrage ou un montant équivalent...]" sur 3 lignes, constaté
+          // sur un vrai DAO) : minY seul (la ligne la plus BASSE du crochet,
+          // les coordonnées PDF montant vers le haut) ne couvrait alors que
+          // la dernière ligne, laissant les lignes du dessus intactes avec
+          // leur texte d'instruction original — jamais effacées comme le DAO
+          // le demande, et un vrai risque de chevauchement avec la valeur
+          // écrite juste en dessous. maxY (la ligne la plus HAUTE) permet de
+          // couvrir tout l'intervalle vertical réellement occupé par le
+          // crochet, qu'il tienne sur une seule ligne (minY === maxY, aucun
+          // changement de comportement) ou plusieurs.
+          const maxY = spanItems.reduce((max, item) => Math.max(max, item.transform?.[5] ?? max), spanItems[0].transform?.[5] ?? 0);
           const fontHeight = Math.max(8, ...spanItems.map((item) => Math.abs(item.transform?.[3] ?? 10)));
           const innerText = match[1];
           const keywords = [...significantWords(innerText)].filter((word) => word.length >= 3);
@@ -172,9 +192,9 @@ export async function locateBracketPlaceholders(pdfBytes: Uint8Array, candidateP
             page: pageNumber,
             field_key: bestField?.field_key ?? null,
             x_percent: Math.max(0, Math.min(98, (minX / viewport.width) * 100)),
-            y_percent: Math.max(0, Math.min(99, 100 - (minY / viewport.height) * 100) - (fontHeight / viewport.height) * 100),
+            y_percent: Math.max(0, Math.min(99, 100 - (maxY / viewport.height) * 100) - (fontHeight / viewport.height) * 100),
             width_percent: Math.max(2, Math.min(90, ((maxX - minX) / viewport.width) * 100)),
-            height_percent: Math.max(1, Math.min(10, (fontHeight * 1.3 / viewport.height) * 100)),
+            height_percent: Math.max(1, Math.min(40, ((maxY - minY + fontHeight * 1.3) / viewport.height) * 100)),
           });
         }
       } catch {
