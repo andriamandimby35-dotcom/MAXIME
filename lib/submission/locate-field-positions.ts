@@ -139,9 +139,17 @@ export async function locateBracketPlaceholders(pdfBytes: Uint8Array, candidateP
         // TOUS les items couverts par un même "[...]".
         let fullText = "";
         const charItemMap: TextItem[] = [];
+        // Position du caractère à l'intérieur de la chaîne de SON PROPRE item
+        // (0, 1, 2, ...) — nécessaire pour retrouver la position horizontale
+        // réelle d'un crochet qui ne commence pas au tout début de son item.
+        const charLocalIndex: number[] = [];
         for (const item of items) {
-          for (const _char of item.str ?? "") { charItemMap.push(item); }
-          fullText += item.str;
+          const str = item.str ?? "";
+          for (let localIndex = 0; localIndex < str.length; localIndex += 1) {
+            charItemMap.push(item);
+            charLocalIndex.push(localIndex);
+          }
+          fullText += str;
         }
         const usedFieldKeys = new Set<string>();
         // Certaines instructions entre crochets sont de longs paragraphes
@@ -151,15 +159,50 @@ export async function locateBracketPlaceholders(pdfBytes: Uint8Array, candidateP
         // trop courte pour ces cas-là, donc le crochet n'était jamais détecté
         // et son texte d'instruction restait visible tel quel dans le PDF
         // généré au lieu d'être effacé comme le DAO le demande lui-même.
-        const bracketPattern = /\[([^[\]]{3,1200})\]/g;
+        // Certains DAO (notamment les modèles de garantie/caution des DAO de
+        // "fournitures") utilisent des chevrons "<...>" au lieu de crochets
+        // "[...]" pour exactement le même genre d'instruction à remplacer
+        // (ex. "<nom du Fournisseur>", "<insérer le montant en chiffres...>")
+        // — sans cette deuxième alternative, ces pages n'avaient AUCUN
+        // crochet détecté et gardaient tout le texte d'instruction original
+        // visible, sans jamais recevoir de valeur.
+        const bracketPattern = /\[([^[\]]{3,1200})\]|<([^<>]{3,1200})>/g;
         let match: RegExpExecArray | null;
         while ((match = bracketPattern.exec(fullText))) {
+          const innerTextRaw = match[1] ?? match[2] ?? "";
           const innerStart = match.index + 1;
-          const innerEnd = innerStart + match[1].length;
+          const innerEnd = innerStart + innerTextRaw.length;
           const spanItems = [...new Set(charItemMap.slice(match.index, innerEnd + 1))];
           if (!spanItems.length) continue;
-          const minX = spanItems.reduce((min, item) => Math.min(min, item.transform?.[4] ?? min), spanItems[0].transform?.[4] ?? 0);
-          const maxX = spanItems.reduce((max, item) => Math.max(max, (item.transform?.[4] ?? 0) + (item.width ?? 0)), 0);
+          // Sur un PDF à texte natif (ex. DAO "fournitures" converti depuis
+          // Word), pdf.js regroupe souvent toute une phrase dans un SEUL item
+          // au lieu d'un item par mot (contrairement aux DAO scannés/OCR où
+          // chaque mot est presque toujours son propre item). Si un crochet
+          // ne commence pas au tout début de son item ("ayant son siège
+          // <adresse complète du Fournisseur>" est un seul item), prendre les
+          // bornes de l'ITEM ENTIER comme largeur du crochet efface aussi le
+          // texte légitime qui le précède ou le suit sur la même ligne — "ayant
+          // son siège" disparaissait entièrement du document généré. On
+          // interpole donc la position horizontale réelle de chaque caractère
+          // du crochet au prorata de sa place dans la chaîne de son item,
+          // plutôt que de prendre les bornes de l'item entier (comportement
+          // inchangé quand un item ne contient QUE le crochet, comme sur les
+          // DAO scannés : la portion couvre alors tout l'item de toute façon).
+          let minX = Infinity;
+          let maxX = -Infinity;
+          for (let charIndex = match.index; charIndex <= innerEnd; charIndex += 1) {
+            const item = charItemMap[charIndex];
+            if (!item) continue;
+            const itemX = item.transform?.[4] ?? 0;
+            const itemWidth = item.width ?? 0;
+            const itemLength = (item.str ?? "").length || 1;
+            const localIndex = charLocalIndex[charIndex] ?? 0;
+            const charStartX = itemX + (localIndex / itemLength) * itemWidth;
+            const charEndX = itemX + ((localIndex + 1) / itemLength) * itemWidth;
+            minX = Math.min(minX, charStartX);
+            maxX = Math.max(maxX, charEndX);
+          }
+          if (!Number.isFinite(minX) || !Number.isFinite(maxX)) continue;
           const minY = spanItems.reduce((min, item) => Math.min(min, item.transform?.[5] ?? min), spanItems[0].transform?.[5] ?? 0);
           // Une instruction entre crochets peut s'étaler sur PLUSIEURS lignes
           // ("[insérer la somme en chiffres dans la monnaie du pays du Maître
@@ -175,7 +218,7 @@ export async function locateBracketPlaceholders(pdfBytes: Uint8Array, candidateP
           // changement de comportement) ou plusieurs.
           const maxY = spanItems.reduce((max, item) => Math.max(max, item.transform?.[5] ?? max), spanItems[0].transform?.[5] ?? 0);
           const fontHeight = Math.max(8, ...spanItems.map((item) => Math.abs(item.transform?.[3] ?? 10)));
-          const innerText = match[1];
+          const innerText = innerTextRaw;
           const keywords = [...significantWords(innerText)].filter((word) => word.length >= 3);
           let bestField: FieldTarget | null = null;
           let bestScore = 0;
@@ -184,7 +227,24 @@ export async function locateBracketPlaceholders(pdfBytes: Uint8Array, candidateP
             const fieldKeywords = [...significantWords(`${field.label} ${field.description ?? ""}`)].filter((word) => word.length >= 3);
             if (!fieldKeywords.length || !keywords.length) continue;
             const shared = fieldKeywords.filter((word) => keywords.includes(word)).length;
-            const score = shared / Math.min(fieldKeywords.length, keywords.length);
+            // Diviser par le plus PETIT des deux côtés (comme avant) favorise
+            // à tort un long paragraphe d'instruction générale ("[La banque
+            // remplit ce modèle de garantie d'offre conformément aux
+            // indications entre crochets]", 9 mots-clés) qui ne partage que
+            // 2 mots très génériques ("garantie", "offre") avec un champ —
+            // le score ne regarde alors que le côté du champ (3 mots-clés) et
+            // ignore que ces 2 mots ne représentent presque rien du long
+            // crochet en face. Constaté sur un vrai DAO : cette instruction
+            // générale volait le champ "Garantie d'offre no." AVANT que le
+            // vrai crochet "[insérer No de garantie]" ne soit lu, qui devait
+            // alors se rabattre sur un autre champ, et ainsi de suite en
+            // cascade sur plusieurs champs suivants. Le coefficient de Dice
+            // (2×intersection / somme des deux tailles) exige que le
+            // recoupement soit significatif des DEUX côtés à la fois, pas
+            // seulement du plus petit — il rejette ce genre de faux positif
+            // tout en acceptant toujours un crochet court et précis comme
+            // "[insérer No de garantie]" face à son propre champ.
+            const score = (2 * shared) / (fieldKeywords.length + keywords.length);
             if (score > bestScore && score >= 0.4) { bestScore = score; bestField = field; }
           }
           if (bestField) usedFieldKeys.add(bestField.field_key);

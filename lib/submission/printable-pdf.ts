@@ -109,8 +109,30 @@ export async function createPrintableSubmissionPdf(title: string, company: Recor
         const width = widths[columnIndex];
         const x = MARGIN_X + offsets[columnIndex];
         page.drawRectangle({ x, y: y - ROW_HEIGHT, width, height: ROW_HEIGHT, borderColor: rgb(0.6, 0.6, 0.6), borderWidth: 0.7 });
-        const clipped = cleanText(value).slice(0, Math.max(8, Math.floor(width / 5.2)));
-        if (clipped.trim()) page.drawText(clipped, { x: x + 3, y: y - ROW_HEIGHT + 6, size: 8, font, color: rgb(0, 0, 0) });
+        const text = cleanText(value);
+        if (!text.trim()) return;
+        const maxWidth = Math.max(1, width - 6);
+        // On réduit d'abord la taille de police (jusqu'à 6pt) si le texte
+        // ne rentre pas dans la colonne, au lieu de couper un nombre fixe
+        // de caractères au hasard : l'ancienne méthode tronquait par ex.
+        // "Technicien supérieur BTP" en "Technicien supérieur B", perdant
+        // silencieusement une vraie information (diplôme, marque, etc.).
+        let fontSize = 8;
+        const fullWidthAtDefault = font.widthOfTextAtSize(text, fontSize);
+        if (fullWidthAtDefault > maxWidth) {
+          fontSize = Math.max(6, fontSize * (maxWidth / fullWidthAtDefault));
+        }
+        let display = text;
+        // Si même à la taille minimale le texte ne rentre toujours pas, on
+        // tronque avec "…" pour signaler clairement une coupure plutôt que
+        // de couper le mot sans indication.
+        if (font.widthOfTextAtSize(display, fontSize) > maxWidth) {
+          while (display.length > 1 && font.widthOfTextAtSize(`${display}…`, fontSize) > maxWidth) {
+            display = display.slice(0, -1);
+          }
+          display = `${display}…`;
+        }
+        page.drawText(display, { x: x + 3, y: y - ROW_HEIGHT + 6, size: fontSize, font, color: rgb(0, 0, 0) });
       });
       y -= ROW_HEIGHT;
     };

@@ -222,7 +222,16 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
     if (value) {
       const fontSize = Math.max(6, Math.min(9, boxHeight * 0.72));
       const maxChars = Math.max(4, Math.floor(boxWidth / (fontSize * 0.55)));
-      page.drawText(compact(value, maxChars), { x, y: y + boxHeight * 0.18, size: fontSize, font, color: rgb(0, 0, 0) });
+      // La valeur doit apparaître là où commençait le texte entre crochets
+      // d'origine, donc en haut de la zone effacée — pas au milieu de sa
+      // hauteur totale, qui peut désormais être grande pour une instruction
+      // sur plusieurs lignes (sinon la valeur atterrit sur la dernière
+      // ligne de la zone, au même endroit qu'un champ voisin sur cette
+      // ligne). Un simple décalage fixe sous le haut de la boîte, basé sur
+      // la taille de police, place le texte correctement quelle que soit
+      // la hauteur de la boîte.
+      const textY = y + boxHeight - fontSize * 1.05;
+      page.drawText(compact(value, maxChars), { x, y: textY, size: fontSize, font, color: rgb(0, 0, 0) });
     }
   }
   for (const position of dedupedPositions) {
