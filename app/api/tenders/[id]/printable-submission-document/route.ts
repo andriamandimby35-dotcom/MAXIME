@@ -270,9 +270,25 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // qu'il fallait écrire (ça se confond avec une vraie information sur un
   // document destiné à être signé tel quel) : on laisse un blanc, exactement
   // comme le ferait un candidat qui complète le modèle DAO à la main.
-  const replaceTemplateFields = (value: string) => value.replace(/\{\{([a-z0-9_]+)\}\}/gi, (_match, key: string) => {
-    return templateValues[key]?.trim() ?? "";
-  });
+  // Le texte repris tel quel du DAO (detectedTemplate.template_text) n'a
+  // jamais de vrais {{champs}} : ce sont les pointillés/tirets/soulignés du
+  // formulaire original, prévus pour être remplis À LA MAIN sur le papier.
+  // Les laisser tels quels donnait l'impression que l'appli avait "oublié"
+  // de remplir des champs, alors qu'elle n'a simplement aucune valeur à y
+  // mettre. Règle demandée : une case sans valeur reste vide, sans aucun
+  // pointillé/tiret/trait à la place.
+  const replaceTemplateFields = (value: string) => value
+    .replace(/\{\{([a-z0-9_]+)\}\}/gi, (_match, key: string) => {
+      return templateValues[key]?.trim() ?? "";
+    })
+    .replace(/(?:\.[ \t]?){4,}\.?/g, "")
+    .replace(/\.{4,}/g, "")
+    .replace(/…{2,}/g, "")
+    .replace(/-{4,}/g, "")
+    .replace(/_{3,}/g, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
   const filledFields = fields.map((field) => {
     const key = field.key ?? "";
     const label = field.label ?? key;
