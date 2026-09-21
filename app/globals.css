@@ -410,7 +410,7 @@ button,.button,.historyButton,.addPriceButton,.ghost,.ghostButton{transition:tra
   .submissionTable td{padding:4px 0;border:0}
   .submissionTable td[data-label]::before{content:attr(data-label);display:block;color:var(--muted);font-size:.68rem;font-weight:800;text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px}
   .submissionOpenLink::after{content:"";position:absolute;inset:0}
-  .submissionTable td.submissionPdfCell{position:relative;z-index:1;margin-top:6px}
+  .submissionTable td.submissionRowActions{position:relative;z-index:1;margin-top:6px;display:flex;flex-wrap:wrap;gap:9px}
 }
 .submissionPdfReady { background: #e2f8eb !important; border-color: #18804c !important; color: #075b31 !important; }
 .submissionPdfReady:hover { background: #c7f0d8 !important; }
