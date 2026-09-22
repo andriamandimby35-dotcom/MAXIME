@@ -21,3 +21,7 @@ Thumbs.db
 
 coverage/
 .cache/
+
+# Fichiers d'apercu/test generes localement (captures HTML, PDF de test...),
+# jamais du vrai code de l'appli : pas besoin de les suivre dans git.
+Claude outputs/
