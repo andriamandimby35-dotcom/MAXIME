@@ -289,12 +289,21 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     .replace(/[ \t]{2,}/g, " ")
     .replace(/[ \t]+\n/g, "\n")
     .trim();
-  const filledFields = fields.map((field) => {
-    const key = field.key ?? "";
-    const label = field.label ?? key;
-    const value = formData[key] || profileData[key] || (/contrat|reference|marche/i.test(`${key} ${label}`) ? tender.reference || "" : "");
-    return value ? `${label} : ${value}` : `${label} : À compléter`;
-  });
+  // Même règle que replaceTemplateFields plus haut ("une case sans valeur
+  // reste vide") : un champ dont on n'a aucune valeur ne doit plus imprimer
+  // "Label : À compléter" (ça se lisait comme si l'appli demandait à
+  // l'utilisateur de compléter quelque chose sur LE PDF final, alors que
+  // c'est juste une info qu'on n'a pas encore) — la ligne est simplement
+  // omise du récapitulatif, exactement comme un pointillé du DAO qu'on ne
+  // sait pas remplir reste vide plutôt que d'expliquer quoi y écrire.
+  const filledFields = fields
+    .map((field) => {
+      const key = field.key ?? "";
+      const label = field.label ?? key;
+      const value = formData[key] || profileData[key] || (/contrat|reference|marche/i.test(`${key} ${label}`) ? tender.reference || "" : "");
+      return value ? `${label} : ${value}` : null;
+    })
+    .filter((line): line is string => Boolean(line));
   const analysisForValues = tender.ai_analysis as { execution_period_days?: number } | null;
   if (analysisForValues?.execution_period_days != null) {
     templateValues.delai_execution = `${analysisForValues.execution_period_days} jours`;
@@ -405,8 +414,10 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   const submissionLetterLines = detectedTemplate?.template_text?.trim()
     ? [
       replaceTemplateFields(detectedTemplate.template_text),
-      "",
-      "Informations du formulaire :", ...filledFields,
+      // Le titre "Informations du formulaire :" n'a de sens que s'il y a au
+      // moins une ligne en dessous — sinon il reste un titre suivi de rien,
+      // ce qui a l'air d'un oubli plutôt que d'une absence volontaire.
+      ...(filledFields.length ? ["", "Informations du formulaire :", ...filledFields] : []),
     ]
     : generatedLetterLines;
   const isPersonnelRoster = /personnel|personnels|ressources humaines|equipe/i.test(title) && !isWorkerContract;
