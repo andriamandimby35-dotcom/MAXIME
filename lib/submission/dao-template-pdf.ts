@@ -2,22 +2,19 @@ import { PDFDocument, PDFFont, rgb } from "pdf-lib";
 import { embedUnicodeFonts } from "./pdf-font";
 import "@/lib/submission/pdfjs-worker-setup";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { isBlankMarkerRun } from "./blank-marker";
 
-type FillPosition = { page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number };
+// field_size (facultatif) : taille de police RÉELLE du texte trouvé à cet
+// emplacement sur la page DAO d'origine (calculée par locateFieldPositions /
+// locateTableCellPositions à partir du "transform" pdf.js de l'item repéré),
+// pour que la valeur écrite se fonde dans le texte environnant au lieu
+// d'utiliser systématiquement une taille fixe qui jure avec le reste de la
+// page (ex. libellés en 11pt, valeur toujours en 8pt) — constaté sur un vrai
+// DAO ("Lettre de soumission") : les valeurs ajoutées semblaient "collées
+// depuis un autre document" plutôt que recopiées à la main.
+type FillPosition = { page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number; font_size?: number };
 type RedactionZone = { page: number; field_key: string | null; x_percent: number; y_percent: number; width_percent: number; height_percent: number };
 type Rect = { x: number; y: number; width: number; height: number };
-
-// Un texte composé UNIQUEMENT de points, tirets ou soulignés répétés
-// (".........", "______", "- - - -") est TOUJOURS un simple repère visuel de
-// blanc à compléter sur un modèle DAO, jamais du vrai contenu, quel que soit
-// le DAO : on ne le redessine donc jamais lors de la reconstruction d'une
-// page en texte (voir rebuildPageAsText plus bas) — qu'une valeur vienne le
-// remplacer ou non, ça libère systématiquement la place prévue pour la case
-// à remplir sans jamais superposer notre texte à ces pointillés.
-function isBlankMarkerRun(text: string) {
-  const trimmed = text.trim();
-  return trimmed.length >= 2 && /^[.\-_·•∙]+$/.test(trimmed);
-}
 
 function looksBoldFont(fontFamily: string | undefined) {
   return Boolean(fontFamily && /bold/i.test(fontFamily));
@@ -38,10 +35,18 @@ function redactionRect(width: number, height: number, zone: RedactionZone): Rect
   return { x: x - 1, y: y - 1, width: boxWidth + 2, height: boxHeight + 2 };
 }
 
+// Une taille de police en dehors de cette fourchette serait soit illisible
+// (trop petite), soit ne rentrerait plus dans la case d'origine du DAO (trop
+// grande) — les mêmes bornes que la boucle "redactions" plus bas, qui a fait
+// ses preuves pour ce genre de valeur courte insérée sur une page existante.
+function clampFontSize(size: number | undefined) {
+  return Math.max(6, Math.min(11, size ?? 8));
+}
+
 // Même calcul que la boucle "positions" plus bas (garde le même rectangle
 // blanchi), en zone à ne pas redessiner plutôt qu'en rectangle dessiné.
 function positionRect(width: number, height: number, position: FillPosition): Rect {
-  const fontSize = 8;
+  const fontSize = clampFontSize(position.font_size);
   const coverHeight = fontSize * 1.5;
   const available = Math.max(10, width * Math.max(1, Math.min(90, position.width_percent)) / 100);
   const x = width * Math.max(0, Math.min(100, position.x_percent)) / 100;
@@ -240,7 +245,7 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
     const value = values[position.field_key]?.trim();
     const page = result.getPage(outputIndex);
     const { width, height } = page.getSize();
-    const fontSize = 8;
+    const fontSize = clampFontSize(position.font_size);
     const available = Math.max(10, width * Math.max(1, Math.min(90, position.width_percent)) / 100);
     const x = width * Math.max(0, Math.min(100, position.x_percent)) / 100;
     const y = height - (height * Math.max(0, Math.min(100, position.y_percent)) / 100) - fontSize;

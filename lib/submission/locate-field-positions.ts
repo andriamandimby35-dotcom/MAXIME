@@ -1,6 +1,7 @@
 import "@/lib/submission/pdfjs-worker-setup";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { significantWords } from "@/lib/submission/title-match";
+import { isBlankMarkerRun } from "@/lib/submission/blank-marker";
 
 // L'IA ne donne quasiment jamais de position fiable pour écrire une valeur
 // sur la page DAO elle-même (constaté : 0 position sur 16 pièces d'un DAO
@@ -12,7 +13,12 @@ import { significantWords } from "@/lib/submission/title-match";
 // le modèle à la main, quel que soit le DAO.
 type TextItem = { str?: string; transform?: number[]; width?: number };
 type FieldTarget = { field_key: string; label: string; description?: string };
-type LocatedPosition = { page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number };
+// font_size (facultatif) : taille de police réelle relevée sur la page DAO à
+// cet emplacement précis (voir fontSizeOfItem plus bas) — transmise jusqu'à
+// createFilledDaoTemplatePdf pour que la valeur écrite ait la même taille que
+// le texte qu'elle remplace, au lieu d'une taille fixe qui jure avec le
+// reste de la page.
+type LocatedPosition = { page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number; font_size?: number };
 type LineGroup = { items: TextItem[]; text: string; y: number };
 type PageData = { items: TextItem[]; width: number; height: number; lineGroups: LineGroup[] };
 
@@ -40,6 +46,16 @@ async function loadPageData(doc: Awaited<ReturnType<typeof getDocument>["promise
   } catch {
     return null;
   }
+}
+
+// Même calcul que rebuildPageAsText (dao-template-pdf.ts) pour rester
+// cohérent avec la taille à laquelle le texte environnant est redessiné :
+// la diagonale de la partie "échelle" du transform pdf.js donne la taille de
+// police réelle de cet item sur la page d'origine.
+function fontSizeOfItem(item: TextItem | undefined): number | undefined {
+  const transform = item?.transform;
+  if (!transform) return undefined;
+  return Math.hypot(transform[2] ?? 0, transform[3] ?? 0) || undefined;
 }
 
 /** Trouve, parmi les lignes de la page, celle qui correspond le mieux aux mots-clés d'un libellé. */
@@ -78,19 +94,39 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
         bestLine.items.forEach((item) => usedItems.add(item));
         const rightmost = bestLine.items.reduce((max, item) => Math.max(max, (item.transform?.[4] ?? 0) + (item.width ?? 0)), 0);
         const topY = bestLine.items.reduce((min, item) => Math.min(min, item.transform?.[5] ?? min), bestLine.items[0].transform?.[5] ?? 0);
+        // Le libellé lui-même est presque toujours suivi, SUR LA MÊME LIGNE,
+        // d'un repère de blanc à remplir (".........", "______") : c'est LÀ,
+        // et pas "à la fin de la ligne entière", que doit aller la valeur.
+        // Sur une ligne de prose (lettre de soumission), la fin de la ligne
+        // est presque toujours proche de la marge droite à cause de son
+        // propre pointillé de fin de ligne — sans ce repérage, toutes les
+        // valeurs de champs différents, sur des lignes différentes,
+        // finissaient regroupées à la verticale près du bord droit de la
+        // page au lieu d'apparaître chacune à l'endroit naturel de son
+        // propre blanc.
+        const blankRunItem = bestLine.items
+          .filter((item) => isBlankMarkerRun(item.str ?? ""))
+          .sort((left, right) => (left.transform?.[4] ?? 0) - (right.transform?.[4] ?? 0))[0];
         const remainingWidth = pageData.width - rightmost;
         // Une valeur courte tient à droite du libellé sur la même ligne ;
         // sinon (label prenant déjà toute la largeur) on la place juste en
         // dessous, à l'alignement gauche de la ligne.
-        const placeBelow = remainingWidth < pageData.width * 0.12;
-        const x = placeBelow ? (bestLine.items[0].transform?.[4] ?? 0) : rightmost + 4;
+        const placeBelow = !blankRunItem && remainingWidth < pageData.width * 0.12;
+        const x = blankRunItem ? (blankRunItem.transform?.[4] ?? rightmost + 4) : placeBelow ? (bestLine.items[0].transform?.[4] ?? 0) : rightmost + 4;
         const y = placeBelow ? topY - 14 : topY;
+        const blankRunWidth = blankRunItem?.width;
         results.push({
           page: pageNumber,
           field_key: target.field_key,
           x_percent: Math.max(0, Math.min(96, (x / pageData.width) * 100)),
           y_percent: Math.max(0, Math.min(98, 100 - (y / pageData.height) * 100)),
-          width_percent: placeBelow ? 60 : Math.max(15, Math.min(60, (remainingWidth / pageData.width) * 100 - 2)),
+          width_percent: blankRunWidth
+            ? Math.max(15, Math.min(60, (blankRunWidth / pageData.width) * 100))
+            : placeBelow ? 60 : Math.max(15, Math.min(60, (remainingWidth / pageData.width) * 100 - 2)),
+          // La taille du pointillé remplacé (ou, à défaut, celle du libellé
+          // lui-même) reflète la taille de police réellement utilisée à cet
+          // endroit précis de la page — plus fiable qu'une taille fixe.
+          font_size: fontSizeOfItem(blankRunItem) ?? fontSizeOfItem(bestLine.items[0]),
         });
         foundKeys.add(target.field_key);
       }
@@ -371,6 +407,9 @@ export async function locateTableCellPositions(pdfBytes: Uint8Array, candidatePa
           x_percent: Math.max(0, Math.min(96, (columnStart / pageData.width) * 100)),
           y_percent: Math.max(0, Math.min(98, 100 - (rowY / pageData.height) * 100)),
           width_percent: Math.max(10, Math.min(40, ((columnEnd - columnStart) / pageData.width) * 100 - 2)),
+          // Taille du libellé de LIGNE ("Travaux", "Fournitures"...) : c'est
+          // le texte le plus proche de la case remplie dans ce tableau.
+          font_size: fontSizeOfItem(rowLine.items[0]),
         });
         foundKeys.add(target.field_key);
       }
