@@ -217,13 +217,33 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
           for (const item of bestLine.items) {
             const str = item.str ?? "";
             const itemX = item.transform?.[4] ?? 0;
-            const itemWidth = estimatedWidth(item, widthFont);
-            const itemLength = str.length || 1;
+            const itemFontSize = fontSizeOfItem(item) ?? 10;
             blankRunPattern.lastIndex = 0;
             let match: RegExpExecArray | null;
             while ((match = blankRunPattern.exec(str))) {
-              const startX = itemX + (match.index / itemLength) * itemWidth;
-              const endX = itemX + ((match.index + match[0].length) / itemLength) * itemWidth;
+              // La position du pointillé À L'INTÉRIEUR de l'item se calculait
+              // au prorata de son index de caractère (index / longueur totale
+              // × largeur totale) — une estimation qui suppose que chaque
+              // caractère a la MÊME largeur, ce qui n'est jamais vrai avec une
+              // police à chasse variable (un "i" est bien plus étroit qu'un
+              // "m"). Constaté sur un vrai DAO : ça décalait le début du
+              // pointillé de quelques caractères vers la gauche, si bien que
+              // la valeur écrite ensuite mangeait le début du mot suivant
+              // ("en date du" affiché "n date du", "concernant" affiché
+              // "ncernant"). On mesure ici la largeur RÉELLE du texte qui
+              // précède le pointillé avec la même police de secours que
+              // estimatedWidth, bien plus fidèle qu'une simple proportion.
+              let startX: number;
+              let endX: number;
+              try {
+                startX = itemX + widthFont.widthOfTextAtSize(str.slice(0, match.index), itemFontSize);
+                endX = itemX + widthFont.widthOfTextAtSize(str.slice(0, match.index + match[0].length), itemFontSize);
+              } catch {
+                const itemWidth = estimatedWidth(item, widthFont);
+                const itemLength = str.length || 1;
+                startX = itemX + (match.index / itemLength) * itemWidth;
+                endX = itemX + ((match.index + match[0].length) / itemLength) * itemWidth;
+              }
               if (!embeddedBlank || startX < embeddedBlank.x) {
                 embeddedBlank = { x: startX, width: Math.max(10, endX - startX), fontSize: fontSizeOfItem(item) };
               }
@@ -356,11 +376,26 @@ export async function locateBracketPlaceholders(pdfBytes: Uint8Array, candidateP
             const item = charItemMap[charIndex];
             if (!item) continue;
             const itemX = item.transform?.[4] ?? 0;
-            const itemWidth = estimatedWidth(item, widthFont);
-            const itemLength = (item.str ?? "").length || 1;
             const localIndex = charLocalIndex[charIndex] ?? 0;
-            const charStartX = itemX + (localIndex / itemLength) * itemWidth;
-            const charEndX = itemX + ((localIndex + 1) / itemLength) * itemWidth;
+            const str = item.str ?? "";
+            // Même mesure de largeur réelle que locateFieldPositions (au lieu
+            // d'une proportion "index / longueur × largeur totale", imprécise
+            // dès qu'un caractère plus étroit ou plus large que la moyenne
+            // précède le crochet) — repli sur l'ancienne estimation
+            // proportionnelle si un caractère n'est pas mesurable par la
+            // police de secours.
+            let charStartX: number;
+            let charEndX: number;
+            try {
+              const itemFontSize = fontSizeOfItem(item) ?? 10;
+              charStartX = itemX + widthFont.widthOfTextAtSize(str.slice(0, localIndex), itemFontSize);
+              charEndX = itemX + widthFont.widthOfTextAtSize(str.slice(0, localIndex + 1), itemFontSize);
+            } catch {
+              const itemWidth = estimatedWidth(item, widthFont);
+              const itemLength = str.length || 1;
+              charStartX = itemX + (localIndex / itemLength) * itemWidth;
+              charEndX = itemX + ((localIndex + 1) / itemLength) * itemWidth;
+            }
             minX = Math.min(minX, charStartX);
             maxX = Math.max(maxX, charEndX);
           }
