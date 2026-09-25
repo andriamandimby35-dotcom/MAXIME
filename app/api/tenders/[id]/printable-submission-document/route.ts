@@ -502,9 +502,18 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       ...table,
       title: replaceTemplateFields(table.title),
       columns: table.columns.map(replaceTemplateFields),
+      // Une case qui n'est PAS une colonne "entreprise" (un libellé du DAO
+      // lui-même, ex. l'en-tête d'une ligne de tableau) ne doit jamais être
+      // remplacée par une vraie valeur — mais elle doit quand même perdre un
+      // repère "{{...}}" mal formé si l'IA en a laissé un par erreur (constaté :
+      // "{{profil entreprise}}", avec un espace, que l'ancien regex strict
+      // [a-z0-9_]+ ne pouvait jamais reconnaître et laissait donc s'afficher
+      // tel quel). On réutilise ici le même nettoyage complet que
+      // replaceTemplateFields plutôt qu'une version allégée, pour rester
+      // cohérent partout où un tel repère peut apparaître.
       rows: table.rows.map((row) => row.map((cell, columnIndex) => orgColumns.includes(columnIndex)
         ? replaceTemplateFields(cell)
-        : cell.replace(/\{\{[a-z0-9_]+\}\}/gi, ""))),
+        : cell.replace(/\{\{[^{}]{1,80}\}\}/g, ""))),
     };
   });
   const rosterTable = (() => {
