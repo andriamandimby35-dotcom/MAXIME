@@ -1,8 +1,9 @@
 import "@/lib/submission/pdfjs-worker-setup";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
-import { PDFDocument, PDFFont, StandardFonts } from "pdf-lib";
+import { PDFDocument, PDFFont } from "pdf-lib";
 import { significantWords } from "@/lib/submission/title-match";
 import { isBlankMarkerRun } from "@/lib/submission/blank-marker";
+import { embedUnicodeFonts } from "@/lib/submission/pdf-font";
 
 // L'IA ne donne quasiment jamais de position fiable pour écrire une valeur
 // sur la page DAO elle-même (constaté : 0 position sur 16 pièces d'un DAO
@@ -110,10 +111,23 @@ function fontSizeOfItem(item: TextItem | undefined): number | undefined {
 // essai avec un facteur fixe (0.55 fois la taille de police par caractère)
 // sous-estimait encore ce même libellé et laissait déborder la valeur sur sa
 // fin ("Numéro d'immatr" coupé, la valeur écrasant "iculation Fiscale :").
+// Avant ce correctif, cette police de mesure était Helvetica (une police
+// standard de pdf-lib) — DIFFÉRENTE de celle qui dessine vraiment le texte
+// ensuite (DejaVu Sans, voir pdf-font.ts et dao-template-pdf.ts). Deux
+// polices aux largeurs différentes utilisées à deux étapes du MÊME calcul :
+// une position/largeur mesurée ici avec Helvetica, puis réutilisée (via
+// x_percent/y_percent/width_percent, convertis en points sur la page) pour
+// dessiner avec DejaVu Sans — un décalage systématique entre "où on a mesuré
+// que ça devait aller" et "où ça atterrit vraiment", d'autant plus visible
+// que DejaVu Sans rend plus large qu'Helvetica. Repéré sur un vrai DAO : la
+// valeur "150" (délai d'exécution) restait mal positionnée dans la phrase
+// reconstruite malgré un blanc pourtant correctement repéré au caractère
+// près. Mesurer ICI avec la police qui dessinera vraiment le texte élimine
+// ce décalage à la racine, au lieu de corriger chaque symptôme séparément.
 let widthEstimatorFontPromise: Promise<PDFFont> | null = null;
 function getWidthEstimatorFont(): Promise<PDFFont> {
   if (!widthEstimatorFontPromise) {
-    widthEstimatorFontPromise = PDFDocument.create().then((doc) => doc.embedFont(StandardFonts.Helvetica));
+    widthEstimatorFontPromise = PDFDocument.create().then(async (doc) => (await embedUnicodeFonts(doc)).font);
   }
   return widthEstimatorFontPromise;
 }
