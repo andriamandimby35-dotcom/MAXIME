@@ -30,12 +30,30 @@ function redactionRect(width: number, height: number, zone: RedactionZone): Rect
   return { x: x - 1, y: y - 1, width: boxWidth + 2, height: boxHeight + 2 };
 }
 
+// DejaVu Sans (notre police unique, voir pdf-font.ts) dessine sensiblement
+// plus "large"/plus épais qu'une police système classique (Arial, Calibri...)
+// à la même taille déclarée — vérifié en comparant un même mot dessiné avec
+// notre police à deux tailles très différentes : l'écart de taille SEUL, avec
+// une police pourtant identique, donne déjà l'impression d'"une autre
+// police", plus grasse. Or le texte reconstruit (drawReconstructedItem)
+// RÉDUIT sa taille dès que notre police déborderait la largeur d'origine
+// (fréquent, justement à cause de cet écart), alors qu'une VALEUR insérée
+// gardait jusqu'ici sa taille d'origine intacte, sans jamais subir la même
+// réduction — repéré sur un vrai DAO ("Lettre de soumission") : les valeurs
+// ajoutées ("ANDRIAMANDIMBY MAXIME", "150"...) semblaient dans une police
+// différente, plus grasse, du texte reconstruit autour, alors que c'est
+// exactement la même police de caractères. Ce facteur réduit LES DEUX
+// (valeurs et texte reconstruit, voir plus bas) du même pourcentage avant
+// toute autre logique, pour qu'elles restent visuellement cohérentes entre
+// elles au lieu que seul le texte reconstruit compense l'écart.
+const FONT_SIZE_SAFETY = 0.9;
+
 // Une taille de police en dehors de cette fourchette serait soit illisible
 // (trop petite), soit ne rentrerait plus dans la case d'origine du DAO (trop
 // grande) — les mêmes bornes que la boucle "redactions" plus bas, qui a fait
 // ses preuves pour ce genre de valeur courte insérée sur une page existante.
 function clampFontSize(size: number | undefined) {
-  return Math.max(6, Math.min(11, size ?? 8));
+  return Math.max(6, Math.min(11, (size ?? 8) * FONT_SIZE_SAFETY));
 }
 
 // Même calcul que la boucle "positions" plus bas (garde le même rectangle
@@ -115,7 +133,7 @@ function drawReconstructedItem(
   const transform = item.transform ?? [10, 0, 0, 10, 0, 0];
   const x = transform[4] ?? 0;
   const y = transform[5] ?? 0;
-  let fontSize = Math.max(4, Math.hypot(transform[2] ?? 0, transform[3] ?? 10));
+  let fontSize = Math.max(4, Math.hypot(transform[2] ?? 0, transform[3] ?? 10) * FONT_SIZE_SAFETY);
   // La police qu'on dessine (DejaVu Sans, embarquée pour tout le document) ne
   // rend jamais un texte EXACTEMENT à la même largeur que la police d'origine
   // du DAO (souvent une police système différente) — mesurer et dessiner
@@ -314,7 +332,7 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
       const value = zone.field_key ? values[zone.field_key]?.trim() : "";
       if (!value) continue;
       const rect = redactionRect(sourcePageSize.width, sourcePageSize.height, zone);
-      const fontSize = Math.max(6, Math.min(9, rect.height * 0.72));
+      const fontSize = Math.max(6, Math.min(9, rect.height * 0.72 * FONT_SIZE_SAFETY));
       const maxChars = Math.max(4, Math.floor(rect.width / (fontSize * 0.55)));
       // La valeur doit apparaître là où commençait le texte entre crochets
       // d'origine, donc en haut de la zone effacée — pas au milieu de sa

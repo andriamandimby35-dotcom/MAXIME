@@ -678,11 +678,21 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             // résolu, le LIBELLÉ attendu à côté du texte RÉEL de la ligne
             // choisie sur la page DAO, pour vérifier directement lequel des
             // deux est en cause plutôt que de deviner.
+            // font_size ajouté ici (jamais utilisé pour dessiner quoi que ce
+            // soit, uniquement remonté aux journaux) : signalé sur un vrai
+            // DAO que les valeurs insérées semblent plus grandes/plus grasses
+            // que le texte reconstruit autour, sans qu'aucun code ne dessine
+            // pourtant sciemment avec une police ou une taille différente.
+            // Ce chiffre permet de vérifier directement si la taille RETENUE
+            // pour la valeur (position.font_size, mesurée sur la page DAO
+            // d'origine à cet endroit précis) est bien cohérente avec le
+            // reste du texte de la ligne, plutôt que de deviner.
             const resolvedFieldsDebug = positions.map((position) => ({
               field_key: position.field_key,
               label: fieldTargets.find((field) => field.field_key === position.field_key)?.label,
               matched_line: position.debug_matched_line,
               blank_kind: position.debug_blank_kind,
+              font_size: position.font_size ? Math.round(position.font_size * 10) / 10 : undefined,
               x_percent: Math.round(position.x_percent),
               y_percent: Math.round(position.y_percent),
               width_percent: Math.round(position.width_percent),
