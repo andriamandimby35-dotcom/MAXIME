@@ -1,5 +1,6 @@
 import "@/lib/submission/pdfjs-worker-setup";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { PDFDocument, PDFFont, StandardFonts } from "pdf-lib";
 import { significantWords } from "@/lib/submission/title-match";
 import { isBlankMarkerRun } from "@/lib/submission/blank-marker";
 
@@ -68,14 +69,32 @@ function fontSizeOfItem(item: TextItem | undefined): number | undefined {
 // couvrir la quasi-totalité de l'item du libellé, qui disparaissait alors
 // ENTIÈREMENT de la page — ne laissant que la valeur, flottante et sans
 // étiquette (ex. un numéro d'immatriculation fiscale affiché seul, sans le
-// texte "Numéro d'immatriculation Fiscale :" devant). Même repli que
-// dao-template-pdf.ts quand pdf.js ne donne pas de largeur : l'estimer à
-// partir de la taille de police et du nombre de caractères plutôt que de la
-// traiter comme nulle.
-function estimatedWidth(item: TextItem): number {
+// texte "Numéro d'immatriculation Fiscale :" devant). Repli quand pdf.js ne
+// donne pas de largeur : les métriques réelles d'une police standard
+// (espacement différent selon la lettre, un "i" plus étroit qu'un "M") sont
+// bien plus fiables qu'un simple facteur fixe par caractère — un premier
+// essai avec un facteur fixe (0.55 fois la taille de police par caractère)
+// sous-estimait encore ce même libellé et laissait déborder la valeur sur sa
+// fin ("Numéro d'immatr" coupé, la valeur écrasant "iculation Fiscale :").
+let widthEstimatorFontPromise: Promise<PDFFont> | null = null;
+function getWidthEstimatorFont(): Promise<PDFFont> {
+  if (!widthEstimatorFontPromise) {
+    widthEstimatorFontPromise = PDFDocument.create().then((doc) => doc.embedFont(StandardFonts.Helvetica));
+  }
+  return widthEstimatorFontPromise;
+}
+
+function estimatedWidth(item: TextItem, fallbackFont: PDFFont): number {
   if (item.width) return item.width;
   const fontSize = fontSizeOfItem(item) ?? 10;
-  return fontSize * (item.str ?? "").length * 0.55;
+  try {
+    return fallbackFont.widthOfTextAtSize(item.str ?? "", fontSize);
+  } catch {
+    // Un caractère que la police de secours ne sait pas mesurer ne doit
+    // jamais faire échouer tout le repérage : on retombe sur l'ancienne
+    // estimation approximative pour cet item précis seulement.
+    return fontSize * (item.str ?? "").length * 0.55;
+  }
 }
 
 /** Trouve, parmi les lignes de la page, celle qui correspond le mieux aux mots-clés d'un libellé. */
@@ -102,6 +121,7 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
   const foundKeys = new Set<string>();
   try {
     const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const widthFont = await getWidthEstimatorFont();
     for (const pageNumber of candidatePages) {
       const pageTargets = targets.filter((target) => !foundKeys.has(target.field_key));
       if (!pageTargets.length) break;
@@ -109,10 +129,22 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
       if (!pageData) continue;
       const usedItems = new Set<TextItem>();
       for (const target of pageTargets) {
-        const bestLine = findBestLine(pageData.lineGroups, target.label, usedItems);
+        // Le libellé donné par l'IA ("Nom du signataire") ne reprend pas
+        // toujours le vocabulaire exact utilisé par LE DAO lui-même dans un
+        // paragraphe de prose ("Je soussigné ... représentant ..."),
+        // contrairement à un formulaire où le libellé du DAO est repris
+        // quasi mot pour mot — constaté sur un vrai DAO ("Lettre de
+        // soumission") : 8 champs sur 10 ne trouvaient AUCUNE ligne
+        // correspondante, qui gardait donc ses pointillés d'origine intacts
+        // au lieu d'être remplie. Si le libellé seul ne trouve rien, on
+        // retente avec en plus la description du champ (souvent plus proche
+        // du texte réel du DAO) — uniquement en repli, pour ne jamais changer
+        // un résultat qui marchait déjà avec le libellé seul.
+        const bestLine = findBestLine(pageData.lineGroups, target.label, usedItems)
+          ?? (target.description ? findBestLine(pageData.lineGroups, `${target.label} ${target.description}`, usedItems) : null);
         if (!bestLine) continue;
         bestLine.items.forEach((item) => usedItems.add(item));
-        const rightmost = bestLine.items.reduce((max, item) => Math.max(max, (item.transform?.[4] ?? 0) + estimatedWidth(item)), 0);
+        const rightmost = bestLine.items.reduce((max, item) => Math.max(max, (item.transform?.[4] ?? 0) + estimatedWidth(item, widthFont)), 0);
         const topY = bestLine.items.reduce((min, item) => Math.min(min, item.transform?.[5] ?? min), bestLine.items[0].transform?.[5] ?? 0);
         // Le libellé lui-même est presque toujours suivi, SUR LA MÊME LIGNE,
         // d'un repère de blanc à remplir (".........", "______") : c'est LÀ,
@@ -143,7 +175,7 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
           for (const item of bestLine.items) {
             const str = item.str ?? "";
             const itemX = item.transform?.[4] ?? 0;
-            const itemWidth = estimatedWidth(item);
+            const itemWidth = estimatedWidth(item, widthFont);
             const itemLength = str.length || 1;
             blankRunPattern.lastIndex = 0;
             let match: RegExpExecArray | null;
@@ -212,6 +244,7 @@ export async function locateBracketPlaceholders(pdfBytes: Uint8Array, candidateP
   const results: BracketZone[] = [];
   try {
     const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const widthFont = await getWidthEstimatorFont();
     for (const pageNumber of candidatePages) {
       if (pageNumber < 1 || pageNumber > doc.numPages) continue;
       try {
@@ -281,7 +314,7 @@ export async function locateBracketPlaceholders(pdfBytes: Uint8Array, candidateP
             const item = charItemMap[charIndex];
             if (!item) continue;
             const itemX = item.transform?.[4] ?? 0;
-            const itemWidth = estimatedWidth(item);
+            const itemWidth = estimatedWidth(item, widthFont);
             const itemLength = (item.str ?? "").length || 1;
             const localIndex = charLocalIndex[charIndex] ?? 0;
             const charStartX = itemX + (localIndex / itemLength) * itemWidth;
@@ -433,6 +466,7 @@ export async function locateTableCellPositions(pdfBytes: Uint8Array, candidatePa
   const foundKeys = new Set<string>();
   try {
     const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const widthFont = await getWidthEstimatorFont();
     for (const pageNumber of candidatePages) {
       const pageTargets = targets.filter((target) => !foundKeys.has(target.field_key));
       if (!pageTargets.length) break;
@@ -450,7 +484,7 @@ export async function locateTableCellPositions(pdfBytes: Uint8Array, candidatePa
         rowUsed.clear();
         rowLine.items.forEach((item) => rowUsed.add(item));
         const columnStart = columnLine.items.reduce((min, item) => Math.min(min, item.transform?.[4] ?? min), columnLine.items[0].transform?.[4] ?? 0);
-        const columnEnd = columnLine.items.reduce((max, item) => Math.max(max, (item.transform?.[4] ?? 0) + estimatedWidth(item)), 0);
+        const columnEnd = columnLine.items.reduce((max, item) => Math.max(max, (item.transform?.[4] ?? 0) + estimatedWidth(item, widthFont)), 0);
         const rowY = rowLine.items.reduce((min, item) => Math.min(min, item.transform?.[5] ?? min), rowLine.items[0].transform?.[5] ?? 0);
         results.push({
           page: pageNumber,

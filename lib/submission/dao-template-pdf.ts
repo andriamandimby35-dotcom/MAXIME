@@ -1,4 +1,4 @@
-import { PDFDocument, PDFPage, rgb } from "pdf-lib";
+import { PDFDocument, PDFFont, PDFPage, StandardFonts, rgb } from "pdf-lib";
 import { embedUnicodeFonts } from "./pdf-font";
 import "@/lib/submission/pdfjs-worker-setup";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
@@ -49,6 +49,28 @@ function positionRect(width: number, height: number, position: FillPosition): Re
   return { x: x - 1, y: y - coverHeight * 0.25, width: available + 2, height: coverHeight };
 }
 
+// Même repli que locate-field-positions.ts (et pour rester cohérent avec
+// lui : la zone à masquer doit couvrir exactement ce que ce fichier a estimé
+// en calculant la position) quand pdf.js ne donne pas la largeur d'un item —
+// les métriques réelles d'une police standard donnent une estimation bien
+// plus fiable qu'un simple facteur fixe par caractère.
+let widthEstimatorFontPromise: Promise<PDFFont> | null = null;
+function getWidthEstimatorFont(): Promise<PDFFont> {
+  if (!widthEstimatorFontPromise) {
+    widthEstimatorFontPromise = PDFDocument.create().then((doc) => doc.embedFont(StandardFonts.Helvetica));
+  }
+  return widthEstimatorFontPromise;
+}
+
+function estimatedWidth(text: string, fontSize: number, realWidth: number | undefined, fallbackFont: PDFFont): number {
+  if (realWidth) return realWidth;
+  try {
+    return fallbackFont.widthOfTextAtSize(text, fontSize);
+  } catch {
+    return fontSize * text.length * 0.55;
+  }
+}
+
 // La page DAO d'origine (cadres de tableau, pointillés, logos, mise en
 // page...) reste TOUJOURS copiée telle quelle sur le document final (voir
 // l'appelant) : cette fonction ne reconstruit plus rien depuis zéro, elle
@@ -70,6 +92,7 @@ async function maskFilledZonesOnOriginalPage(
   pageNumber: number,
   page: PDFPage,
   suppressZones: Rect[],
+  widthFont: PDFFont,
 ) {
   if (!suppressZones.length) return;
   const pdfJsPage = await pdfJsDoc.getPage(pageNumber);
@@ -83,7 +106,7 @@ async function maskFilledZonesOnOriginalPage(
     const x = transform[4] ?? 0;
     const y = transform[5] ?? 0;
     const fontSize = Math.max(4, Math.hypot(transform[2] ?? 0, transform[3] ?? 10));
-    const itemWidth = item.width || fontSize * text.length * 0.55;
+    const itemWidth = estimatedWidth(text, fontSize, item.width, widthFont);
     const itemBox: Rect = { x, y, width: itemWidth, height: item.height || fontSize };
 
     // Un DAO converti depuis Word regroupe très souvent TOUTE une phrase
@@ -218,6 +241,7 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
   }
   if (pdfJsDoc) {
     const readyDoc = pdfJsDoc;
+    const widthFont = await getWidthEstimatorFont();
     for (let index = 0; index < validPages.length; index += 1) {
       const pageNumber = validPages[index];
       const sourcePageSize = sourcePdf.getPage(pageNumber - 1).getSize();
@@ -228,7 +252,7 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
       const zones = [...pageRedactions, ...pagePositions];
       if (!zones.length) continue;
       try {
-        await maskFilledZonesOnOriginalPage(readyDoc, pageNumber, copiedPages[index], zones);
+        await maskFilledZonesOnOriginalPage(readyDoc, pageNumber, copiedPages[index], zones, widthFont);
       } catch {
         // Page illisible pour pdf.js : la page copiée reste quand même
         // correcte (fidèle à l'original), seul ce masquage fin en plus est
