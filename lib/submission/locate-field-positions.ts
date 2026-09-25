@@ -19,7 +19,13 @@ type FieldTarget = { field_key: string; label: string; description?: string };
 // createFilledDaoTemplatePdf pour que la valeur écrite ait la même taille que
 // le texte qu'elle remplace, au lieu d'une taille fixe qui jure avec le
 // reste de la page.
-type LocatedPosition = { page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number; font_size?: number };
+// debug_matched_line (facultatif) : le texte de la ligne réelle de la page
+// DAO sur laquelle ce champ a été placé — jamais utilisé pour dessiner quoi
+// que ce soit, uniquement remonté jusqu'aux journaux Vercel (route.ts) pour
+// vérifier, à distance, qu'un champ tombe bien sur la BONNE ligne du modèle
+// et pas seulement qu'une position a été "trouvée" (un score de mots-clés
+// suffisant peut très bien pointer vers une ligne qui n'est pas la bonne).
+type LocatedPosition = { page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number; font_size?: number; debug_matched_line?: string };
 type LineGroup = { items: TextItem[]; text: string; y: number };
 type PageData = { items: TextItem[]; width: number; height: number; lineGroups: LineGroup[] };
 
@@ -328,6 +334,7 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
           // lui-même) reflète la taille de police réellement utilisée à cet
           // endroit précis de la page — plus fiable qu'une taille fixe.
           font_size: chosenBlank?.fontSize ?? fontSizeOfItem(bestLine.items[0]),
+          debug_matched_line: bestLine.text.trim().slice(0, 100),
         });
         foundKeys.add(target.field_key);
       }

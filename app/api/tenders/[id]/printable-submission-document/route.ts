@@ -657,6 +657,20 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             const unresolvedFields = fieldTargets
               .filter((field) => !foundFieldKeys.has(field.field_key))
               .map((field) => ({ label: field.label, description: field.description }));
+            // Un champ "trouvé" (positionsFound) ne veut pas forcément dire
+            // qu'il est tombé sur la BONNE ligne du modèle — un score de
+            // mots-clés suffisant peut très bien pointer vers une ligne
+            // voisine qui n'est pas la sienne, ce qui donne exactement le
+            // même genre de résultat visuel qu'un vrai bug d'affichage (texte
+            // qui semble déplacé/coupé). On journalise ici, pour chaque champ
+            // résolu, le LIBELLÉ attendu à côté du texte RÉEL de la ligne
+            // choisie sur la page DAO, pour vérifier directement lequel des
+            // deux est en cause plutôt que de deviner.
+            const resolvedFieldsDebug = positions.map((position) => ({
+              field_key: position.field_key,
+              label: fieldTargets.find((field) => field.field_key === position.field_key)?.label,
+              matched_line: position.debug_matched_line,
+            }));
             // Journal temporaire pour diagnostiquer, via les journaux Vercel,
             // pourquoi certains PDF générés depuis une vraie page du DAO
             // gardent leurs pointillés d'origine intacts au lieu d'être
@@ -674,6 +688,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
               tableCellPositionsFound: tablePositions.length,
               rebuildAsText: !isGraphicOnlyDocument,
               unresolvedFields,
+              resolvedFieldsDebug,
             });
             pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
           }
