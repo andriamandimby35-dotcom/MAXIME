@@ -3,7 +3,7 @@ import { PDFDocument } from "pdf-lib";
 import { createServerClient } from "@/lib/supabase/server";
 import { createPrintableSubmissionPdf } from "@/lib/submission/printable-pdf";
 import { appendDaoPagesToPdf, appendExternalFileAsPages, createFilledDaoTemplatePdf } from "@/lib/submission/dao-template-pdf";
-import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholders, locateTableCellPositions } from "@/lib/submission/locate-field-positions";
+import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholders } from "@/lib/submission/locate-field-positions";
 import { findBestTitleMatch } from "@/lib/submission/title-match";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
 import { trimToRelevantStart, extractRelevantPageRange, locateTitleInFullDocument } from "@/lib/submission/trim-to-relevant-pages";
@@ -47,34 +47,6 @@ function pagesNotClaimedByOtherItems(
 ) {
   const claimedByOthers = otherItemsClaimedPages(items, ownTitle);
   return candidatePages.filter((page) => !claimedByOthers.has(page));
-}
-
-type TableForCellTargets = { columns: string[]; rows: string[][]; organization_column_indexes?: number[] };
-
-// Un tableau comme "Chiffre d'affaires" est un vrai quadrillage sur la page
-// DAO (lignes "Travaux"/"Fournitures"/... × colonnes "Exercice du...") : les
-// vraies valeurs doivent aller DANS ce quadrillage, à l'intersection ligne ×
-// colonne — pas sur une page à part redessinée par-dessus, qui obligeait
-// jusqu'ici à montrer DEUX fois le même tableau (une fois vide, tirée du
-// DAO, une fois fabriquée avec les chiffres). On construit ici la liste des
-// cases à retrouver sur la vraie page, une par valeur connue.
-function buildTableCellTargets(tables: TableForCellTargets[]) {
-  const targets: Array<{ field_key: string; row_label: string; column_label: string; value: string }> = [];
-  tables.forEach((table, tableIndex) => {
-    const orgColumns = table.organization_column_indexes ?? table.columns.map((_, index) => index);
-    const labelColumnIndex = table.columns.findIndex((_, index) => !orgColumns.includes(index));
-    table.rows.forEach((row, rowIndex) => {
-      const rowLabel = (labelColumnIndex >= 0 ? row[labelColumnIndex] : row[0])?.trim();
-      if (!rowLabel) return;
-      orgColumns.forEach((columnIndex) => {
-        const value = row[columnIndex]?.trim();
-        const columnLabel = table.columns[columnIndex]?.trim();
-        if (!value || !columnLabel) return;
-        targets.push({ field_key: `__table_cell_${tableIndex}_${rowIndex}_${columnIndex}`, row_label: rowLabel, column_label: columnLabel, value });
-      });
-    });
-  });
-  return targets;
 }
 
 // Les planches de plans techniques sont presque toujours regroupées en un
@@ -611,38 +583,74 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             });
           const templateFields = detectedTemplate.fields ?? [];
           let pdf: Buffer;
-          let allTableCellsResolvedOnRealPage = false;
           if (/\bplans?\b/i.test(title)) {
             // Un plan est un dessin vectoriel sans texte à remplacer : la
             // page DAO reste extraite telle quelle, sans réécriture.
             pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [], templateValues, [], verifiedTitle, { rebuildAsText: false });
+          } else if (templateTables.length) {
+            // Un tableau ("Chiffre d'affaires"...) est un vrai quadrillage,
+            // avec des en-têtes de colonnes souvent presque identiques d'une
+            // colonne à l'autre ("Exercice du 01/01/23 au 31/12/23" contre
+            // "...24" contre "...25") : retrouver automatiquement, sur la
+            // page réelle du DAO, la bonne case à l'intersection ligne ×
+            // colonne s'est révélé bien plus fragile que pour un simple champ
+            // de lettre (un seul repère de blanc à côté d'un libellé, sans
+            // grille à croiser). Constaté sur un vrai DAO : plusieurs valeurs
+            // de colonnes/champs différents se retrouvaient mélangées et
+            // superposées sur la page d'origine — et comme la page ratée
+            // restait quand même utilisée, une DEUXIÈME page (reconstruite,
+            // correcte) s'ajoutait par-dessus pour compenser : le même
+            // tableau apparaissait deux fois, une fois faux et une fois bon.
+            // Pour toute pièce avec un tableau, on ne tente donc plus du tout
+            // de deviner des coordonnées sur la page d'origine : on
+            // reconstruit directement un document propre nous-mêmes (comme
+            // pour n'importe quelle pièce sans page DAO trouvée) — une seule
+            // version, fiable, jamais deux.
+            const fieldTargets = templateFields.map((field) => ({ field_key: field.key, label: field.label, description: field.description }));
+            // Les quelques champs simples de la page (une date, un numéro...)
+            // restent affichés, juste sous forme de texte "Libellé : valeur"
+            // plutôt que replacés aux coordonnées de la page d'origine —
+            // seule la partie difficile (le tableau lui-même) change de
+            // méthode.
+            const templateFieldLines = fieldTargets
+              .map((field) => {
+                const value = templateValues[field.field_key];
+                return value ? `${field.label} : ${value}` : null;
+              })
+              .filter((line): line is string => Boolean(line));
+            // Les colonnes d'un tableau reconstruit gardaient une largeur
+            // égale arbitraire, très différente du vrai tableau du DAO (une
+            // colonne de désignation bien plus large que les colonnes de
+            // quantité à côté). On mesure ici la vraie largeur de chaque
+            // colonne sur la page source et on la reproduit.
+            const measuredTables = await Promise.all(templateTables.map(async (table) => ({
+              ...table,
+              column_ratios: (await measureTableColumnRatios(bytes, verifiedPages, table.columns)) ?? undefined,
+            })));
+            console.info("PRINTABLE_PDF_TEMPLATE_BRANCH_TABLE_REBUILD", {
+              title,
+              verifiedPages,
+              templateFieldsCount: templateFields.length,
+              templateFieldLinesFound: templateFieldLines.length,
+              tablesCount: measuredTables.length,
+            });
+            pdf = Buffer.from(await createPrintableSubmissionPdf(verifiedTitle ?? title, profileData, templateFieldLines, measuredTables));
           } else {
             // La page DAO reste copiée EXACTEMENT telle quelle (cadres,
-            // tableaux, toutes les décorations d'origine intactes) : on ne
-            // réécrit jamais son texte à la main. On repère seulement, sur
-            // cette vraie page, où se trouve le libellé de chaque champ
-            // ("Nom ou raison sociale du candidat :"...) pour écrire la
-            // valeur juste à côté — plutôt que de faire deviner une position
-            // à l'IA (quasi jamais fiable) ou de reconstruire toute la page
-            // nous-même (perd les décorations d'origine, et peut faire
-            // déborder le contenu sur une page en trop si le texte recréé est
-            // un peu plus long que l'original).
+            // toutes les décorations d'origine intactes) : on ne réécrit
+            // jamais son texte à la main. On repère seulement, sur cette
+            // vraie page, où se trouve le libellé de chaque champ ("Nom ou
+            // raison sociale du candidat :"...) pour écrire la valeur juste à
+            // côté — plutôt que de faire deviner une position à l'IA (quasi
+            // jamais fiable) ou de reconstruire toute la page nous-même
+            // (perd les décorations d'origine, et peut faire déborder le
+            // contenu sur une page en trop si le texte recréé est un peu
+            // plus long que l'original).
             const fieldTargets = templateFields.map((field) => ({ field_key: field.key, label: field.label, description: field.description }));
-            // Un tableau (chiffre d'affaires, matériel, personnel...) est un
-            // vrai quadrillage sur la page DAO : ses cases doivent recevoir
-            // les valeurs directement, comme n'importe quel autre champ —
-            // sinon la page réelle affichée reste un tableau vide alors que
-            // les vraies valeurs existent déjà, obligeant (avant ce correctif)
-            // à ajouter une DEUXIÈME page fabriquée juste pour les montrer.
-            const tableCellTargets = buildTableCellTargets(templateTables);
-            const [positions, redactions, tablePositions] = await Promise.all([
+            const [positions, redactions] = await Promise.all([
               locateFieldPositions(bytes, verifiedPages, fieldTargets),
               locateBracketPlaceholders(bytes, verifiedPages, fieldTargets),
-              tableCellTargets.length ? locateTableCellPositions(bytes, verifiedPages, tableCellTargets) : Promise.resolve([]),
             ]);
-            const tableCellValues = Object.fromEntries(tableCellTargets.map((target) => [target.field_key, target.value]));
-            const foundTableFieldKeys = new Set(tablePositions.map((position) => position.field_key));
-            allTableCellsResolvedOnRealPage = tableCellTargets.length > 0 && tableCellTargets.every((target) => foundTableFieldKeys.has(target.field_key));
             // Le compte seul (positionsFound: 3 sur 10, par exemple) ne dit pas
             // LESQUELS des champs échouent, ce qui obligeait à deviner à
             // l'aveugle pour corriger la recherche de libellé. On liste ici le
@@ -688,39 +696,11 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
               templateFieldsCount: templateFields.length,
               positionsFound: positions.length,
               bracketZonesFound: redactions.length,
-              tableCellTargets: tableCellTargets.length,
-              tableCellPositionsFound: tablePositions.length,
               rebuildAsText: !isGraphicOnlyDocument,
               unresolvedFields,
               resolvedFieldsDebug,
             });
-            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
-          }
-          // La page fabriquée ci-dessous ne sert plus qu'en dernier recours :
-          // si toutes les cases du tableau ont été retrouvées et remplies
-          // directement sur la vraie page juste au-dessus, l'ajouter EN PLUS
-          // ferait apparaître le même tableau deux fois (une fois fidèle et
-          // vide en apparence pour qui ne voit pas les valeurs ajoutées, une
-          // fois fabriquée) — ce qui est justement le bug signalé. Elle ne
-          // reste utile que si une case n'a pas pu être localisée (libellé de
-          // ligne ou de colonne introuvable sur la page), pour ne jamais
-          // perdre une valeur déjà connue.
-          if (templateTables.length && !allTableCellsResolvedOnRealPage) {
-            // Les colonnes d'un tableau reconstruit gardaient une largeur
-            // égale arbitraire, très différente du vrai tableau du DAO (une
-            // colonne de désignation bien plus large que les colonnes de
-            // quantité à côté). On mesure ici la vraie largeur de chaque
-            // colonne sur la page source et on la reproduit.
-            const measuredTables = await Promise.all(templateTables.map(async (table) => ({
-              ...table,
-              column_ratios: (await measureTableColumnRatios(bytes, verifiedPages, table.columns)) ?? undefined,
-            })));
-            const tablesPdfBytes = await createPrintableSubmissionPdf(title, profileData, [], measuredTables);
-            const tablesDoc = await PDFDocument.load(tablesPdfBytes);
-            const mainDoc = await PDFDocument.load(pdf);
-            const copiedPages = await mainDoc.copyPages(tablesDoc, tablesDoc.getPageIndices());
-            copiedPages.forEach((page) => mainDoc.addPage(page));
-            pdf = Buffer.from(await mainDoc.save());
+            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, templateValues, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
           }
           return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
         }

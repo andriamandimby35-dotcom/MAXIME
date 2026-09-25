@@ -275,6 +275,35 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
       bestHasBlank = hasBlank;
     }
   }
+  if (!best || keywords.length <= 1) return best;
+  // Le mot principal suffit à valider une ligne (voir plus haut), mais un mot
+  // très courant comme "date" peut légitimement apparaître sur PLUSIEURS
+  // lignes différentes d'un même DAO ("...en date du ......", "Date de la
+  // notification...", "Date: ......" en bas de page) — chacune avec son
+  // propre blanc à remplir. Sans aucun mot de précision qui la distingue des
+  // autres (ex. "signature" pour départager LAQUELLE de ces dates est celle
+  // de la signature), retenir la première venue au hasard est un pari, pas
+  // une vraie correspondance — constaté sur un vrai DAO : "Date de
+  // signature" volait ainsi le blanc "en date du ........." du récépissé,
+  // un champ totalement différent, simplement parce que "date" s'y trouvait
+  // aussi. On vérifie ici si la ligne choisie doit VRAIMENT son score à un
+  // mot de précision (pas seulement au mot principal) ; si non, et qu'une
+  // AUTRE ligne, avec son propre blanc à remplir, contient elle aussi ce même
+  // mot principal, mieux vaut ne rien remplir du tout que de deviner
+  // laquelle des deux est la bonne.
+  const bestNormalized = normalize(best.text);
+  const matchesWord = (normalizedLine: string, word: string) =>
+    normalizedLine.includes(word) || (FIELD_LABEL_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym));
+  const bestHasQualifierMatch = keywords.some((word) => word !== headKeyword && matchesWord(bestNormalized, word));
+  if (!bestHasQualifierMatch) {
+    const otherAmbiguousCandidate = lineGroups.some((group) => {
+      if (group === best) return false;
+      if (group.items.every((item) => usedItems.has(item))) return false;
+      if (!lineHasBlank(group.text)) return false;
+      return matchesWord(normalize(group.text), headKeyword);
+    });
+    if (otherAmbiguousCandidate) return null;
+  }
   return best;
 }
 
