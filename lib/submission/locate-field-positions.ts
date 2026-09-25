@@ -157,7 +157,13 @@ const FIELD_LABEL_SYNONYMS: Record<string, string[]> = {
 // contient VRAIMENT un pointillé est un bien meilleur candidat, à score égal,
 // qu'une ligne de simple contexte sans aucun blanc — ce repère est générique
 // (n'importe quel DAO répète du vocabulaire d'une ligne à l'autre).
-const BLANK_RUN_PATTERN = /[.\-_·•∙]{4,}/;
+// Seuil à 2 caractères (pas 4) : un blanc peut être très court sur un DAO
+// (une case étroite pour un jour/mois sur 2 chiffres n'a parfois que 2 ou 3
+// points) — l'accepter aussi tôt que 2 ne risque presque rien, contrairement
+// à effacer n'importe quel grand espace blanc (voir la réponse donnée à
+// Maxime : un texte justifié a souvent des espaces plus larges que la
+// normale entre certains mots, qui ressembleraient à tort à un blanc).
+const BLANK_RUN_PATTERN = /[.\-_·•∙]{2,}/;
 function lineHasBlank(text: string): boolean {
   return BLANK_RUN_PATTERN.test(text);
 }
@@ -335,7 +341,10 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
         // commence pas au tout début de son item.
         let embeddedBlank: { x: number; width: number; fontSize?: number; hardCap: boolean } | null = null;
         if (!blankRunItem) {
-          const blankRunPattern = /[.\-_·•∙]{4,}/g;
+          // Seuil à 2 (pas 4) : même raison que BLANK_RUN_PATTERN plus haut —
+          // un blanc caché au milieu d'une phrase peut lui aussi être très
+          // court (2-3 caractères) sur certains DAO.
+          const blankRunPattern = /[.\-_·•∙]{2,}/g;
           for (const item of bestLine.items) {
             const str = item.str ?? "";
             const itemX = item.transform?.[4] ?? 0;
