@@ -151,6 +151,29 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
   return best;
 }
 
+// Une fois le DÉBUT du blanc repéré avec précision (voir plus bas), il reste
+// à savoir jusqu'où la zone à remplir peut s'agrandir SANS empiéter sur le
+// texte qui vient juste après sur la même ligne. Repéré sur un vrai DAO :
+// même avec un début de blanc mesuré au caractère près, un plancher fixe de
+// largeur (pour qu'une valeur un peu longue tienne même si le pointillé
+// d'origine était minuscule) agrandissait encore la zone bien au-delà du
+// vrai pointillé et mangeait le début du texte suivant ("(nom, prénom,
+// fonction)" affiché "f)", "concernant" affiché "ncernant") — cette mesure de
+// précision ne servait qu'à trouver où le blanc COMMENCE, pas jusqu'où il est
+// prudent de l'AGRANDIR ensuite. On cherche donc ici le premier texte RÉEL
+// (pas un autre repère de blanc) sur la même ligne, à droite du blanc : la
+// zone à remplir ne doit jamais s'étendre au-delà.
+function nextRealTextX(items: TextItem[], afterX: number): number | null {
+  let best: number | null = null;
+  for (const item of items) {
+    const itemX = item.transform?.[4] ?? 0;
+    if (itemX <= afterX + 0.5) continue;
+    if (isBlankMarkerRun(item.str ?? "")) continue;
+    if (best === null || itemX < best) best = itemX;
+  }
+  return best;
+}
+
 /** Cherche, pour chaque champ, la ligne de la page qui porte son libellé
  * (parmi candidatePages, dans l'ordre) et place la valeur juste à côté. */
 export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages: number[], targets: FieldTarget[]): Promise<LocatedPosition[]> {
@@ -211,7 +234,7 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
         // exacte au prorata de sa place dans le texte de cet item — même
         // principe que locateBracketPlaceholders pour un "[...]" qui ne
         // commence pas au tout début de son item.
-        let embeddedBlank: { x: number; width: number; fontSize?: number } | null = null;
+        let embeddedBlank: { x: number; width: number; fontSize?: number; hardCap: boolean } | null = null;
         if (!blankRunItem) {
           const blankRunPattern = /[.\-_·•∙]{4,}/g;
           for (const item of bestLine.items) {
@@ -244,15 +267,43 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
                 startX = itemX + (match.index / itemLength) * itemWidth;
                 endX = itemX + ((match.index + match[0].length) / itemLength) * itemWidth;
               }
+              // Si du texte RÉEL (pas un autre repère de blanc) suit
+              // IMMÉDIATEMENT le pointillé DANS LE MÊME ITEM ("....."
+              // suivi tout de suite de "(nom, prénom, fonction)" dans le
+              // même bloc de texte), ce texte reprend exactement à endX :
+              // aucune marge d'agrandissement n'est alors possible sans
+              // manger son tout début (voir nextSafeWidth plus bas).
+              const trailingText = str.slice(match.index + match[0].length);
+              const hardCap = trailingText.trim().length > 0 && !isBlankMarkerRun(trailingText);
               if (!embeddedBlank || startX < embeddedBlank.x) {
-                embeddedBlank = { x: startX, width: Math.max(10, endX - startX), fontSize: fontSizeOfItem(item) };
+                embeddedBlank = { x: startX, width: Math.max(10, endX - startX), fontSize: fontSizeOfItem(item), hardCap };
               }
             }
           }
         }
+        // estimatedWidth (et non ?? 40) : un repère de blanc qui est son
+        // PROPRE item pdf.js entier (blankRunItem) n'a pas toujours de
+        // item.width fiable non plus (même souci que pour le libellé, voir
+        // plus haut) — un plancher fixe de 40 points tombait juste par
+        // chance sur certains DAO, mais pas sur un pointillé nettement plus
+        // court ou plus long que ça.
         const chosenBlank = blankRunItem
-          ? { x: blankRunItem.transform?.[4] ?? rightmost + 4, width: blankRunItem.width ?? 40, fontSize: fontSizeOfItem(blankRunItem) }
+          ? { x: blankRunItem.transform?.[4] ?? rightmost + 4, width: Math.max(10, estimatedWidth(blankRunItem, widthFont)), fontSize: fontSizeOfItem(blankRunItem), hardCap: false }
           : embeddedBlank;
+        // Largeur maximale que la zone à remplir peut atteindre sans jamais
+        // empiéter sur le texte qui suit sur la même ligne : soit le texte
+        // reprend tout de suite dans le MÊME item (hardCap → aucune marge
+        // au-delà du pointillé mesuré), soit on cherche le prochain texte
+        // réel parmi les autres items de la ligne (aucun trouvé → aucune
+        // limite, la ligne est réellement libre au-delà du blanc).
+        const maxSafeWidth = chosenBlank
+          ? (chosenBlank.hardCap
+            ? chosenBlank.width
+            : (() => {
+                const boundaryX = nextRealTextX(bestLine.items, chosenBlank.x);
+                return boundaryX === null ? Infinity : Math.max(chosenBlank.width, boundaryX - chosenBlank.x - 2);
+              })())
+          : Infinity;
         const remainingWidth = pageData.width - rightmost;
         // Une valeur courte tient à droite du libellé sur la même ligne ;
         // sinon (label prenant déjà toute la largeur) on la place juste en
@@ -265,8 +316,13 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
           field_key: target.field_key,
           x_percent: Math.max(0, Math.min(96, (x / pageData.width) * 100)),
           y_percent: Math.max(0, Math.min(98, 100 - (y / pageData.height) * 100)),
+          // Le plancher (15%) et le plafond (60%) donnent une largeur
+          // confortable pour la valeur même quand le pointillé d'origine
+          // était minuscule — mais jamais au prix de dépasser maxSafeWidth,
+          // sous peine de manger le début du texte qui suit sur la même
+          // ligne (voir maxSafeWidth plus haut).
           width_percent: chosenBlank
-            ? Math.max(15, Math.min(60, (chosenBlank.width / pageData.width) * 100))
+            ? Math.max(2, Math.min(Math.max(15, Math.min(60, (chosenBlank.width / pageData.width) * 100)), (maxSafeWidth / pageData.width) * 100))
             : placeBelow ? 60 : Math.max(15, Math.min(60, (remainingWidth / pageData.width) * 100 - 2)),
           // La taille du pointillé remplacé (ou, à défaut, celle du libellé
           // lui-même) reflète la taille de police réellement utilisée à cet
