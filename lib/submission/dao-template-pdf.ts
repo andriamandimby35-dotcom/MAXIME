@@ -40,12 +40,26 @@ function clampFontSize(size: number | undefined) {
 
 // Même calcul que la boucle "positions" plus bas (garde le même rectangle
 // blanchi), en zone à ne pas redessiner plutôt qu'en rectangle dessiné.
+//
+// y_percent vient directement de la ligne de base RÉELLE du texte repérée par
+// locateFieldPositions/locateTableCellPositions sur la page (position "y" du
+// texte pdf.js, déjà une ligne de base — pas le HAUT d'une case). Soustraire
+// encore une fois fontSize ici (comme avant ce correctif) décalait la valeur
+// ÉCRITE — et le rectangle blanc qui l'accompagne — d'une pleine taille de
+// police plus bas que la ligne de base d'origine, soit quasiment UNE LIGNE
+// ENTIÈRE plus bas sur la page. Repéré sur un vrai DAO : une valeur qui
+// devrait apparaître à côté de son libellé atterrissait systématiquement sur
+// la ligne SUIVANTE du modèle, effaçant et recouvrant le début du texte
+// original qui s'y trouvait déjà ("concernant l'exécution" affiché "ncernant
+// l'exécution", "travaux" affiché "avaux") — ce n'était donc pas un problème
+// de largeur de zone ni de mauvaise ligne repérée, mais cette seule
+// soustraction en trop à CET endroit précis, pour tous les documents.
 function positionRect(width: number, height: number, position: FillPosition): Rect {
   const fontSize = clampFontSize(position.font_size);
   const coverHeight = fontSize * 1.5;
   const available = Math.max(10, width * Math.max(1, Math.min(90, position.width_percent)) / 100);
   const x = width * Math.max(0, Math.min(100, position.x_percent)) / 100;
-  const y = height - (height * Math.max(0, Math.min(100, position.y_percent)) / 100) - fontSize;
+  const y = height - (height * Math.max(0, Math.min(100, position.y_percent)) / 100);
   return { x: x - 1, y: y - coverHeight * 0.25, width: available + 2, height: coverHeight };
 }
 
@@ -301,7 +315,11 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
     const fontSize = clampFontSize(position.font_size);
     const available = Math.max(10, width * Math.max(1, Math.min(90, position.width_percent)) / 100);
     const x = width * Math.max(0, Math.min(100, position.x_percent)) / 100;
-    const y = height - (height * Math.max(0, Math.min(100, position.y_percent)) / 100) - fontSize;
+    // Pas de "- fontSize" ici : y_percent est déjà la ligne de base réelle du
+    // texte repéré sur la page (voir le commentaire de positionRect plus
+    // haut) — une soustraction ici décalait la valeur d'une ligne entière
+    // plus bas que prévu, sur TOUT type de champ ou de document.
+    const y = height - (height * Math.max(0, Math.min(100, position.y_percent)) / 100);
     // Le DAO imprime des points de suite, tirets ou soulignés à cet
     // emplacement ("Nom : .........", "Date : ______") pour indiquer où
     // écrire à la main. Dès qu'on connaît la vraie valeur, on efface d'abord
