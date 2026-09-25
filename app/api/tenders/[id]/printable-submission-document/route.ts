@@ -281,6 +281,19 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     .replace(/\{\{([a-z0-9_]+)\}\}/gi, (_match, key: string) => {
       return templateValues[key]?.trim() ?? "";
     })
+    // Filet de sécurité : l'IA d'analyse est censée toujours utiliser une clé
+    // simple en minuscules ("{{legal_name}}"), mais produit parfois une clé
+    // malformée (espace, accent, casse mixte...) qui ne correspond à AUCUNE
+    // valeur connue — ex. "{{profil entreprise}}" constaté sur un vrai DAO.
+    // Un tel repère ne correspond à rien dans templateValues : le motif
+    // ci-dessus ne le reconnaît donc jamais et le laissait, avant ce
+    // correctif, s'afficher tel quel dans le PDF final ("{{profil
+    // entreprise}}" imprimé mot pour mot), ce qui a l'air d'un bug logiciel
+    // sur un document destiné à être signé. N'importe quel "{{...}}" encore
+    // présent APRÈS le remplacement normal ci-dessus est forcément un tel
+    // repère raté : on l'efface, exactement comme un pointillé non rempli,
+    // plutôt que de montrer sa syntaxe interne au candidat.
+    .replace(/\{\{[^{}]{1,80}\}\}/g, "")
     .replace(/(?:\.[ \t]?){4,}\.?/g, "")
     .replace(/\.{4,}/g, "")
     .replace(/…{2,}/g, "")
