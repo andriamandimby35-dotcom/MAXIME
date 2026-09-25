@@ -85,87 +85,100 @@ function estimatedWidth(text: string, fontSize: number, realWidth: number | unde
   }
 }
 
-// La page DAO d'origine (cadres de tableau, pointillés, logos, mise en
-// page...) reste TOUJOURS copiée telle quelle sur le document final (voir
-// l'appelant) : cette fonction ne reconstruit plus rien depuis zéro, elle
-// vient seulement EFFACER (rectangle blanc) les petites portions de texte
-// réellement destinées à recevoir une valeur ou une correction, avant que
-// l'appelant n'écrive la vraie valeur par-dessus. Avant ce correctif, la
-// page entière était redessinée sur une feuille vierge à partir du texte
-// repéré par pdf.js : ça évitait bien tout chevauchement, mais ça perdait
-// aussi tout ce qui n'est PAS du texte — en premier lieu les traits qui
-// forment les cadres et tableaux du DAO, rendant le document généré
-// visiblement différent de l'original ("le pdf généré n'a pas les cadres et
-// tout, c'est pas pareil du tout", constaté sur un vrai DAO). Le masquage
-// est calculé à partir de la position RÉELLE de chaque item de texte lu sur
-// la page (et pas seulement de l'estimation de zone) pour rester aussi
-// précis que l'ancienne reconstruction et ne jamais empiéter sur le texte
-// voisin.
-async function maskFilledZonesOnOriginalPage(
-  pdfJsDoc: Awaited<ReturnType<typeof getDocument>["promise"]>,
-  pageNumber: number,
+// Convertit une largeur cible (mesurée depuis le début du texte) en indice de
+// caractère — nécessaire pour transformer le recouvrement GÉOMÉTRIQUE d'une
+// zone entre crochets (qui n'a aucun motif de texte reconnaissable, contrairement
+// à un pointillé) en une vraie portion de texte à ne pas redessiner.
+function charIndexAtWidth(text: string, fontSize: number, font: PDFFont, targetWidth: number): number {
+  if (targetWidth <= 0) return 0;
+  let cumulative = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    cumulative += estimatedWidth(text[index], fontSize, undefined, font);
+    if (cumulative > targetWidth) return index;
+  }
+  return text.length;
+}
+
+// Redessine un item de texte de la page DAO d'origine sur la page NEUVE,
+// exactement à sa position d'origine (même x/y, même taille de police
+// estimée) — voir le commentaire au-dessus de createFilledDaoTemplatePdf pour
+// le pourquoi de cette reconstruction complète plutôt qu'une copie masquée.
+// Un DAO converti depuis Word regroupe très souvent TOUTE une phrase dans un
+// SEUL item pdf.js ("La garantie est émise par [Nom de la banque] domiciliée
+// à..." ou "Je soussigné .............. (nom, prénom, fonction)" restent un
+// seul bloc de texte) : on ne saute donc jamais l'item ENTIER, seulement la
+// portion précise concernée, pour ne jamais effacer du texte normal juste
+// avant ou après elle.
+// - Une zone entre crochets ("[Nom de la banque]") disparaît TOUJOURS, avec
+//   ou sans valeur connue (c'est une instruction du DAO à effacer avant
+//   dépôt, jamais un repère à laisser pour un remplissage à la main).
+// - Un pointillé de blanc ("....... ", "______") ne disparaît LUI que s'il va
+//   recevoir une vraie valeur à la place (filledZones) : sans valeur connue,
+//   il reste affiché tel quel, pour qu'on puisse encore le compléter à la
+//   main sur le document imprimé.
+function drawReconstructedItem(
   page: PDFPage,
-  suppressZones: Rect[],
+  item: { str?: string; transform?: number[] },
+  font: PDFFont,
   widthFont: PDFFont,
+  filledZones: Rect[],
+  redactionZones: Rect[],
 ) {
-  if (!suppressZones.length) return;
-  const pdfJsPage = await pdfJsDoc.getPage(pageNumber);
-  const content = await pdfJsPage.getTextContent();
-  type RawItem = { str?: string; transform?: number[]; width?: number; height?: number };
-  const items = (content.items as RawItem[]).filter((item) => (item.str ?? "").length > 0);
+  const text = item.str ?? "";
+  if (!text.trim()) return;
+  const transform = item.transform ?? [10, 0, 0, 10, 0, 0];
+  const x = transform[4] ?? 0;
+  const y = transform[5] ?? 0;
+  const fontSize = Math.max(4, Math.hypot(transform[2] ?? 0, transform[3] ?? 10));
+  const itemWidth = estimatedWidth(text, fontSize, undefined, widthFont);
+  const itemBox: Rect = { x, y: y - fontSize * 0.3, width: itemWidth, height: fontSize * 1.3 };
 
-  for (const item of items) {
-    const text = item.str ?? "";
-    const transform = item.transform ?? [10, 0, 0, 10, 0, 0];
-    const x = transform[4] ?? 0;
-    const y = transform[5] ?? 0;
-    const fontSize = Math.max(4, Math.hypot(transform[2] ?? 0, transform[3] ?? 10));
-    const itemWidth = estimatedWidth(text, fontSize, item.width, widthFont);
-    const itemBox: Rect = { x, y, width: itemWidth, height: item.height || fontSize };
-
-    // Un DAO converti depuis Word regroupe très souvent TOUTE une phrase
-    // dans un SEUL item pdf.js, pointillés de blanc compris ("Je soussigné
-    // .............................. (nom, prénom, fonction)" reste un seul
-    // bloc de texte, jamais coupé en plusieurs morceaux) : si on effaçait la
-    // boîte ENTIÈRE de cet item dès qu'une zone à remplir le touche, on
-    // effacerait aussi "Je soussigné" et "(nom, prénom, fonction)" avec elle.
-    // On ne calcule donc jamais un effacement plus large que la portion
-    // RÉELLEMENT couverte par une zone à remplir, au prorata de la place du
-    // texte concerné dans l'item.
-    const overlapping = suppressZones.filter((zone) => rectsOverlap(zone, itemBox));
-    if (!overlapping.length) continue;
-    const covered = overlapping
-      .map((zone): [number, number] | null => {
-        if (itemWidth <= 0) return null;
-        const zoneStartX = Math.max(zone.x, x);
-        const zoneEndX = Math.min(zone.x + zone.width, x + itemWidth);
-        if (zoneEndX <= zoneStartX) return null;
-        return [Math.max(0, (zoneStartX - x) / itemWidth), Math.min(1, (zoneEndX - x) / itemWidth)];
-      })
-      .filter((range): range is [number, number] => range !== null)
-      .sort((left, right) => left[0] - right[0]);
-    if (!covered.length) continue;
-
-    // Fusionne les intervalles qui se chevauchent (plusieurs champs proches
-    // touchant le même item) avant de dessiner : aucun changement visuel,
-    // juste évite deux rectangles blancs superposés au même endroit.
-    const merged: [number, number][] = [];
-    for (const [start, end] of covered) {
-      const last = merged[merged.length - 1];
-      if (last && start <= last[1]) last[1] = Math.max(last[1], end);
-      else merged.push([start, end]);
+  const removedRanges: Array<[number, number]> = [];
+  if (itemWidth > 0) {
+    for (const zone of redactionZones) {
+      if (!rectsOverlap(zone, itemBox)) continue;
+      const startWidth = Math.max(zone.x, x) - x;
+      const endWidth = Math.min(zone.x + zone.width, x + itemWidth) - x;
+      if (endWidth <= startWidth) continue;
+      removedRanges.push([charIndexAtWidth(text, fontSize, widthFont, startWidth), charIndexAtWidth(text, fontSize, widthFont, endWidth)]);
     }
-    for (const [start, end] of merged) {
-      const maskX = x + start * itemWidth;
-      const maskWidth = (end - start) * itemWidth;
-      page.drawRectangle({
-        x: maskX - 1,
-        y: y - fontSize * 0.3,
-        width: maskWidth + 2,
-        height: fontSize * 1.3,
-        color: rgb(1, 1, 1),
-      });
+  }
+  const blankPattern = /[.\-_·•∙]{2,}/g;
+  let match: RegExpExecArray | null;
+  while ((match = blankPattern.exec(text))) {
+    const startWidth = estimatedWidth(text.slice(0, match.index), fontSize, undefined, widthFont);
+    const endWidth = estimatedWidth(text.slice(0, match.index + match[0].length), fontSize, undefined, widthFont);
+    const segmentBox: Rect = { x: x + startWidth, y: y - fontSize * 0.3, width: endWidth - startWidth, height: fontSize * 1.3 };
+    if (filledZones.some((zone) => rectsOverlap(zone, segmentBox))) removedRanges.push([match.index, match.index + match[0].length]);
+  }
+  if (!removedRanges.length) {
+    page.drawText(sanitizeForPdf(text), { x, y, size: fontSize, font, color: rgb(0, 0, 0) });
+    return;
+  }
+
+  // Fusionne les portions à ne pas redessiner (une zone entre crochets peut
+  // très bien chevaucher un pointillé, ex. "[......]") avant de dessiner ce
+  // qui reste, morceau par morceau, à sa vraie position dans l'item.
+  removedRanges.sort((left, right) => left[0] - right[0]);
+  const merged: Array<[number, number]> = [];
+  for (const [start, end] of removedRanges) {
+    const last = merged[merged.length - 1];
+    if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+  let cursor = 0;
+  for (const [start, end] of merged) {
+    if (start > cursor) {
+      const slice = text.slice(cursor, start);
+      const offsetX = estimatedWidth(text.slice(0, cursor), fontSize, undefined, widthFont);
+      if (slice.trim()) page.drawText(sanitizeForPdf(slice), { x: x + offsetX, y, size: fontSize, font, color: rgb(0, 0, 0) });
     }
+    cursor = Math.max(cursor, end);
+  }
+  if (cursor < text.length) {
+    const slice = text.slice(cursor);
+    const offsetX = estimatedWidth(text.slice(0, cursor), fontSize, undefined, widthFont);
+    if (slice.trim()) page.drawText(sanitizeForPdf(slice), { x: x + offsetX, y, size: fontSize, font, color: rgb(0, 0, 0) });
   }
 }
 
@@ -194,14 +207,30 @@ function compact(value: string, maximum: number) {
 }
 
 /**
- * Keeps the DAO pages untouched and only writes values in the detected
- * candidate fields. documentTitle (facultatif) est le VRAI titre confirmé
- * (majuscules + gras) retrouvé sur la page DAO elle-même par
- * extractRelevantPageRange/locateTitleInFullDocument : il est écrit dans les
- * PROPRIÉTÉS du fichier PDF (titre du document), jamais dessiné sur la page
- * — la page réelle du DAO reste ainsi copiée à l'identique, sans rien y
- * ajouter, tout en donnant au PDF final un titre visible (onglet du
- * navigateur, propriétés du fichier) au lieu de rester sans titre.
+ * Reconstruit chaque page nous-mêmes, mot par mot, à sa position d'origine
+ * exacte (repérée par pdf.js) — plus jamais une copie de la vraie page du DAO
+ * masquée par un rectangle blanc avant d'écrire une valeur par-dessus.
+ *
+ * Historique : la première version de cette fonction gardait la page DAO
+ * copiée à l'identique (cadres, pointillés, logos...) et peignait juste un
+ * petit rectangle blanc sur chaque pointillé avant d'écrire la valeur. Ça
+ * évitait de perdre les traits qui forment les cadres et tableaux du DAO,
+ * mais restait fragile : un masquage un peu trop court laissait un bout de
+ * pointillé visible à côté de la valeur, et le texte d'origine (police du
+ * DAO) jurait visuellement avec la valeur ajoutée (police différente). En
+ * reconstruisant nous-mêmes CHAQUE mot du texte d'origine sur une page vierge
+ * (même position, même taille, une seule police cohérente pour toute la
+ * page), ces deux défauts disparaissent : il n'y a plus rien à "masquer",
+ * juste des pointillés qu'on choisit ou non de redessiner. Seul ce qui n'est
+ * PAS du texte (traits de cadre, logos, tampons) disparaît avec cette
+ * méthode — accepté : un tableau connu (voir route.ts, printable-pdf.ts) est
+ * redessiné à part avec ses propres traits, et le reste d'un DAO est en
+ * général du texte pur, sans élément graphique essentiel.
+ *
+ * documentTitle (facultatif) est le VRAI titre confirmé (majuscules + gras)
+ * retrouvé sur la page DAO elle-même par
+ * extractRelevantPageRange/locateTitleInFullDocument : écrit dans les
+ * PROPRIÉTÉS du fichier PDF (titre du document), jamais dessiné sur la page.
  */
 export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers: number[], positions: FillPosition[], rawValues: Record<string, string>, redactions: RedactionZone[] = [], documentTitle?: string | null, options: { rebuildAsText?: boolean } = {}) {
   // Une valeur censée être écrite telle quelle sur la page (ici, contrairement
@@ -222,116 +251,88 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
   // calculés INDÉPENDAMMENT, à partir des mêmes champs — un même champ peut
   // donc très bien être retrouvé par les deux méthodes à la fois. Sans ce
   // filtre, sa valeur était alors écrite DEUX FOIS sur la page, à deux
-  // endroits différents (l'un des deux forcément un peu à côté de la vraie
-  // case) — la cause la plus fréquente de chevauchement de texte constatée,
-  // bien avant même la question de reconstruire la page ou non. Le crochet
-  // repéré marque toujours l'emplacement exact de la case sur le modèle du
-  // DAO (plus fiable qu'une estimation par libellé) : c'est donc toujours
-  // lui qui l'emporte quand les deux se disputent le même champ.
+  // endroits différents. Le crochet repéré marque toujours l'emplacement
+  // exact de la case sur le modèle du DAO (plus fiable qu'une estimation par
+  // libellé) : c'est donc toujours lui qui l'emporte quand les deux se
+  // disputent le même champ.
   const fieldKeysHandledByRedaction = new Set(redactions.map((zone) => zone.field_key).filter((key): key is string => Boolean(key)));
   const dedupedPositions = positions.filter((position) => !fieldKeysHandledByRedaction.has(position.field_key));
   const result = await PDFDocument.create();
   if (documentTitle?.trim()) result.setTitle(compact(documentTitle.trim(), 200));
-  const { font, boldFont } = await embedUnicodeFonts(result);
-  // La page DAO d'origine est TOUJOURS copiée telle quelle en premier
-  // (cadres de tableau, pointillés, logos, mise en page... tout reste
-  // identique à l'original) — jamais recréée depuis zéro. Analyser la page
-  // avec pdf.js (ci-dessous) n'a de sens QUE s'il y a vraiment quelque
-  // chose à effacer/remplir dessus (sinon la copie seule reste strictement
-  // meilleure : fidélité parfaite, aucun risque). Un plan technique ou un
-  // modèle de panneau/logo n'a de toute façon jamais de position à remplir
-  // (voir l'appelant) : ce garde-fou suffit donc à les exclure aussi, sans
-  // dépendre d'un indicateur séparé passé depuis la route.
-  const copiedPages = await result.copyPages(sourcePdf, validPages.map((page) => page - 1));
-  copiedPages.forEach((page) => result.addPage(page));
-  const shouldMask = Boolean(options.rebuildAsText) && (dedupedPositions.length > 0 || redactions.length > 0);
-  let pdfJsDoc: Awaited<ReturnType<typeof getDocument>["promise"]> | null = null;
-  if (shouldMask) {
-    try {
-      pdfJsDoc = await getDocument({ data: source.slice(), useSystemFonts: true }).promise;
-    } catch {
-      pdfJsDoc = null; // Repli silencieux : la page copiée reste correcte, juste sans le masquage fin en plus.
-    }
+  const { font } = await embedUnicodeFonts(result);
+
+  if (!options.rebuildAsText) {
+    // Un plan technique (dessin vectoriel, aucun texte à remplacer) ou un
+    // modèle de panneau/logo (voir l'appelant) n'a jamais de position à
+    // remplir : la page reste alors copiée à l'identique, jamais reconstruite
+    // — la copie fidèle est strictement meilleure ici (fidélité parfaite,
+    // aucun risque, et rien à reconstruire de toute façon).
+    const copiedPages = await result.copyPages(sourcePdf, validPages.map((page) => page - 1));
+    copiedPages.forEach((page) => result.addPage(page));
+    return Buffer.from(await result.save());
   }
-  if (pdfJsDoc) {
-    const readyDoc = pdfJsDoc;
-    const widthFont = await getWidthEstimatorFont();
-    for (let index = 0; index < validPages.length; index += 1) {
-      const pageNumber = validPages[index];
-      const sourcePageSize = sourcePdf.getPage(pageNumber - 1).getSize();
-      const pageRedactions = redactions.filter((zone) => Math.floor(zone.page) === pageNumber)
-        .map((zone) => redactionRect(sourcePageSize.width, sourcePageSize.height, zone));
-      const pagePositions = dedupedPositions.filter((position) => Math.floor(position.page) === pageNumber)
-        .map((position) => positionRect(sourcePageSize.width, sourcePageSize.height, position));
-      const zones = [...pageRedactions, ...pagePositions];
-      if (!zones.length) continue;
+
+  let pdfJsDoc: Awaited<ReturnType<typeof getDocument>["promise"]> | null = null;
+  try {
+    pdfJsDoc = await getDocument({ data: source.slice(), useSystemFonts: true }).promise;
+  } catch {
+    pdfJsDoc = null; // Repli silencieux : la page reste vide plutôt que de faire échouer tout le document — n'arrive presque jamais en pratique.
+  }
+  const widthFont = await getWidthEstimatorFont();
+
+  for (const pageNumber of validPages) {
+    const sourcePageSize = sourcePdf.getPage(pageNumber - 1).getSize();
+    const page = result.addPage([sourcePageSize.width, sourcePageSize.height]);
+    const pageRedactionZones = redactions.filter((zone) => Math.floor(zone.page) === pageNumber);
+    const pageRedactionRects = pageRedactionZones.map((zone) => redactionRect(sourcePageSize.width, sourcePageSize.height, zone));
+    const pagePositions = dedupedPositions.filter((position) => Math.floor(position.page) === pageNumber);
+    // Un pointillé n'est effacé de la reconstruction QUE s'il va vraiment
+    // recevoir une valeur (voir drawReconstructedItem) : un champ retrouvé
+    // mais sans valeur connue garde ses pointillés d'origine intacts.
+    const pageFilledRects = pagePositions
+      .filter((position) => values[position.field_key]?.trim())
+      .map((position) => positionRect(sourcePageSize.width, sourcePageSize.height, position));
+
+    if (pdfJsDoc) {
       try {
-        await maskFilledZonesOnOriginalPage(readyDoc, pageNumber, copiedPages[index], zones, widthFont);
+        const pdfJsPage = await pdfJsDoc.getPage(pageNumber);
+        const content = await pdfJsPage.getTextContent();
+        const items = (content.items as Array<{ str?: string; transform?: number[] }>).filter((item) => (item.str ?? "").trim().length > 0 && item.transform);
+        for (const item of items) drawReconstructedItem(page, item, font, widthFont, pageFilledRects, pageRedactionRects);
       } catch {
-        // Page illisible pour pdf.js : la page copiée reste quand même
-        // correcte (fidèle à l'original), seul ce masquage fin en plus est
-        // perdu pour elle — les boucles "redactions"/"positions" plus bas
-        // dessinent de toute façon leur propre rectangle blanc avant
-        // d'écrire chaque valeur.
+        // Page illisible pour pdf.js : elle reste vide plutôt que de faire
+        // échouer tout le document généré — n'arrive presque jamais en
+        // pratique (déjà lue une première fois avec succès pour calculer
+        // positions/redactions).
       }
     }
-  }
-  // Une instruction entre crochets du DAO ("[insérer nom de la banque]") est
-  // d'abord effacée par un rectangle blanc, puis remplacée par la vraie
-  // valeur si un champ correspond — sinon elle reste simplement blanche,
-  // comme le DAO lui-même demande de le faire avant le dépôt final.
-  for (const zone of redactions) {
-    const outputIndex = validPages.indexOf(Math.floor(zone.page));
-    if (outputIndex < 0) continue;
-    const page = result.getPage(outputIndex);
-    const { width, height } = page.getSize();
-    const x = width * Math.max(0, Math.min(100, zone.x_percent)) / 100;
-    const boxHeight = height * Math.max(0, Math.min(100, zone.height_percent)) / 100;
-    const y = height - (height * Math.max(0, Math.min(100, zone.y_percent)) / 100) - boxHeight;
-    const boxWidth = width * Math.max(1, Math.min(100, zone.width_percent)) / 100;
-    page.drawRectangle({ x: x - 1, y: y - 1, width: boxWidth + 2, height: boxHeight + 2, color: rgb(1, 1, 1) });
-    const value = zone.field_key ? values[zone.field_key]?.trim() : "";
-    if (value) {
-      const fontSize = Math.max(6, Math.min(9, boxHeight * 0.72));
-      const maxChars = Math.max(4, Math.floor(boxWidth / (fontSize * 0.55)));
+
+    // Une instruction entre crochets du DAO ("[insérer nom de la banque]") a
+    // déjà disparu ci-dessus (drawReconstructedItem saute tout item qui la
+    // chevauche) : seule la vraie valeur reste à écrire, si elle existe.
+    for (const zone of pageRedactionZones) {
+      const value = zone.field_key ? values[zone.field_key]?.trim() : "";
+      if (!value) continue;
+      const rect = redactionRect(sourcePageSize.width, sourcePageSize.height, zone);
+      const fontSize = Math.max(6, Math.min(9, rect.height * 0.72));
+      const maxChars = Math.max(4, Math.floor(rect.width / (fontSize * 0.55)));
       // La valeur doit apparaître là où commençait le texte entre crochets
       // d'origine, donc en haut de la zone effacée — pas au milieu de sa
-      // hauteur totale, qui peut désormais être grande pour une instruction
-      // sur plusieurs lignes (sinon la valeur atterrit sur la dernière
-      // ligne de la zone, au même endroit qu'un champ voisin sur cette
-      // ligne). Un simple décalage fixe sous le haut de la boîte, basé sur
-      // la taille de police, place le texte correctement quelle que soit
-      // la hauteur de la boîte.
-      const textY = y + boxHeight - fontSize * 1.05;
-      page.drawText(compact(value, maxChars), { x, y: textY, size: fontSize, font, color: rgb(0, 0, 0) });
+      // hauteur totale, qui peut être grande pour une instruction sur
+      // plusieurs lignes.
+      const textY = rect.y + rect.height - fontSize * 1.05;
+      page.drawText(compact(value, maxChars), { x: rect.x + 1, y: textY, size: fontSize, font, color: rgb(0, 0, 0) });
     }
-  }
-  for (const position of dedupedPositions) {
-    const outputIndex = validPages.indexOf(Math.floor(position.page));
-    if (outputIndex < 0) continue;
-    const value = values[position.field_key]?.trim();
-    const page = result.getPage(outputIndex);
-    const { width, height } = page.getSize();
-    const fontSize = clampFontSize(position.font_size);
-    const available = Math.max(10, width * Math.max(1, Math.min(90, position.width_percent)) / 100);
-    const x = width * Math.max(0, Math.min(100, position.x_percent)) / 100;
-    // Pas de "- fontSize" ici : y_percent est déjà la ligne de base réelle du
-    // texte repéré sur la page (voir le commentaire de positionRect plus
-    // haut) — une soustraction ici décalait la valeur d'une ligne entière
-    // plus bas que prévu, sur TOUT type de champ ou de document.
-    const y = height - (height * Math.max(0, Math.min(100, position.y_percent)) / 100);
-    // Le DAO imprime des points de suite, tirets ou soulignés à cet
-    // emplacement ("Nom : .........", "Date : ______") pour indiquer où
-    // écrire à la main. Dès qu'on connaît la vraie valeur, on efface d'abord
-    // ces caractères avec un rectangle blanc avant d'écrire par-dessus,
-    // exactement comme pour les zones de redaction ci-dessus, pour ne
-    // jamais superposer la valeur remplie aux pointillés d'origine — cette
-    // règle couvre aussi les cellules de tableau, qui utilisent les mêmes
-    // positions. Sans valeur connue, on laisse les pointillés intacts pour
-    // que la personne puisse encore les compléter à la main.
-    if (value) {
-      const coverHeight = fontSize * 1.5;
-      page.drawRectangle({ x: x - 1, y: y - coverHeight * 0.25, width: available + 2, height: coverHeight, color: rgb(1, 1, 1) });
+    // Champ simple (un pointillé à côté d'un libellé, ou juste après lui,
+    // ou une case de tableau) : son pointillé a déjà disparu ci-dessus
+    // (pageFilledRects), la valeur prend directement sa place.
+    for (const position of pagePositions) {
+      const value = values[position.field_key]?.trim();
+      if (!value) continue;
+      const fontSize = clampFontSize(position.font_size);
+      const available = Math.max(10, sourcePageSize.width * Math.max(1, Math.min(90, position.width_percent)) / 100);
+      const x = sourcePageSize.width * Math.max(0, Math.min(100, position.x_percent)) / 100;
+      const y = sourcePageSize.height - (sourcePageSize.height * Math.max(0, Math.min(100, position.y_percent)) / 100);
       const maxChars = Math.max(4, Math.floor(available / 4.2));
       page.drawText(compact(value, maxChars), { x, y, size: fontSize, font, color: rgb(0, 0, 0) });
     }
