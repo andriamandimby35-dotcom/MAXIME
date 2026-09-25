@@ -200,6 +200,24 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   if (!member?.organization_id) return NextResponse.json({ error: "Organisation introuvable." }, { status: 403 });
   const { data: tender } = await supabase.from("tenders").select("id,reference,title,client_name,document_url,ai_analysis,estimated_amount").eq("id", id).eq("organization_id", member.organization_id).maybeSingle();
   if (!tender) return NextResponse.json({ error: "DAO introuvable." }, { status: 404 });
+  // Le PDF complet du DAO (souvent plusieurs Mo, parfois des centaines de
+  // pages pour les plans) était retéléchargé depuis Supabase à CHAQUE endroit
+  // plus bas qui en a besoin (jusqu'à 5 endroits différents dans cette seule
+  // route) : pour UNE SEULE génération de document, ça pouvait donc
+  // retélécharger le même fichier plusieurs fois de suite. On ne le
+  // télécharge maintenant qu'UNE FOIS ici, gardé en mémoire pour toute la
+  // durée de cette requête ; tout le code plus bas qui a besoin des octets du
+  // DAO doit passer par cette fonction plutôt que par un nouveau fetch().
+  let cachedDocumentBytes: Uint8Array | null = null;
+  let documentFetchFailed = false;
+  async function getDocumentBytes(): Promise<Uint8Array | null> {
+    if (cachedDocumentBytes) return cachedDocumentBytes;
+    if (documentFetchFailed || !tender.document_url) return null;
+    const source = await fetch(tender.document_url);
+    if (!source.ok) { documentFetchFailed = true; return null; }
+    cachedDocumentBytes = new Uint8Array(await source.arrayBuffer());
+    return cachedDocumentBytes;
+  }
   const [profileResult, itemsResult, estimateResult] = await Promise.all([
     supabase.from("organization_submission_profiles").select("profile_data").eq("organization_id", member.organization_id).maybeSingle(),
     supabase.from("tender_submission_items").select("title,fields,form_data").eq("organization_id", member.organization_id).eq("tender_id", id),
@@ -534,13 +552,24 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // correcte, mais origin pas "dao", donc cette branche était sautée
   // entièrement malgré une page connue et fiable). Une page/référence connue
   // est un signal plus sûr que ce classement : dès qu'on en a une, on l'utilise.
+  // Journal temporaire pour diagnostiquer, via les journaux Vercel, PAR
+  // QUELLE VOIE part chaque pièce (vraie page du DAO reconstruite, ou un des
+  // replis plus bas) — indispensable pour savoir à distance si un PDF encore
+  // mal rempli vient de cette branche ou d'une autre.
+  console.info("PRINTABLE_PDF_ROUTE_DECISION", {
+    title,
+    isAppComputedTableItem,
+    hasDetectedTemplate: Boolean(detectedTemplate),
+    hasDocumentUrl: Boolean(tender.document_url),
+    detectedTemplateKnownPages,
+    templateTextLength: detectedTemplate?.template_text?.length ?? 0,
+  });
   if (!isAppComputedTableItem && detectedTemplate && tender.document_url && detectedTemplateKnownPages.length) {
     const notClaimedByOthers = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], detectedTemplate.title ?? title, detectedTemplateKnownPages);
     if (notClaimedByOthers.length) {
       try {
-        const source = await fetch(tender.document_url);
-        if (source.ok) {
-          const bytes = new Uint8Array(await source.arrayBuffer());
+        const bytes = await getDocumentBytes();
+        if (bytes) {
           // Si la page précise citée s'avère être la mauvaise (l'IA se trompe
           // parfois de quelques pages), la recherche de titre n'a alors aucune
           // autre page où chercher : detectedTemplateKnownPages (page + plage
@@ -598,6 +627,23 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             const tableCellValues = Object.fromEntries(tableCellTargets.map((target) => [target.field_key, target.value]));
             const foundTableFieldKeys = new Set(tablePositions.map((position) => position.field_key));
             allTableCellsResolvedOnRealPage = tableCellTargets.length > 0 && tableCellTargets.every((target) => foundTableFieldKeys.has(target.field_key));
+            // Journal temporaire pour diagnostiquer, via les journaux Vercel,
+            // pourquoi certains PDF générés depuis une vraie page du DAO
+            // gardent leurs pointillés d'origine intacts au lieu d'être
+            // remplis : montre précisément combien de champs/positions ont
+            // été détectés pour CETTE pièce précise, sans quoi il est
+            // impossible de savoir, à distance, si le problème vient d'un
+            // manque de champs détectés par l'IA ou d'un bug de dessin.
+            console.info("PRINTABLE_PDF_TEMPLATE_BRANCH", {
+              title,
+              verifiedPages,
+              templateFieldsCount: templateFields.length,
+              positionsFound: positions.length,
+              bracketZonesFound: redactions.length,
+              tableCellTargets: tableCellTargets.length,
+              tableCellPositionsFound: tablePositions.length,
+              rebuildAsText: !isGraphicOnlyDocument,
+            });
             pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
           }
           // La page fabriquée ci-dessous ne sert plus qu'en dernier recours :
@@ -658,9 +704,8 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     const notClaimedByOthers = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], title, referencedPages);
     if (notClaimedByOthers.length) {
       try {
-        const source = await fetch(tender.document_url);
-        if (source.ok) {
-          const bytes = new Uint8Array(await source.arrayBuffer());
+        const bytes = await getDocumentBytes();
+        if (bytes) {
           // La plage citée par le DAO couvre parfois plusieurs documents à la
           // suite (ex. "Partie III" commence par l'acte d'engagement et la
           // localisation du site AVANT le CCAP) : on recadre sur la première
@@ -685,9 +730,8 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       // n'importe quelle pièce quasi toujours présente dans un DAO, sur
       // n'importe quel DAO, pas seulement celui-ci.
       try {
-        const source = await fetch(tender.document_url);
-        if (source.ok) {
-          const bytes = new Uint8Array(await source.arrayBuffer());
+        const bytes = await getDocumentBytes();
+        if (bytes) {
           const blindSearchResult = await locateTitleInFullDocument(bytes, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title));
           const locatedPages = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], title, blindSearchResult.pages);
           if (locatedPages.length) {
@@ -760,9 +804,8 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // commence (planning, personnel...) — cette limite-là est fiable.
   if (/\bplans?\b/i.test(title) && planRegister?.page_numbers?.length && tender.document_url) {
     try {
-      const source = await fetch(tender.document_url);
-      if (source.ok) {
-        const bytes = new Uint8Array(await source.arrayBuffer());
+      const bytes = await getDocumentBytes();
+      if (bytes) {
         const documentPageCount = (await PDFDocument.load(bytes)).getPageCount();
         const verifiedPages = await expandToContiguousPlanRange(title, planRegister.page_numbers, analysis?.submission_items ?? [], documentPageCount);
         if (verifiedPages.length) pdf = await appendDaoPagesToPdf(pdf, bytes, verifiedPages);
@@ -779,9 +822,8 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       const referencedPages = parsePageNumbersFromReference(transportWeightTable.source_reference);
       const notClaimedByOthers = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], title, referencedPages);
       if (notClaimedByOthers.length) {
-        const source = await fetch(tender.document_url);
-        if (source.ok) {
-          const bytes = new Uint8Array(await source.arrayBuffer());
+        const bytes = await getDocumentBytes();
+        if (bytes) {
           pdf = await appendDaoPagesToPdf(pdf, bytes, notClaimedByOthers);
         }
       }
