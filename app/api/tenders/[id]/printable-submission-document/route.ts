@@ -670,6 +670,10 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
               field_key: position.field_key,
               label: fieldTargets.find((field) => field.field_key === position.field_key)?.label,
               matched_line: position.debug_matched_line,
+              blank_kind: position.debug_blank_kind,
+              x_percent: Math.round(position.x_percent),
+              y_percent: Math.round(position.y_percent),
+              width_percent: Math.round(position.width_percent),
             }));
             // Journal temporaire pour diagnostiquer, via les journaux Vercel,
             // pourquoi certains PDF générés depuis une vraie page du DAO

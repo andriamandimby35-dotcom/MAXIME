@@ -25,7 +25,15 @@ type FieldTarget = { field_key: string; label: string; description?: string };
 // vérifier, à distance, qu'un champ tombe bien sur la BONNE ligne du modèle
 // et pas seulement qu'une position a été "trouvée" (un score de mots-clés
 // suffisant peut très bien pointer vers une ligne qui n'est pas la bonne).
-type LocatedPosition = { page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number; font_size?: number; debug_matched_line?: string };
+// debug_blank_kind (facultatif, même principe que debug_matched_line) :
+// comment le blanc a été repéré pour ce champ — "blank-item" (un repère de
+// blanc qui est son propre item), "embedded" (un pointillé caché au milieu
+// d'une phrase), "inline-after-label" (aucun blanc trouvé, valeur juste
+// après le libellé sur la même ligne) ou "below-line" (aucun blanc trouvé,
+// valeur placée sur la ligne du dessous, jugée libre) — jamais utilisé pour
+// dessiner quoi que ce soit, uniquement pour comprendre à distance pourquoi
+// une valeur atterrit à tel endroit précis plutôt qu'à un autre.
+type LocatedPosition = { page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number; font_size?: number; debug_matched_line?: string; debug_blank_kind?: string };
 type LineGroup = { items: TextItem[]; text: string; y: number };
 type PageData = { items: TextItem[]; width: number; height: number; lineGroups: LineGroup[] };
 
@@ -373,6 +381,7 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
           // endroit précis de la page — plus fiable qu'une taille fixe.
           font_size: chosenBlank?.fontSize ?? fontSizeOfItem(bestLine.items[0]),
           debug_matched_line: bestLine.text.trim().slice(0, 100),
+          debug_blank_kind: blankRunItem ? "blank-item" : embeddedBlank ? "embedded" : placeBelow ? "below-line" : "inline-after-label",
         });
         foundKeys.add(target.field_key);
       }
