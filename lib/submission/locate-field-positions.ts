@@ -166,6 +166,32 @@ function lineHasBlank(text: string): boolean {
 function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<TextItem>, minScore: number = STRICT_MATCH_SCORE): LineGroup | null {
   const keywords = [...significantWords(label)].filter((word) => word.length >= 3);
   if (!keywords.length) return null;
+  // Un mot très répété sur la page (le nom du DAO lui-même : "Appel
+  // d'Offres" revient très souvent, dans quasiment tous les DAO) est un bien
+  // moins bon indice qu'un mot rare et spécifique ("récépissé", "soussigné")
+  // : il dit surtout "ceci est un DAO", pas "voici la bonne ligne". Sans cet
+  // ajustement, un libellé qui contient LUI-MÊME ce genre de mot très
+  // répété (ex. "Date de l'Appel d'Offres") pouvait s'accrocher à N'IMPORTE
+  // laquelle des nombreuses lignes qui le mentionnent, y compris une ligne
+  // sans aucun rapport — constaté sur un vrai DAO : ce champ volait le blanc
+  // "...dans un délai de ...... Jours" destiné à un tout autre champ, juste
+  // parce que "Appel d'Offres" y était aussi mentionné en passant. On calcule
+  // ici, pour CHAQUE mot-clé, sa fréquence RÉELLE sur CETTE page précise
+  // (jamais une liste de mots à écarter à la main : ça s'adapte tout seul au
+  // vocabulaire propre à chaque DAO) et on réduit son poids en conséquence
+  // seulement s'il dépasse 12% des lignes de la page — en dessous de ce
+  // seuil, un mot qui revient 2 ou 3 fois reste un indice normal, à poids
+  // plein.
+  const totalLines = lineGroups.length || 1;
+  const genericityFactor = new Map<string, number>();
+  for (const word of keywords) {
+    let frequency = 0;
+    for (const group of lineGroups) {
+      if (normalize(group.text).includes(word)) frequency += 1;
+    }
+    const ratio = frequency / totalLines;
+    genericityFactor.set(word, ratio <= 0.12 ? 1 : Math.max(0.3, 0.12 / ratio));
+  }
   let best: LineGroup | null = null;
   let bestScore = 0;
   let bestHasBlank = false;
@@ -187,8 +213,9 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
     // respectifs de "description" et "projet".
     let weightedScore = 0;
     for (const word of keywords) {
-      if (normalizedLine.includes(word)) { weightedScore += 1; continue; }
-      if ((FIELD_LABEL_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym))) weightedScore += 0.4;
+      const factor = genericityFactor.get(word) ?? 1;
+      if (normalizedLine.includes(word)) { weightedScore += 1 * factor; continue; }
+      if ((FIELD_LABEL_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym))) weightedScore += 0.4 * factor;
     }
     const score = weightedScore / keywords.length;
     if (score < minScore) continue;
