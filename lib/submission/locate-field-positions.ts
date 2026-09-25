@@ -110,6 +110,30 @@ function estimatedWidth(item: TextItem, fallbackFont: PDFFont): number {
 const STRICT_MATCH_SCORE = 0.6;
 const RELAXED_MATCH_SCORE = 0.5;
 
+// L'IA donne un vocabulaire "générique" pour chaque champ ("Nom du
+// signataire", "Lieu de signature", "Raison sociale") mais un DAO réel utilise
+// très souvent une formule juridique/administrative différente pour dire
+// EXACTEMENT la même chose ("Je SOUSSIGNÉ...", "FAIT à...", "l'Entrepreneur",
+// "les PRESTATIONS concernant..."). Ce n'est pas propre à un DAO précis : ce
+// sont des formules standard qu'on retrouve d'un dossier à l'autre. Plutôt
+// que de corriger au cas par cas à chaque nouveau DAO qui bute dessus, cette
+// liste centralise les équivalences déjà repérées (un mot du libellé → ses
+// synonymes usuels dans un DAO) : un mot du libellé compte comme trouvé sur
+// une ligne si LUI ou l'un de ses synonymes y apparaît. Pour corriger un
+// futur cas similaire, il suffit d'ajouter une entrée ici plutôt que de
+// changer la logique de recherche.
+const FIELD_LABEL_SYNONYMS: Record<string, string[]> = {
+  signataire: ["soussigne"],
+  lieu: ["fait"],
+  raison: ["denomination"],
+  sociale: ["societe", "entreprise", "entrepreneur", "candidat"],
+  description: ["objet", "designation"],
+  projet: ["marche", "convention", "offre", "prestations"],
+  reference: ["numero"],
+  delai: ["duree"],
+  duree: ["delai"],
+};
+
 /** Trouve, parmi les lignes de la page, celle qui correspond le mieux aux mots-clés d'un libellé. */
 function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<TextItem>, minScore: number = STRICT_MATCH_SCORE): LineGroup | null {
   const keywords = [...significantWords(label)].filter((word) => word.length >= 3);
@@ -119,7 +143,8 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
   for (const group of lineGroups) {
     if (group.items.every((item) => usedItems.has(item))) continue;
     const normalizedLine = normalize(group.text);
-    const matched = keywords.filter((word) => normalizedLine.includes(word)).length;
+    const matched = keywords.filter((word) => normalizedLine.includes(word)
+      || (FIELD_LABEL_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym))).length;
     const score = matched / keywords.length;
     if (score > bestScore && score >= minScore) { bestScore = score; best = group; }
   }
