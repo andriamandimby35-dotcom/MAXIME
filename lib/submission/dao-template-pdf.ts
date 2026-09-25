@@ -1,4 +1,4 @@
-import { PDFDocument, PDFFont, PDFPage, StandardFonts, rgb } from "pdf-lib";
+import { PDFDocument, PDFFont, PDFPage, rgb } from "pdf-lib";
 import { embedUnicodeFonts } from "./pdf-font";
 import "@/lib/submission/pdfjs-worker-setup";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
@@ -63,19 +63,6 @@ function positionRect(width: number, height: number, position: FillPosition): Re
   return { x: x - 1, y: y - coverHeight * 0.25, width: available + 2, height: coverHeight };
 }
 
-// Même repli que locate-field-positions.ts (et pour rester cohérent avec
-// lui : la zone à masquer doit couvrir exactement ce que ce fichier a estimé
-// en calculant la position) quand pdf.js ne donne pas la largeur d'un item —
-// les métriques réelles d'une police standard donnent une estimation bien
-// plus fiable qu'un simple facteur fixe par caractère.
-let widthEstimatorFontPromise: Promise<PDFFont> | null = null;
-function getWidthEstimatorFont(): Promise<PDFFont> {
-  if (!widthEstimatorFontPromise) {
-    widthEstimatorFontPromise = PDFDocument.create().then((doc) => doc.embedFont(StandardFonts.Helvetica));
-  }
-  return widthEstimatorFontPromise;
-}
-
 function estimatedWidth(text: string, fontSize: number, realWidth: number | undefined, fallbackFont: PDFFont): number {
   if (realWidth) return realWidth;
   try {
@@ -118,9 +105,8 @@ function charIndexAtWidth(text: string, fontSize: number, font: PDFFont, targetW
 //   main sur le document imprimé.
 function drawReconstructedItem(
   page: PDFPage,
-  item: { str?: string; transform?: number[] },
+  item: { str?: string; transform?: number[]; width?: number },
   font: PDFFont,
-  widthFont: PDFFont,
   filledZones: Rect[],
   redactionZones: Rect[],
 ) {
@@ -129,8 +115,24 @@ function drawReconstructedItem(
   const transform = item.transform ?? [10, 0, 0, 10, 0, 0];
   const x = transform[4] ?? 0;
   const y = transform[5] ?? 0;
-  const fontSize = Math.max(4, Math.hypot(transform[2] ?? 0, transform[3] ?? 10));
-  const itemWidth = estimatedWidth(text, fontSize, undefined, widthFont);
+  let fontSize = Math.max(4, Math.hypot(transform[2] ?? 0, transform[3] ?? 10));
+  // La police qu'on dessine (DejaVu Sans, embarquée pour tout le document) ne
+  // rend jamais un texte EXACTEMENT à la même largeur que la police d'origine
+  // du DAO (souvent une police système différente) — mesurer et dessiner
+  // avec CETTE MÊME police partout (jamais une police de secours séparée
+  // seulement pour mesurer) évite déjà un premier décalage. Il reste un
+  // second risque : même mesurée correctement, notre police peut rendre un
+  // mot plus LARGE que sa place d'origine sur le DAO, empiétant alors sur le
+  // mot suivant (repéré sur un vrai DAO : du texte qui se touchait, sans
+  // aucun espace visible, à plusieurs endroits). Quand pdf.js connaît la
+  // largeur RÉELLE d'origine de cet item, on réduit légèrement la taille de
+  // police SEULEMENT pour lui si besoin, afin de ne jamais dépasser la place
+  // qu'il occupait vraiment sur la page d'origine.
+  const naturalWidth = estimatedWidth(text, fontSize, undefined, font);
+  if (item.width && item.width > 0 && naturalWidth > item.width) {
+    fontSize *= Math.max(0.6, item.width / naturalWidth);
+  }
+  const itemWidth = estimatedWidth(text, fontSize, undefined, font);
   const itemBox: Rect = { x, y: y - fontSize * 0.3, width: itemWidth, height: fontSize * 1.3 };
 
   const removedRanges: Array<[number, number]> = [];
@@ -140,14 +142,14 @@ function drawReconstructedItem(
       const startWidth = Math.max(zone.x, x) - x;
       const endWidth = Math.min(zone.x + zone.width, x + itemWidth) - x;
       if (endWidth <= startWidth) continue;
-      removedRanges.push([charIndexAtWidth(text, fontSize, widthFont, startWidth), charIndexAtWidth(text, fontSize, widthFont, endWidth)]);
+      removedRanges.push([charIndexAtWidth(text, fontSize, font, startWidth), charIndexAtWidth(text, fontSize, font, endWidth)]);
     }
   }
   const blankPattern = /[.\-_·•∙]{2,}/g;
   let match: RegExpExecArray | null;
   while ((match = blankPattern.exec(text))) {
-    const startWidth = estimatedWidth(text.slice(0, match.index), fontSize, undefined, widthFont);
-    const endWidth = estimatedWidth(text.slice(0, match.index + match[0].length), fontSize, undefined, widthFont);
+    const startWidth = estimatedWidth(text.slice(0, match.index), fontSize, undefined, font);
+    const endWidth = estimatedWidth(text.slice(0, match.index + match[0].length), fontSize, undefined, font);
     const segmentBox: Rect = { x: x + startWidth, y: y - fontSize * 0.3, width: endWidth - startWidth, height: fontSize * 1.3 };
     if (filledZones.some((zone) => rectsOverlap(zone, segmentBox))) removedRanges.push([match.index, match.index + match[0].length]);
   }
@@ -170,14 +172,14 @@ function drawReconstructedItem(
   for (const [start, end] of merged) {
     if (start > cursor) {
       const slice = text.slice(cursor, start);
-      const offsetX = estimatedWidth(text.slice(0, cursor), fontSize, undefined, widthFont);
+      const offsetX = estimatedWidth(text.slice(0, cursor), fontSize, undefined, font);
       if (slice.trim()) page.drawText(sanitizeForPdf(slice), { x: x + offsetX, y, size: fontSize, font, color: rgb(0, 0, 0) });
     }
     cursor = Math.max(cursor, end);
   }
   if (cursor < text.length) {
     const slice = text.slice(cursor);
-    const offsetX = estimatedWidth(text.slice(0, cursor), fontSize, undefined, widthFont);
+    const offsetX = estimatedWidth(text.slice(0, cursor), fontSize, undefined, font);
     if (slice.trim()) page.drawText(sanitizeForPdf(slice), { x: x + offsetX, y, size: fontSize, font, color: rgb(0, 0, 0) });
   }
 }
@@ -278,8 +280,6 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
   } catch {
     pdfJsDoc = null; // Repli silencieux : la page reste vide plutôt que de faire échouer tout le document — n'arrive presque jamais en pratique.
   }
-  const widthFont = await getWidthEstimatorFont();
-
   for (const pageNumber of validPages) {
     const sourcePageSize = sourcePdf.getPage(pageNumber - 1).getSize();
     const page = result.addPage([sourcePageSize.width, sourcePageSize.height]);
@@ -297,8 +297,8 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
       try {
         const pdfJsPage = await pdfJsDoc.getPage(pageNumber);
         const content = await pdfJsPage.getTextContent();
-        const items = (content.items as Array<{ str?: string; transform?: number[] }>).filter((item) => (item.str ?? "").trim().length > 0 && item.transform);
-        for (const item of items) drawReconstructedItem(page, item, font, widthFont, pageFilledRects, pageRedactionRects);
+        const items = (content.items as Array<{ str?: string; transform?: number[]; width?: number }>).filter((item) => (item.str ?? "").trim().length > 0 && item.transform);
+        for (const item of items) drawReconstructedItem(page, item, font, pageFilledRects, pageRedactionRects);
       } catch {
         // Page illisible pour pdf.js : elle reste vide plutôt que de faire
         // échouer tout le document généré — n'arrive presque jamais en
