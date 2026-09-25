@@ -643,6 +643,20 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             const tableCellValues = Object.fromEntries(tableCellTargets.map((target) => [target.field_key, target.value]));
             const foundTableFieldKeys = new Set(tablePositions.map((position) => position.field_key));
             allTableCellsResolvedOnRealPage = tableCellTargets.length > 0 && tableCellTargets.every((target) => foundTableFieldKeys.has(target.field_key));
+            // Le compte seul (positionsFound: 3 sur 10, par exemple) ne dit pas
+            // LESQUELS des champs échouent, ce qui obligeait à deviner à
+            // l'aveugle pour corriger la recherche de libellé. On liste ici le
+            // libellé + description de chaque champ non retrouvé (ni en
+            // position, ni en crochet "[...]") pour voir directement, via les
+            // journaux Vercel, quel vocabulaire du champ ne correspond pas au
+            // texte réel de CETTE page du DAO.
+            const foundFieldKeys = new Set([
+              ...positions.map((position) => position.field_key),
+              ...redactions.map((zone) => zone.field_key).filter((key): key is string => Boolean(key)),
+            ]);
+            const unresolvedFields = fieldTargets
+              .filter((field) => !foundFieldKeys.has(field.field_key))
+              .map((field) => ({ label: field.label, description: field.description }));
             // Journal temporaire pour diagnostiquer, via les journaux Vercel,
             // pourquoi certains PDF générés depuis une vraie page du DAO
             // gardent leurs pointillés d'origine intacts au lieu d'être
@@ -659,6 +673,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
               tableCellTargets: tableCellTargets.length,
               tableCellPositionsFound: tablePositions.length,
               rebuildAsText: !isGraphicOnlyDocument,
+              unresolvedFields,
             });
             pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
           }
