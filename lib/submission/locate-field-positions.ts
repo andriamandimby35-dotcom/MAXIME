@@ -196,7 +196,7 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
       if (normalize(group.text).includes(word)) frequency += 1;
     }
     const ratio = frequency / totalLines;
-    genericityFactor.set(word, ratio <= 0.12 ? 1 : Math.max(0.3, 0.12 / ratio));
+    genericityFactor.set(word, ratio <= 0.08 ? 1 : Math.max(0.3, 0.08 / ratio));
   }
   let best: LineGroup | null = null;
   let bestScore = 0;
@@ -217,14 +217,36 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
     // tombait sur une phrase parlant du délai d'exécution des travaux,
     // simplement parce qu'elle contenait "objets" et "offres", synonymes
     // respectifs de "description" et "projet".
+    // Réduire le poids d'un mot générique ne suffit pas toujours : si DEUX
+    // lignes candidates partagent EXACTEMENT les mêmes mots génériques (ex.
+    // "appel" + "offres" présents sur les deux), la réduction s'applique de
+    // façon identique aux deux lignes et l'égalité entre elles reste — elle
+    // ne permet jamais de les départager. Constaté sur un vrai DAO : le champ
+    // "Date de l'appel d'offres" s'accrochait quand même à la ligne "...dans
+    // un délai de ...... Jours" destinée à un tout autre champ, uniquement
+    // parce que les deux lignes mentionnaient "appel"/"offres" en passant. La
+    // vraie protection : une ligne ne doit être acceptée QUE si au moins UN
+    // des mots-clés qu'elle a permis de retrouver (littéral ou synonyme) est
+    // un mot rare sur la page — sinon la correspondance ne repose que sur du
+    // vocabulaire générique de DAO et ne prouve rien de spécifique à ce champ.
     let weightedScore = 0;
+    let hasRareMatch = false;
     for (const word of keywords) {
       const factor = genericityFactor.get(word) ?? 1;
-      if (normalizedLine.includes(word)) { weightedScore += 1 * factor; continue; }
-      if ((FIELD_LABEL_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym))) weightedScore += 0.4 * factor;
+      const isRareWord = factor >= 1;
+      if (normalizedLine.includes(word)) {
+        weightedScore += 1 * factor;
+        if (isRareWord) hasRareMatch = true;
+        continue;
+      }
+      if ((FIELD_LABEL_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym))) {
+        weightedScore += 0.4 * factor;
+        if (isRareWord) hasRareMatch = true;
+      }
     }
     const score = weightedScore / keywords.length;
     if (score < minScore) continue;
+    if (!hasRareMatch) continue;
     const hasBlank = lineHasBlank(group.text);
     // À score STRICTEMENT meilleur, on change toujours de ligne comme avant.
     // À score ÉGAL, on ne change que si la nouvelle ligne a un blanc à
