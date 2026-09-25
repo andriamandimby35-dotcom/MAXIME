@@ -97,8 +97,21 @@ function estimatedWidth(item: TextItem, fallbackFont: PDFFont): number {
   }
 }
 
+// Avec exactement 2 mots-clés (un libellé court, très courant : "Date de
+// signature", "Nom du signataire"...), le score ne peut valoir que 0%, 50%
+// ou 100% — jamais 60% pile. Le seuil de 0.6 exige donc, sans le vouloir,
+// que les DEUX mots correspondent pour ce genre de libellé, alors qu'un seul
+// des deux mots correspond très souvent sur un DAO réel (le mot le plus
+// spécifique, ex. "date" dans une case "Date: .........", pendant que
+// "signature" n'apparaît nulle part sur cette ligne précise). minScore
+// permet à l'appelant de retenter en seuil réduit UNIQUEMENT si la recherche
+// stricte n'a rien trouvé, sans jamais changer un résultat déjà trouvé au
+// seuil strict.
+const STRICT_MATCH_SCORE = 0.6;
+const RELAXED_MATCH_SCORE = 0.5;
+
 /** Trouve, parmi les lignes de la page, celle qui correspond le mieux aux mots-clés d'un libellé. */
-function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<TextItem>): LineGroup | null {
+function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<TextItem>, minScore: number = STRICT_MATCH_SCORE): LineGroup | null {
   const keywords = [...significantWords(label)].filter((word) => word.length >= 3);
   if (!keywords.length) return null;
   let best: LineGroup | null = null;
@@ -108,7 +121,7 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
     const normalizedLine = normalize(group.text);
     const matched = keywords.filter((word) => normalizedLine.includes(word)).length;
     const score = matched / keywords.length;
-    if (score > bestScore && score >= 0.6) { bestScore = score; best = group; }
+    if (score > bestScore && score >= minScore) { bestScore = score; best = group; }
   }
   return best;
 }
@@ -134,14 +147,18 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
         // paragraphe de prose ("Je soussigné ... représentant ..."),
         // contrairement à un formulaire où le libellé du DAO est repris
         // quasi mot pour mot — constaté sur un vrai DAO ("Lettre de
-        // soumission") : 8 champs sur 10 ne trouvaient AUCUNE ligne
+        // soumission") : la plupart des champs ne trouvaient AUCUNE ligne
         // correspondante, qui gardait donc ses pointillés d'origine intacts
-        // au lieu d'être remplie. Si le libellé seul ne trouve rien, on
-        // retente avec en plus la description du champ (souvent plus proche
-        // du texte réel du DAO) — uniquement en repli, pour ne jamais changer
-        // un résultat qui marchait déjà avec le libellé seul.
+        // au lieu d'être remplie. On retente, dans l'ordre du plus fiable au
+        // moins fiable, et on s'arrête au premier qui trouve quelque chose :
+        // libellé seul (strict), libellé+description (strict), libellé seul
+        // (seuil réduit), libellé+description (seuil réduit) — jamais
+        // l'inverse, pour ne jamais remplacer un résultat déjà trouvé de
+        // façon fiable par un résultat moins fiable.
         const bestLine = findBestLine(pageData.lineGroups, target.label, usedItems)
-          ?? (target.description ? findBestLine(pageData.lineGroups, `${target.label} ${target.description}`, usedItems) : null);
+          ?? (target.description ? findBestLine(pageData.lineGroups, `${target.label} ${target.description}`, usedItems) : null)
+          ?? findBestLine(pageData.lineGroups, target.label, usedItems, RELAXED_MATCH_SCORE)
+          ?? (target.description ? findBestLine(pageData.lineGroups, `${target.label} ${target.description}`, usedItems, RELAXED_MATCH_SCORE) : null);
         if (!bestLine) continue;
         bestLine.items.forEach((item) => usedItems.add(item));
         const rightmost = bestLine.items.reduce((max, item) => Math.max(max, (item.transform?.[4] ?? 0) + estimatedWidth(item, widthFont)), 0);
