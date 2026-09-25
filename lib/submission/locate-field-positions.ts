@@ -172,6 +172,14 @@ function lineHasBlank(text: string): boolean {
 function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<TextItem>, minScore: number = STRICT_MATCH_SCORE): LineGroup | null {
   const keywords = [...significantWords(label)].filter((word) => word.length >= 3);
   if (!keywords.length) return null;
+  // Un libellé de champ DAO suit presque toujours la même construction :
+  // "<mot principal> de/du/des <précision>" — "Date de l'appel d'offres",
+  // "Délai d'exécution", "Lieu de signature", "Référence du contrat",
+  // "Raison sociale". Le tout premier mot du libellé (celui qui reste après
+  // avoir retiré "de/du/des...", déjà filtrés par significantWords) est
+  // TOUJOURS ce mot principal, quel que soit le DAO — jamais un mot à retenir
+  // à la main pour ce document précis.
+  const headKeyword = keywords[0];
   // Un mot très répété sur la page (le nom du DAO lui-même : "Appel
   // d'Offres" revient très souvent, dans quasiment tous les DAO) est un bien
   // moins bon indice qu'un mot rare et spécifique ("récépissé", "soussigné")
@@ -196,7 +204,7 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
       if (normalize(group.text).includes(word)) frequency += 1;
     }
     const ratio = frequency / totalLines;
-    genericityFactor.set(word, ratio <= 0.08 ? 1 : Math.max(0.3, 0.08 / ratio));
+    genericityFactor.set(word, ratio <= 0.12 ? 1 : Math.max(0.3, 0.12 / ratio));
   }
   let best: LineGroup | null = null;
   let bestScore = 0;
@@ -224,29 +232,38 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
     // ne permet jamais de les départager. Constaté sur un vrai DAO : le champ
     // "Date de l'appel d'offres" s'accrochait quand même à la ligne "...dans
     // un délai de ...... Jours" destinée à un tout autre champ, uniquement
-    // parce que les deux lignes mentionnaient "appel"/"offres" en passant. La
-    // vraie protection : une ligne ne doit être acceptée QUE si au moins UN
-    // des mots-clés qu'elle a permis de retrouver (littéral ou synonyme) est
-    // un mot rare sur la page — sinon la correspondance ne repose que sur du
-    // vocabulaire générique de DAO et ne prouve rien de spécifique à ce champ.
+    // parce que les deux lignes mentionnaient "appel"/"offres" en passant.
+    // Un premier essai (exiger un mot RARE, statistiquement, parmi les mots
+    // retrouvés) s'est révélé trop brutal : le mot PRINCIPAL d'un libellé
+    // ("délai", "date", "lieu"...) revient lui-même normalement 2-3 fois sur
+    // un DAO réel (plusieurs clauses en reparlent), sans que ce soit un faux
+    // indice pour autant — ce garde-fou rejetait alors, à tort, des champs
+    // pourtant correctement trouvés jusqu'ici (constaté : 8 champs corrects
+    // retombés à seulement 4). La vraie protection, sans ce défaut : exiger
+    // que le mot PRINCIPAL du libellé lui-même (le tout premier mot, voir
+    // headKeyword plus haut — jamais un simple mot secondaire de précision
+    // comme "appel"/"offres"/"exécution") soit retrouvé, littéralement ou via
+    // synonyme, sur la ligne. "Appel"/"offres" ne sont JAMAIS le mot
+    // principal d'aucun libellé de ce DAO : une ligne qui ne les contient
+    // QU'EUX ne peut donc plus jamais suffire à valider une correspondance.
     let weightedScore = 0;
-    let hasRareMatch = false;
+    let headKeywordMatched = false;
     for (const word of keywords) {
       const factor = genericityFactor.get(word) ?? 1;
-      const isRareWord = factor >= 1;
+      const isHead = word === headKeyword;
       if (normalizedLine.includes(word)) {
         weightedScore += 1 * factor;
-        if (isRareWord) hasRareMatch = true;
+        if (isHead) headKeywordMatched = true;
         continue;
       }
       if ((FIELD_LABEL_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym))) {
         weightedScore += 0.4 * factor;
-        if (isRareWord) hasRareMatch = true;
+        if (isHead) headKeywordMatched = true;
       }
     }
     const score = weightedScore / keywords.length;
     if (score < minScore) continue;
-    if (!hasRareMatch) continue;
+    if (!headKeywordMatched) continue;
     const hasBlank = lineHasBlank(group.text);
     // À score STRICTEMENT meilleur, on change toujours de ligne comme avant.
     // À score ÉGAL, on ne change que si la nouvelle ligne a un blanc à
