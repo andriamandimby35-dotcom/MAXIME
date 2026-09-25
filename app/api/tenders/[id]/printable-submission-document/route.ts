@@ -3,7 +3,7 @@ import { PDFDocument } from "pdf-lib";
 import { createServerClient } from "@/lib/supabase/server";
 import { createPrintableSubmissionPdf } from "@/lib/submission/printable-pdf";
 import { appendDaoPagesToPdf, appendExternalFileAsPages, createFilledDaoTemplatePdf } from "@/lib/submission/dao-template-pdf";
-import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholders } from "@/lib/submission/locate-field-positions";
+import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholders, type FieldMatchDebug } from "@/lib/submission/locate-field-positions";
 import { findBestTitleMatch } from "@/lib/submission/title-match";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
 import { trimToRelevantStart, extractRelevantPageRange, locateTitleInFullDocument } from "@/lib/submission/trim-to-relevant-pages";
@@ -647,8 +647,12 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             // contenu sur une page en trop si le texte recréé est un peu
             // plus long que l'original).
             const fieldTargets = templateFields.map((field) => ({ field_key: field.key, label: field.label, description: field.description }));
+            // Recueille, pour chaque champ non résolu, la VRAIE raison de
+            // l'échec (voir FieldMatchDebug) au lieu de deviner à l'aveugle —
+            // remonté ci-dessous dans unresolvedFields.
+            const matchDebug = new Map<string, FieldMatchDebug>();
             const [positions, redactions] = await Promise.all([
-              locateFieldPositions(bytes, verifiedPages, fieldTargets),
+              locateFieldPositions(bytes, verifiedPages, fieldTargets, matchDebug),
               locateBracketPlaceholders(bytes, verifiedPages, fieldTargets),
             ]);
             // Le compte seul (positionsFound: 3 sur 10, par exemple) ne dit pas
@@ -664,7 +668,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             ]);
             const unresolvedFields = fieldTargets
               .filter((field) => !foundFieldKeys.has(field.field_key))
-              .map((field) => ({ label: field.label, description: field.description }));
+              .map((field) => ({ label: field.label, description: field.description, why: matchDebug.get(field.field_key) }));
             // Un champ "trouvé" (positionsFound) ne veut pas forcément dire
             // qu'il est tombé sur la BONNE ligne du modèle — un score de
             // mots-clés suffisant peut très bien pointer vers une ligne

@@ -37,6 +37,26 @@ type LocatedPosition = { page: number; field_key: string; x_percent: number; y_p
 type LineGroup = { items: TextItem[]; text: string; y: number };
 type PageData = { items: TextItem[]; width: number; height: number; lineGroups: LineGroup[] };
 
+// Un champ non trouvé (unresolvedFields côté route.ts) ne disait jusqu'ici
+// QUE "introuvable", sans jamais dire POURQUOI — obligeant à deviner à
+// l'aveugle pour corriger la recherche de libellé à chaque nouveau cas
+// (constaté : "Nom du signataire" non résolu, sans savoir si aucune ligne ne
+// contenait "nom", si la meilleure ligne trouvée avait un score trop faible,
+// ou si elle a été rejetée par la règle anti-ambiguïté). Ce résumé,
+// entièrement facultatif (voir debugOut plus bas), remonte la VRAIE raison de
+// l'échec jusqu'aux journaux Vercel pour chaque champ non résolu :
+// - "no-keyword-line" : aucune ligne de la page ne contient le mot principal
+//   du libellé (ni lui-même, ni un synonyme connu).
+// - "score-too-low" : au moins une ligne contient le mot principal, mais son
+//   score (mots de précision trouvés en plus) reste sous le seuil minimal.
+// - "ambiguous" : une ligne convenable a été trouvée, mais rejetée exprès
+//   (voir plus haut, "mieux vaut vide que faux") car une autre ligne, avec
+//   son propre blanc, contient elle aussi le même mot principal sans qu'on
+//   puisse départager laquelle est la bonne.
+// - "matched" : un champ trouvé n'a normalement pas besoin de ce résumé,
+//   gardé seulement pour rester complet si jamais interrogé.
+export type FieldMatchDebug = { reason: "no-keyword-line" | "score-too-low" | "ambiguous" | "matched"; bestScore?: number; bestLine?: string };
+
 function normalize(value: string) {
   return value.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
@@ -137,7 +157,13 @@ const RELAXED_MATCH_SCORE = 0.5;
 // futur cas similaire, il suffit d'ajouter une entrée ici plutôt que de
 // changer la logique de recherche.
 const FIELD_LABEL_SYNONYMS: Record<string, string[]> = {
-  signataire: ["soussigne"],
+  // "représentant" (de l'entreprise) désigne, dans le vocabulaire juridique
+  // d'un DAO, exactement la même personne que "le signataire" : celle
+  // habilitée à engager l'entreprise par sa signature ("... représentant
+  // ................ (nom et adresse de l'Entrepreneur)" est la même case que
+  // "Nom du signataire"). Terme standard d'un DAO à l'autre, jamais propre à
+  // un dossier précis.
+  signataire: ["soussigne", "representant"],
   lieu: ["fait"],
   raison: ["denomination"],
   sociale: ["societe", "entreprise", "entrepreneur", "candidat"],
@@ -169,7 +195,7 @@ function lineHasBlank(text: string): boolean {
 }
 
 /** Trouve, parmi les lignes de la page, celle qui correspond le mieux aux mots-clés d'un libellé. */
-function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<TextItem>, minScore: number = STRICT_MATCH_SCORE): LineGroup | null {
+function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<TextItem>, minScore: number = STRICT_MATCH_SCORE, debug?: FieldMatchDebug): LineGroup | null {
   const keywords = [...significantWords(label)].filter((word) => word.length >= 3);
   if (!keywords.length) return null;
   // Un libellé de champ DAO suit presque toujours la même construction :
@@ -209,6 +235,12 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
   let best: LineGroup | null = null;
   let bestScore = 0;
   let bestHasBlank = false;
+  // Suivi purement diagnostique (voir FieldMatchDebug plus haut) : la
+  // meilleure ligne rencontrée qui contient au moins le mot principal, même
+  // si son score reste sous le seuil minimal — jamais utilisé pour choisir
+  // une ligne, seulement pour expliquer un échec a posteriori.
+  let closestScore = 0;
+  let closestText = "";
   for (const group of lineGroups) {
     if (group.items.every((item) => usedItems.has(item))) continue;
     const normalizedLine = normalize(group.text);
@@ -262,6 +294,10 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
       }
     }
     const score = weightedScore / keywords.length;
+    if (headKeywordMatched && score > closestScore) {
+      closestScore = score;
+      closestText = group.text.trim().slice(0, 100);
+    }
     if (score < minScore) continue;
     if (!headKeywordMatched) continue;
     const hasBlank = lineHasBlank(group.text);
@@ -275,7 +311,14 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
       bestHasBlank = hasBlank;
     }
   }
-  if (!best || keywords.length <= 1) return best;
+  if (!best || keywords.length <= 1) {
+    if (debug) {
+      debug.reason = best ? "matched" : closestScore > 0 ? "score-too-low" : "no-keyword-line";
+      debug.bestScore = Math.round(closestScore * 100) / 100;
+      debug.bestLine = closestText || undefined;
+    }
+    return best;
+  }
   // Le mot principal suffit à valider une ligne (voir plus haut), mais un mot
   // très courant comme "date" peut légitimement apparaître sur PLUSIEURS
   // lignes différentes d'un même DAO ("...en date du ......", "Date de la
@@ -302,7 +345,19 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
       if (!lineHasBlank(group.text)) return false;
       return matchesWord(normalize(group.text), headKeyword);
     });
-    if (otherAmbiguousCandidate) return null;
+    if (otherAmbiguousCandidate) {
+      if (debug) {
+        debug.reason = "ambiguous";
+        debug.bestScore = Math.round(bestScore * 100) / 100;
+        debug.bestLine = best.text.trim().slice(0, 100);
+      }
+      return null;
+    }
+  }
+  if (debug) {
+    debug.reason = "matched";
+    debug.bestScore = Math.round(bestScore * 100) / 100;
+    debug.bestLine = best.text.trim().slice(0, 100);
   }
   return best;
 }
@@ -349,7 +404,7 @@ function hasRealContentBelow(lineGroups: LineGroup[], topY: number, fontSize: nu
 
 /** Cherche, pour chaque champ, la ligne de la page qui porte son libellé
  * (parmi candidatePages, dans l'ordre) et place la valeur juste à côté. */
-export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages: number[], targets: FieldTarget[]): Promise<LocatedPosition[]> {
+export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages: number[], targets: FieldTarget[], debugOut?: Map<string, FieldMatchDebug>): Promise<LocatedPosition[]> {
   if (!targets.length || !candidatePages.length) return [];
   const results: LocatedPosition[] = [];
   const foundKeys = new Set<string>();
@@ -376,11 +431,27 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
         // (seuil réduit), libellé+description (seuil réduit) — jamais
         // l'inverse, pour ne jamais remplacer un résultat déjà trouvé de
         // façon fiable par un résultat moins fiable.
-        const bestLine = findBestLine(pageData.lineGroups, target.label, usedItems)
-          ?? (target.description ? findBestLine(pageData.lineGroups, `${target.label} ${target.description}`, usedItems) : null)
-          ?? findBestLine(pageData.lineGroups, target.label, usedItems, RELAXED_MATCH_SCORE)
-          ?? (target.description ? findBestLine(pageData.lineGroups, `${target.label} ${target.description}`, usedItems, RELAXED_MATCH_SCORE) : null);
-        if (!bestLine) continue;
+        // Chaque tentative reçoit son propre objet de diagnostic (voir
+        // FieldMatchDebug) : seule la tentative la plus informative (le
+        // meilleur score rencontré, même sous le seuil) est gardée pour le
+        // champ, uniquement si TOUTES les tentatives échouent — jamais
+        // utilisé pour choisir une ligne, seulement pour comprendre pourquoi
+        // aucune tentative n'a abouti.
+        let debugCandidate: FieldMatchDebug | undefined;
+        const tryFindLine = (label: string, minScore: number = STRICT_MATCH_SCORE) => {
+          const attemptDebug: FieldMatchDebug = { reason: "no-keyword-line" };
+          const line = findBestLine(pageData.lineGroups, label, usedItems, minScore, attemptDebug);
+          if ((attemptDebug.bestScore ?? 0) > (debugCandidate?.bestScore ?? -1)) debugCandidate = attemptDebug;
+          return line;
+        };
+        const bestLine = tryFindLine(target.label)
+          ?? (target.description ? tryFindLine(`${target.label} ${target.description}`) : null)
+          ?? tryFindLine(target.label, RELAXED_MATCH_SCORE)
+          ?? (target.description ? tryFindLine(`${target.label} ${target.description}`, RELAXED_MATCH_SCORE) : null);
+        if (!bestLine) {
+          if (debugOut && debugCandidate) debugOut.set(target.field_key, debugCandidate);
+          continue;
+        }
         bestLine.items.forEach((item) => usedItems.add(item));
         const rightmost = bestLine.items.reduce((max, item) => Math.max(max, (item.transform?.[4] ?? 0) + estimatedWidth(item, widthFont)), 0);
         const topY = bestLine.items.reduce((min, item) => Math.min(min, item.transform?.[5] ?? min), bestLine.items[0].transform?.[5] ?? 0);
