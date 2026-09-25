@@ -149,9 +149,25 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
   for (const group of lineGroups) {
     if (group.items.every((item) => usedItems.has(item))) continue;
     const normalizedLine = normalize(group.text);
-    const matched = keywords.filter((word) => normalizedLine.includes(word)
-      || (FIELD_LABEL_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym))).length;
-    const score = matched / keywords.length;
+    // Un mot du libellé retrouvé TEL QUEL sur la ligne est un indice bien plus
+    // fiable qu'un de ses synonymes : un synonyme (ex. "offre" pour "projet",
+    // "objet" pour "description") est très souvent AUSSI un mot courant du
+    // jargon administratif d'un DAO qui revient un peu partout dans le texte
+    // générique ("Appel d'Offres", "objet du présent marché"), sans rapport
+    // avec le champ recherché. Compter un synonyme pour SEULEMENT 40% d'un
+    // mot-clé (au lieu de 100% comme un mot trouvé tel quel) évite qu'un
+    // champ s'accroche à une ligne de texte générique juste parce que deux
+    // synonymes courants s'y trouvent par coïncidence — constaté sur un vrai
+    // DAO : "Description du projet" (aucun des deux mots présent tel quel)
+    // tombait sur une phrase parlant du délai d'exécution des travaux,
+    // simplement parce qu'elle contenait "objets" et "offres", synonymes
+    // respectifs de "description" et "projet".
+    let weightedScore = 0;
+    for (const word of keywords) {
+      if (normalizedLine.includes(word)) { weightedScore += 1; continue; }
+      if ((FIELD_LABEL_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym))) weightedScore += 0.4;
+    }
+    const score = weightedScore / keywords.length;
     if (score > bestScore && score >= minScore) { bestScore = score; best = group; }
   }
   return best;
@@ -178,6 +194,23 @@ function nextRealTextX(items: TextItem[], afterX: number): number | null {
     if (best === null || itemX < best) best = itemX;
   }
   return best;
+}
+
+// Quand la ligne trouvée pour un champ n'a AUCUN pointillé (ni en item à
+// part, ni caché dans une phrase), on plaçait jusqu'ici la valeur juste EN
+// DESSOUS de cette ligne, en supposant que cet espace était libre. Sur une
+// lettre écrite en paragraphes qui s'enchaînent sans interligne (une phrase
+// continue sur la ligne suivante), cet espace n'est PAS libre : il contient
+// déjà la suite du texte du DAO, qui se retrouvait alors à moitié effacé par
+// la valeur écrite par-dessus ("concernant l'exécution" affiché "ncernant
+// l'exécution", "travaux" affiché "avaux" — constaté sur un vrai DAO). Cette
+// fonction vérifie s'il existe déjà une ligne avec du texte RÉEL (pas
+// seulement des pointillés) juste en dessous, pour ne jamais y placer une
+// valeur à l'aveugle.
+function hasRealContentBelow(lineGroups: LineGroup[], topY: number, fontSize: number): boolean {
+  const minY = topY - fontSize * 2.2;
+  const maxY = topY - fontSize * 0.4;
+  return lineGroups.some((group) => group.y >= minY && group.y <= maxY && normalize(group.text).length > 4);
 }
 
 /** Cherche, pour chaque champ, la ligne de la page qui porte son libellé
@@ -313,8 +346,13 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
         const remainingWidth = pageData.width - rightmost;
         // Une valeur courte tient à droite du libellé sur la même ligne ;
         // sinon (label prenant déjà toute la largeur) on la place juste en
-        // dessous, à l'alignement gauche de la ligne.
-        const placeBelow = !chosenBlank && remainingWidth < pageData.width * 0.12;
+        // dessous, à l'alignement gauche de la ligne — mais SEULEMENT si
+        // cette ligne du dessous est vraiment libre (voir hasRealContentBelow
+        // plus haut) : sinon, mieux vaut une valeur un peu serrée en bout de
+        // ligne d'origine qu'une valeur qui efface le début d'une phrase du
+        // DAO qui continue juste en dessous.
+        const placeBelow = !chosenBlank && remainingWidth < pageData.width * 0.12
+          && !hasRealContentBelow(pageData.lineGroups, topY, fontSizeOfItem(bestLine.items[0]) ?? 10);
         const x = chosenBlank ? chosenBlank.x : placeBelow ? (bestLine.items[0].transform?.[4] ?? 0) : rightmost + 4;
         const y = placeBelow ? topY - 14 : topY;
         results.push({
