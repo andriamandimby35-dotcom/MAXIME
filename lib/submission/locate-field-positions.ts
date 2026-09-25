@@ -148,12 +148,27 @@ const FIELD_LABEL_SYNONYMS: Record<string, string[]> = {
   duree: ["delai"],
 };
 
+// Un DAO répète très souvent le même mot-clé sur PLUSIEURS lignes différentes
+// (ex. "l'exécution" apparaît à la fois dans une ligne qui décrit juste le
+// contexte, et dans la vraie ligne du blanc "...dans un délai de ..........
+// Jours" un peu plus loin) — dans ce cas, les deux lignes obtiennent EXACTEMENT
+// le même score, et seule la première rencontrée (la plus haute sur la page)
+// l'emportait jusqu'ici, même si elle n'a aucun blanc à remplir. Une ligne qui
+// contient VRAIMENT un pointillé est un bien meilleur candidat, à score égal,
+// qu'une ligne de simple contexte sans aucun blanc — ce repère est générique
+// (n'importe quel DAO répète du vocabulaire d'une ligne à l'autre).
+const BLANK_RUN_PATTERN = /[.\-_·•∙]{4,}/;
+function lineHasBlank(text: string): boolean {
+  return BLANK_RUN_PATTERN.test(text);
+}
+
 /** Trouve, parmi les lignes de la page, celle qui correspond le mieux aux mots-clés d'un libellé. */
 function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<TextItem>, minScore: number = STRICT_MATCH_SCORE): LineGroup | null {
   const keywords = [...significantWords(label)].filter((word) => word.length >= 3);
   if (!keywords.length) return null;
   let best: LineGroup | null = null;
   let bestScore = 0;
+  let bestHasBlank = false;
   for (const group of lineGroups) {
     if (group.items.every((item) => usedItems.has(item))) continue;
     const normalizedLine = normalize(group.text);
@@ -176,7 +191,17 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
       if ((FIELD_LABEL_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym))) weightedScore += 0.4;
     }
     const score = weightedScore / keywords.length;
-    if (score > bestScore && score >= minScore) { bestScore = score; best = group; }
+    if (score < minScore) continue;
+    const hasBlank = lineHasBlank(group.text);
+    // À score STRICTEMENT meilleur, on change toujours de ligne comme avant.
+    // À score ÉGAL, on ne change que si la nouvelle ligne a un blanc à
+    // remplir et pas l'actuelle — jamais l'inverse, pour ne jamais remplacer
+    // une ligne déjà retenue par une moins bonne à score identique.
+    if (score > bestScore || (score === bestScore && hasBlank && !bestHasBlank)) {
+      bestScore = score;
+      best = group;
+      bestHasBlank = hasBlank;
+    }
   }
   return best;
 }
