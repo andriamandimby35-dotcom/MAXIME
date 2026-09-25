@@ -208,12 +208,19 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // télécharge maintenant qu'UNE FOIS ici, gardé en mémoire pour toute la
   // durée de cette requête ; tout le code plus bas qui a besoin des octets du
   // DAO doit passer par cette fonction plutôt que par un nouveau fetch().
+  // Capturée ici dans une variable à part (plutôt que de relire tender.document_url
+  // directement plus bas) : TypeScript ne garde pas le souvenir, à l'intérieur
+  // d'une fonction imbriquée comme getDocumentBytes, que "tender" a déjà été
+  // vérifié non-nul juste au-dessus (limite connue de son analyse de flux à
+  // travers les fonctions) — ça faisait échouer la vérification des types au
+  // moment du build ("'tender' is possibly 'null'"), donc le déploiement.
+  const documentUrl = tender.document_url;
   let cachedDocumentBytes: Uint8Array | null = null;
   let documentFetchFailed = false;
   async function getDocumentBytes(): Promise<Uint8Array | null> {
     if (cachedDocumentBytes) return cachedDocumentBytes;
-    if (documentFetchFailed || !tender.document_url) return null;
-    const source = await fetch(tender.document_url);
+    if (documentFetchFailed || !documentUrl) return null;
+    const source = await fetch(documentUrl);
     if (!source.ok) { documentFetchFailed = true; return null; }
     cachedDocumentBytes = new Uint8Array(await source.arrayBuffer());
     return cachedDocumentBytes;
