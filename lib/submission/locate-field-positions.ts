@@ -48,14 +48,34 @@ async function loadPageData(doc: Awaited<ReturnType<typeof getDocument>["promise
   }
 }
 
-// Même calcul que rebuildPageAsText (dao-template-pdf.ts) pour rester
-// cohérent avec la taille à laquelle le texte environnant est redessiné :
+// Même calcul que dans dao-template-pdf.ts pour rester cohérent avec la
+// taille utilisée pour masquer/écrire au même endroit sur la page :
 // la diagonale de la partie "échelle" du transform pdf.js donne la taille de
 // police réelle de cet item sur la page d'origine.
 function fontSizeOfItem(item: TextItem | undefined): number | undefined {
   const transform = item?.transform;
   if (!transform) return undefined;
   return Math.hypot(transform[2] ?? 0, transform[3] ?? 0) || undefined;
+}
+
+// pdf.js ne renseigne pas toujours item.width pour un item de texte (constaté
+// sur un vrai DAO, notamment pour une ligne de tableau sans pointillé comme
+// "Numéro d'immatriculation Fiscale :") : le laisser tomber à 0 dans ce cas
+// faisait croire que le libellé finissait là où il COMMENCE, donc que quasi
+// toute la ligne était encore libre. La valeur se retrouvait alors placée
+// PAR-DESSUS son propre libellé plutôt qu'à côté ; et dans dao-template-pdf.ts,
+// la zone à masquer calculée à partir de cette position finissait par
+// couvrir la quasi-totalité de l'item du libellé, qui disparaissait alors
+// ENTIÈREMENT de la page — ne laissant que la valeur, flottante et sans
+// étiquette (ex. un numéro d'immatriculation fiscale affiché seul, sans le
+// texte "Numéro d'immatriculation Fiscale :" devant). Même repli que
+// dao-template-pdf.ts quand pdf.js ne donne pas de largeur : l'estimer à
+// partir de la taille de police et du nombre de caractères plutôt que de la
+// traiter comme nulle.
+function estimatedWidth(item: TextItem): number {
+  if (item.width) return item.width;
+  const fontSize = fontSizeOfItem(item) ?? 10;
+  return fontSize * (item.str ?? "").length * 0.55;
 }
 
 /** Trouve, parmi les lignes de la page, celle qui correspond le mieux aux mots-clés d'un libellé. */
@@ -92,7 +112,7 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
         const bestLine = findBestLine(pageData.lineGroups, target.label, usedItems);
         if (!bestLine) continue;
         bestLine.items.forEach((item) => usedItems.add(item));
-        const rightmost = bestLine.items.reduce((max, item) => Math.max(max, (item.transform?.[4] ?? 0) + (item.width ?? 0)), 0);
+        const rightmost = bestLine.items.reduce((max, item) => Math.max(max, (item.transform?.[4] ?? 0) + estimatedWidth(item)), 0);
         const topY = bestLine.items.reduce((min, item) => Math.min(min, item.transform?.[5] ?? min), bestLine.items[0].transform?.[5] ?? 0);
         // Le libellé lui-même est presque toujours suivi, SUR LA MÊME LIGNE,
         // d'un repère de blanc à remplir (".........", "______") : c'est LÀ,
@@ -107,26 +127,57 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
         const blankRunItem = bestLine.items
           .filter((item) => isBlankMarkerRun(item.str ?? ""))
           .sort((left, right) => (left.transform?.[4] ?? 0) - (right.transform?.[4] ?? 0))[0];
+        // Un DAO converti depuis Word regroupe très souvent TOUTE une phrase
+        // dans un seul item pdf.js, pointillés compris ("Je soussigné
+        // .............................. (nom, prénom, fonction)" est un
+        // seul bloc) : le pointillé n'est alors jamais un item à part
+        // entière (blankRunItem ci-dessus reste introuvable). On cherche
+        // dans ce cas un ENCHAÎNEMENT de points/tirets/soulignés À
+        // L'INTÉRIEUR d'un item plus long, et on interpole sa position
+        // exacte au prorata de sa place dans le texte de cet item — même
+        // principe que locateBracketPlaceholders pour un "[...]" qui ne
+        // commence pas au tout début de son item.
+        let embeddedBlank: { x: number; width: number; fontSize?: number } | null = null;
+        if (!blankRunItem) {
+          const blankRunPattern = /[.\-_·•∙]{4,}/g;
+          for (const item of bestLine.items) {
+            const str = item.str ?? "";
+            const itemX = item.transform?.[4] ?? 0;
+            const itemWidth = estimatedWidth(item);
+            const itemLength = str.length || 1;
+            blankRunPattern.lastIndex = 0;
+            let match: RegExpExecArray | null;
+            while ((match = blankRunPattern.exec(str))) {
+              const startX = itemX + (match.index / itemLength) * itemWidth;
+              const endX = itemX + ((match.index + match[0].length) / itemLength) * itemWidth;
+              if (!embeddedBlank || startX < embeddedBlank.x) {
+                embeddedBlank = { x: startX, width: Math.max(10, endX - startX), fontSize: fontSizeOfItem(item) };
+              }
+            }
+          }
+        }
+        const chosenBlank = blankRunItem
+          ? { x: blankRunItem.transform?.[4] ?? rightmost + 4, width: blankRunItem.width ?? 40, fontSize: fontSizeOfItem(blankRunItem) }
+          : embeddedBlank;
         const remainingWidth = pageData.width - rightmost;
         // Une valeur courte tient à droite du libellé sur la même ligne ;
         // sinon (label prenant déjà toute la largeur) on la place juste en
         // dessous, à l'alignement gauche de la ligne.
-        const placeBelow = !blankRunItem && remainingWidth < pageData.width * 0.12;
-        const x = blankRunItem ? (blankRunItem.transform?.[4] ?? rightmost + 4) : placeBelow ? (bestLine.items[0].transform?.[4] ?? 0) : rightmost + 4;
+        const placeBelow = !chosenBlank && remainingWidth < pageData.width * 0.12;
+        const x = chosenBlank ? chosenBlank.x : placeBelow ? (bestLine.items[0].transform?.[4] ?? 0) : rightmost + 4;
         const y = placeBelow ? topY - 14 : topY;
-        const blankRunWidth = blankRunItem?.width;
         results.push({
           page: pageNumber,
           field_key: target.field_key,
           x_percent: Math.max(0, Math.min(96, (x / pageData.width) * 100)),
           y_percent: Math.max(0, Math.min(98, 100 - (y / pageData.height) * 100)),
-          width_percent: blankRunWidth
-            ? Math.max(15, Math.min(60, (blankRunWidth / pageData.width) * 100))
+          width_percent: chosenBlank
+            ? Math.max(15, Math.min(60, (chosenBlank.width / pageData.width) * 100))
             : placeBelow ? 60 : Math.max(15, Math.min(60, (remainingWidth / pageData.width) * 100 - 2)),
           // La taille du pointillé remplacé (ou, à défaut, celle du libellé
           // lui-même) reflète la taille de police réellement utilisée à cet
           // endroit précis de la page — plus fiable qu'une taille fixe.
-          font_size: fontSizeOfItem(blankRunItem) ?? fontSizeOfItem(bestLine.items[0]),
+          font_size: chosenBlank?.fontSize ?? fontSizeOfItem(bestLine.items[0]),
         });
         foundKeys.add(target.field_key);
       }
@@ -230,7 +281,7 @@ export async function locateBracketPlaceholders(pdfBytes: Uint8Array, candidateP
             const item = charItemMap[charIndex];
             if (!item) continue;
             const itemX = item.transform?.[4] ?? 0;
-            const itemWidth = item.width ?? 0;
+            const itemWidth = estimatedWidth(item);
             const itemLength = (item.str ?? "").length || 1;
             const localIndex = charLocalIndex[charIndex] ?? 0;
             const charStartX = itemX + (localIndex / itemLength) * itemWidth;
@@ -399,7 +450,7 @@ export async function locateTableCellPositions(pdfBytes: Uint8Array, candidatePa
         rowUsed.clear();
         rowLine.items.forEach((item) => rowUsed.add(item));
         const columnStart = columnLine.items.reduce((min, item) => Math.min(min, item.transform?.[4] ?? min), columnLine.items[0].transform?.[4] ?? 0);
-        const columnEnd = columnLine.items.reduce((max, item) => Math.max(max, (item.transform?.[4] ?? 0) + (item.width ?? 0)), 0);
+        const columnEnd = columnLine.items.reduce((max, item) => Math.max(max, (item.transform?.[4] ?? 0) + estimatedWidth(item)), 0);
         const rowY = rowLine.items.reduce((min, item) => Math.min(min, item.transform?.[5] ?? min), rowLine.items[0].transform?.[5] ?? 0);
         results.push({
           page: pageNumber,
