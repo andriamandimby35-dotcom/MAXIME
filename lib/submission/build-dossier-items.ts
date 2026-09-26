@@ -186,10 +186,60 @@ export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDete
   // désigne aucune pièce précise et ne doit jamais être proposée comme
   // correspondance de titre.
   const orderableChecklist = checklist.filter((entry) => entry.level !== 0);
+  // Première page connue d'une pièce : template_page_numbers (renseigné
+  // seulement pour les pièces avec un vrai modèle imprimable), sinon la page
+  // lue dans source_reference (renseigné pour chaque pièce, via
+  // parsePageNumbersFromReference, déjà utilisé pour savoir si un PDF est
+  // imprimable). Number.POSITIVE_INFINITY si aucune page n'est connue.
+  const firstKnownPage = (item: TemplateDetectedItem) => {
+    const templatePages = item.template_page_numbers;
+    const fromTemplate = Array.isArray(templatePages) && templatePages.length ? templatePages[0] : undefined;
+    const fromReference = parsePageNumbersFromReference(item.source_reference)[0];
+    const known = [fromTemplate, fromReference].filter((page): page is number => typeof page === "number");
+    return known.length ? Math.min(...known) : Number.POSITIVE_INFINITY;
+  };
+  // Repli par PAGE quand le titre ne suffit pas à rapprocher une pièce d'une
+  // ligne du sommaire (formulation trop différente de part et d'autre pour
+  // findBestTitleMatch — c'est ce qui faisait retomber "Lettre de
+  // soumission" et d'autres pièces pourtant bien identifiées par l'IA tout
+  // en bas, dans "Autres pièces (position non repérée dans le sommaire du
+  // DAO)", même quand le DAO les liste clairement à un endroit précis).
+  // Repère chaque ligne du sommaire dont la page est elle-même connue
+  // (source_reference), triée par sequence, et intercale une pièce non
+  // reconnue par titre ENTRE les deux repères qui encadrent sa propre page.
+  // Aucun nouvel appel à l'IA n'est nécessaire : tout vient de l'analyse déjà
+  // enregistrée (submission_checklist et submission_items existants).
+  //
+  // Utilise le sommaire COMPLET (checklist, pas orderableChecklist) : les
+  // grandes divisions (level=0, ex. "Partie II. Les formulaires...") sont
+  // exclues du rapprochement PAR TITRE (une pièce ne doit jamais sembler
+  // "correspondre" à un simple titre de section), mais ce sont justement
+  // elles qui indiquent le plus souvent une page fiable dans le sommaire —
+  // les lignes de détail (level=1) n'en ont pas toujours. Les exclure ici
+  // aurait privé l'intercalation par page de ses meilleurs repères.
+  const checklistPageAnchors = checklist
+    .map((entry) => ({ sequence: entry.sequence, page: parsePageNumbersFromReference(entry.source_reference)[0] }))
+    .filter((anchor): anchor is { sequence: number; page: number } => typeof anchor.page === "number")
+    .sort((a, b) => a.sequence - b.sequence);
+  const interpolatedSequenceForPage = (page: number): number | null => {
+    if (!checklistPageAnchors.length) return null;
+    let previous: { sequence: number; page: number } | null = null;
+    let next: { sequence: number; page: number } | null = null;
+    for (const anchor of checklistPageAnchors) {
+      if (anchor.page <= page) previous = anchor;
+      else { next = anchor; break; }
+    }
+    if (previous && next && previous !== next) return (previous.sequence + next.sequence) / 2;
+    if (previous) return previous.sequence + 0.5;
+    if (next) return next.sequence - 0.5;
+    return null;
+  };
   const checklistSequence = (item: DetectedItem) => {
     if (!orderableChecklist.length) return null;
     const match = findBestTitleMatch(item.title, orderableChecklist);
-    return match ? match.sequence : null;
+    if (match) return match.sequence;
+    const page = firstKnownPage(item as TemplateDetectedItem);
+    return page === Number.POSITIVE_INFINITY ? null : interpolatedSequenceForPage(page);
   };
   const aiChecklistSequences = new Set(
     aiItems
@@ -215,21 +265,11 @@ export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDete
     .map((item) => (item.kind === "form_to_complete" && item.fields.length === 0 && !hasAppComputedContent(item.title)
       ? { ...item, kind: "document_to_provide" as const, instructions: "Récupérez le modèle correspondant dans le DAO, complétez-le à la main avec vos informations, faites-le signer si nécessaire, puis joignez la version scannée." }
       : item));
-  // Une pièce absente de ce sommaire (générique non confirmée dans ce DAO
-  // précis, ou pièce ajoutée par l'application comme le BDQE externe) est
-  // ordonnée en repli par sa première page connue : template_page_numbers
-  // (renseigné seulement pour les pièces avec un vrai modèle imprimable),
-  // sinon la page lue dans source_reference (renseigné pour chaque pièce,
-  // via parsePageNumbersFromReference, déjà utilisé pour savoir si un PDF
-  // est imprimable). Une pièce sans aucune page connue reste tout à la fin,
-  // dans son ordre d'origine, pour rester visible sans fausser le contrôle.
-  const firstKnownPage = (item: TemplateDetectedItem) => {
-    const templatePages = item.template_page_numbers;
-    const fromTemplate = Array.isArray(templatePages) && templatePages.length ? templatePages[0] : undefined;
-    const fromReference = parsePageNumbersFromReference(item.source_reference)[0];
-    const known = [fromTemplate, fromReference].filter((page): page is number => typeof page === "number");
-    return known.length ? Math.min(...known) : Number.POSITIVE_INFINITY;
-  };
+  // Une pièce toujours sans aucune séquence connue (ni titre reconnu dans le
+  // sommaire, ni page exploitable pour l'intercaler — voir checklistSequence
+  // plus haut) reste en repli tout à la fin, ordonnée par sa première page
+  // connue puis par son ordre d'origine, pour rester visible sans fausser le
+  // contrôle.
   // Titres des grandes divisions (level=0), triés par ordre d'apparition
   // dans le sommaire, pour retrouver sous quelle division se trouve une
   // séquence donnée : la dernière division dont le numéro précède ou égale
