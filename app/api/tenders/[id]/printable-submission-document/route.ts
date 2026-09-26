@@ -581,7 +581,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     hasDocumentUrl: Boolean(tender.document_url),
     detectedTemplateKnownPages,
     templateTextLength: detectedTemplate?.template_text?.length ?? 0,
-    willUseGeneratedText: Boolean(!isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && detectedTemplate?.template_text?.trim()),
+    willUseGeneratedText: Boolean(!isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && (detectedTemplate?.template_text?.trim() || templateTables.length)),
   });
   // NOUVELLE méthode (demandée par Maxime après plusieurs bugs de pointillés
   // mal placés) : dès que l'IA a fourni template_text — le texte intégral du
@@ -599,25 +599,43 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // retombe automatiquement sur les anciennes méthodes ci-dessous — une
   // nouvelle analyse du DAO suffira alors à faire passer la pièce sur cette
   // nouvelle méthode.
-  if (!isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && detectedTemplate?.template_text?.trim()) {
+  //
+  // IMPORTANT (pour ne jamais gaspiller un crédit d'analyse IA) : template_tables
+  // existe déjà dans les analyses FAITES AVANT ce changement (ce n'est pas un
+  // nouveau champ) — un DAO déjà analysé profite donc IMMÉDIATEMENT du nouveau
+  // tableau propre, sans avoir besoin d'être ré-analysé. Seul le TEXTE (les
+  // paragraphes de la lettre elle-même) demande le nouveau template_text, qui
+  // n'arrivera qu'à la prochaine analyse de ce DAO précis — en attendant, le
+  // texte utilise le même contenu de repli qu'avant (formLines), donc jamais
+  // pire qu'aujourd'hui. On entre donc dans cette branche dès que l'UN OU
+  // L'AUTRE est disponible, jamais seulement quand les deux le sont.
+  if (!isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && (detectedTemplate?.template_text?.trim() || templateTables.length)) {
     try {
-      const templateTextRaw = detectedTemplate.template_text;
-      const referencedKeys = new Set(Array.from(templateTextRaw.matchAll(/\{\{([a-z0-9_]+)\}\}/gi), (match) => match[1].toLowerCase()));
+      const templateTextRaw = detectedTemplate?.template_text?.trim() || undefined;
       // Garde-fou : une valeur que l'IA a bien identifiée dans fields, mais a
       // oublié d'insérer dans template_text lui-même, ne doit pas disparaître
       // silencieusement — elle s'affiche alors à part, sous forme "Libellé :
-      // valeur", plutôt que de se perdre.
-      const leftoverFieldLines = fields
-        .filter((field): field is { key: string; label?: string } => Boolean(field.key && !referencedKeys.has(field.key.toLowerCase())))
-        .map((field) => {
-          const value = formData[field.key] || profileData[field.key] || templateValues[field.key];
-          return value ? `${field.label ?? field.key} : ${value}` : null;
-        })
-        .filter((line): line is string => Boolean(line));
+      // valeur", plutôt que de se perdre. Sans template_text du tout, formLines
+      // (repli ci-dessous) couvre déjà ces informations : pas besoin de ce
+      // garde-fou dans ce cas.
+      const leftoverFieldLines = templateTextRaw ? (() => {
+        const referencedKeys = new Set(Array.from(templateTextRaw.matchAll(/\{\{([a-z0-9_]+)\}\}/gi), (match) => match[1].toLowerCase()));
+        return fields
+          .filter((field): field is { key: string; label?: string } => Boolean(field.key && !referencedKeys.has(field.key.toLowerCase())))
+          .map((field) => {
+            const value = formData[field.key] || profileData[field.key] || templateValues[field.key];
+            return value ? `${field.label ?? field.key} : ${value}` : null;
+          })
+          .filter((line): line is string => Boolean(line));
+      })() : undefined;
       const blocks = buildGeneratedDocumentBlocks({
-        title: detectedTemplate.title || title,
+        title: detectedTemplate?.title || title,
         templateText: templateTextRaw,
         templateValues,
+        // Sans template_text (DAO pas encore ré-analysé), on garde exactement
+        // le même texte de repli qu'avant (formLines) — seul le TABLEAU change
+        // de méthode dans ce cas.
+        fallbackParagraphs: !templateTextRaw ? formLines : undefined,
         tables: templateTables.length ? templateTables : undefined,
         leftoverFieldLines,
       });
