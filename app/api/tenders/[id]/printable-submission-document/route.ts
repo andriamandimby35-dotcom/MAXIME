@@ -3,11 +3,13 @@ import { PDFDocument } from "pdf-lib";
 import { createServerClient } from "@/lib/supabase/server";
 import { createPrintableSubmissionPdf } from "@/lib/submission/printable-pdf";
 import { appendDaoPagesToPdf, appendExternalFileAsPages, createFilledDaoTemplatePdf } from "@/lib/submission/dao-template-pdf";
-import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholders, type FieldMatchDebug } from "@/lib/submission/locate-field-positions";
+import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholders, locateTableCellPositions } from "@/lib/submission/locate-field-positions";
 import { findBestTitleMatch } from "@/lib/submission/title-match";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
 import { trimToRelevantStart, extractRelevantPageRange, locateTitleInFullDocument } from "@/lib/submission/trim-to-relevant-pages";
 import { daoSourcedGenericTitles } from "@/lib/submission/build-dossier-items";
+import { renderGeneratedDocumentPdf } from "@/lib/submission/generated-document-pdf";
+import { buildGeneratedDocumentBlocks } from "@/lib/submission/generated-document-blocks";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -47,6 +49,34 @@ function pagesNotClaimedByOtherItems(
 ) {
   const claimedByOthers = otherItemsClaimedPages(items, ownTitle);
   return candidatePages.filter((page) => !claimedByOthers.has(page));
+}
+
+type TableForCellTargets = { columns: string[]; rows: string[][]; organization_column_indexes?: number[] };
+
+// Un tableau comme "Chiffre d'affaires" est un vrai quadrillage sur la page
+// DAO (lignes "Travaux"/"Fournitures"/... × colonnes "Exercice du...") : les
+// vraies valeurs doivent aller DANS ce quadrillage, à l'intersection ligne ×
+// colonne — pas sur une page à part redessinée par-dessus, qui obligeait
+// jusqu'ici à montrer DEUX fois le même tableau (une fois vide, tirée du
+// DAO, une fois fabriquée avec les chiffres). On construit ici la liste des
+// cases à retrouver sur la vraie page, une par valeur connue.
+function buildTableCellTargets(tables: TableForCellTargets[]) {
+  const targets: Array<{ field_key: string; row_label: string; column_label: string; value: string }> = [];
+  tables.forEach((table, tableIndex) => {
+    const orgColumns = table.organization_column_indexes ?? table.columns.map((_, index) => index);
+    const labelColumnIndex = table.columns.findIndex((_, index) => !orgColumns.includes(index));
+    table.rows.forEach((row, rowIndex) => {
+      const rowLabel = (labelColumnIndex >= 0 ? row[labelColumnIndex] : row[0])?.trim();
+      if (!rowLabel) return;
+      orgColumns.forEach((columnIndex) => {
+        const value = row[columnIndex]?.trim();
+        const columnLabel = table.columns[columnIndex]?.trim();
+        if (!value || !columnLabel) return;
+        targets.push({ field_key: `__table_cell_${tableIndex}_${rowIndex}_${columnIndex}`, row_label: rowLabel, column_label: columnLabel, value });
+      });
+    });
+  });
+  return targets;
 }
 
 // Les planches de plans techniques sont presque toujours regroupées en un
@@ -551,7 +581,55 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     hasDocumentUrl: Boolean(tender.document_url),
     detectedTemplateKnownPages,
     templateTextLength: detectedTemplate?.template_text?.length ?? 0,
+    willUseGeneratedText: Boolean(!isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && detectedTemplate?.template_text?.trim()),
   });
+  // NOUVELLE méthode (demandée par Maxime après plusieurs bugs de pointillés
+  // mal placés) : dès que l'IA a fourni template_text — le texte intégral du
+  // modèle, avec {{cle}} à la place de chaque blanc — on écrit nous-mêmes ce
+  // texte proprement (mêmes paragraphes numérotés que le DAO, valeurs en
+  // gras) plutôt que de deviner où chaque blanc se trouve sur la vraie page
+  // scannée. Ça ne dépend même plus de connaître une page du DAO pour cette
+  // pièce. Réservée aux pièces de TEXTE/TABLEAU : un plan ou un document
+  // purement graphique (panneau de chantier, plaque, logo) reste toujours une
+  // copie fidèle de la vraie page (branches plus bas, inchangées), et une
+  // pièce que l'application construit elle-même à partir d'un vrai tableau de
+  // données (planning, personnel, matériel...) garde aussi sa propre méthode.
+  // Si l'IA n'a pas encore de template_text pour cette pièce (DAO analysé
+  // avant ce changement, ou cas rare où aucun texte n'a été extrait), on
+  // retombe automatiquement sur les anciennes méthodes ci-dessous — une
+  // nouvelle analyse du DAO suffira alors à faire passer la pièce sur cette
+  // nouvelle méthode.
+  if (!isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && detectedTemplate?.template_text?.trim()) {
+    try {
+      const templateTextRaw = detectedTemplate.template_text;
+      const referencedKeys = new Set(Array.from(templateTextRaw.matchAll(/\{\{([a-z0-9_]+)\}\}/gi), (match) => match[1].toLowerCase()));
+      // Garde-fou : une valeur que l'IA a bien identifiée dans fields, mais a
+      // oublié d'insérer dans template_text lui-même, ne doit pas disparaître
+      // silencieusement — elle s'affiche alors à part, sous forme "Libellé :
+      // valeur", plutôt que de se perdre.
+      const leftoverFieldLines = fields
+        .filter((field): field is { key: string; label?: string } => Boolean(field.key && !referencedKeys.has(field.key.toLowerCase())))
+        .map((field) => {
+          const value = formData[field.key] || profileData[field.key] || templateValues[field.key];
+          return value ? `${field.label ?? field.key} : ${value}` : null;
+        })
+        .filter((line): line is string => Boolean(line));
+      const blocks = buildGeneratedDocumentBlocks({
+        title: detectedTemplate.title || title,
+        templateText: templateTextRaw,
+        templateValues,
+        tables: templateTables.length ? templateTables : undefined,
+        leftoverFieldLines,
+      });
+      const pdf = await renderGeneratedDocumentPdf(blocks);
+      return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
+    } catch (error) {
+      // Repropagée nulle part ici volontairement : si cette nouvelle méthode
+      // échoue pour une raison imprévue, on préfère retomber sur les anciennes
+      // méthodes ci-dessous plutôt que de faire échouer toute la génération.
+      console.error("Generated (clean text) submission PDF failed", error);
+    }
+  }
   if (!isAppComputedTableItem && detectedTemplate && tender.document_url && detectedTemplateKnownPages.length) {
     const notClaimedByOthers = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], detectedTemplate.title ?? title, detectedTemplateKnownPages);
     if (notClaimedByOthers.length) {
@@ -583,120 +661,38 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             });
           const templateFields = detectedTemplate.fields ?? [];
           let pdf: Buffer;
+          let allTableCellsResolvedOnRealPage = false;
           if (/\bplans?\b/i.test(title)) {
             // Un plan est un dessin vectoriel sans texte à remplacer : la
             // page DAO reste extraite telle quelle, sans réécriture.
             pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [], templateValues, [], verifiedTitle, { rebuildAsText: false });
-          } else if (templateTables.length) {
-            // Un tableau ("Chiffre d'affaires"...) est un vrai quadrillage,
-            // avec des en-têtes de colonnes souvent presque identiques d'une
-            // colonne à l'autre ("Exercice du 01/01/23 au 31/12/23" contre
-            // "...24" contre "...25") : retrouver automatiquement, sur la
-            // page réelle du DAO, la bonne case à l'intersection ligne ×
-            // colonne s'est révélé bien plus fragile que pour un simple champ
-            // de lettre (un seul repère de blanc à côté d'un libellé, sans
-            // grille à croiser). Constaté sur un vrai DAO : plusieurs valeurs
-            // de colonnes/champs différents se retrouvaient mélangées et
-            // superposées sur la page d'origine — et comme la page ratée
-            // restait quand même utilisée, une DEUXIÈME page (reconstruite,
-            // correcte) s'ajoutait par-dessus pour compenser : le même
-            // tableau apparaissait deux fois, une fois faux et une fois bon.
-            // Pour toute pièce avec un tableau, on ne tente donc plus du tout
-            // de deviner des coordonnées sur la page d'origine : on
-            // reconstruit directement un document propre nous-mêmes (comme
-            // pour n'importe quelle pièce sans page DAO trouvée) — une seule
-            // version, fiable, jamais deux.
-            const fieldTargets = templateFields.map((field) => ({ field_key: field.key, label: field.label, description: field.description }));
-            // Les quelques champs simples de la page (une date, un numéro...)
-            // restent affichés, juste sous forme de texte "Libellé : valeur"
-            // plutôt que replacés aux coordonnées de la page d'origine —
-            // seule la partie difficile (le tableau lui-même) change de
-            // méthode.
-            const templateFieldLines = fieldTargets
-              .map((field) => {
-                const value = templateValues[field.field_key];
-                return value ? `${field.label} : ${value}` : null;
-              })
-              .filter((line): line is string => Boolean(line));
-            // Les colonnes d'un tableau reconstruit gardaient une largeur
-            // égale arbitraire, très différente du vrai tableau du DAO (une
-            // colonne de désignation bien plus large que les colonnes de
-            // quantité à côté). On mesure ici la vraie largeur de chaque
-            // colonne sur la page source et on la reproduit.
-            const measuredTables = await Promise.all(templateTables.map(async (table) => ({
-              ...table,
-              column_ratios: (await measureTableColumnRatios(bytes, verifiedPages, table.columns)) ?? undefined,
-            })));
-            console.info("PRINTABLE_PDF_TEMPLATE_BRANCH_TABLE_REBUILD", {
-              title,
-              verifiedPages,
-              templateFieldsCount: templateFields.length,
-              templateFieldLinesFound: templateFieldLines.length,
-              tablesCount: measuredTables.length,
-            });
-            pdf = Buffer.from(await createPrintableSubmissionPdf(verifiedTitle ?? title, profileData, templateFieldLines, measuredTables));
           } else {
             // La page DAO reste copiée EXACTEMENT telle quelle (cadres,
-            // toutes les décorations d'origine intactes) : on ne réécrit
-            // jamais son texte à la main. On repère seulement, sur cette
-            // vraie page, où se trouve le libellé de chaque champ ("Nom ou
-            // raison sociale du candidat :"...) pour écrire la valeur juste à
-            // côté — plutôt que de faire deviner une position à l'IA (quasi
-            // jamais fiable) ou de reconstruire toute la page nous-même
-            // (perd les décorations d'origine, et peut faire déborder le
-            // contenu sur une page en trop si le texte recréé est un peu
-            // plus long que l'original).
+            // tableaux, toutes les décorations d'origine intactes) : on ne
+            // réécrit jamais son texte à la main. On repère seulement, sur
+            // cette vraie page, où se trouve le libellé de chaque champ
+            // ("Nom ou raison sociale du candidat :"...) pour écrire la
+            // valeur juste à côté — plutôt que de faire deviner une position
+            // à l'IA (quasi jamais fiable) ou de reconstruire toute la page
+            // nous-même (perd les décorations d'origine, et peut faire
+            // déborder le contenu sur une page en trop si le texte recréé est
+            // un peu plus long que l'original).
             const fieldTargets = templateFields.map((field) => ({ field_key: field.key, label: field.label, description: field.description }));
-            // Recueille, pour chaque champ non résolu, la VRAIE raison de
-            // l'échec (voir FieldMatchDebug) au lieu de deviner à l'aveugle —
-            // remonté ci-dessous dans unresolvedFields.
-            const matchDebug = new Map<string, FieldMatchDebug>();
-            const [positions, redactions] = await Promise.all([
-              locateFieldPositions(bytes, verifiedPages, fieldTargets, matchDebug),
+            // Un tableau (chiffre d'affaires, matériel, personnel...) est un
+            // vrai quadrillage sur la page DAO : ses cases doivent recevoir
+            // les valeurs directement, comme n'importe quel autre champ —
+            // sinon la page réelle affichée reste un tableau vide alors que
+            // les vraies valeurs existent déjà, obligeant (avant ce correctif)
+            // à ajouter une DEUXIÈME page fabriquée juste pour les montrer.
+            const tableCellTargets = buildTableCellTargets(templateTables);
+            const [positions, redactions, tablePositions] = await Promise.all([
+              locateFieldPositions(bytes, verifiedPages, fieldTargets),
               locateBracketPlaceholders(bytes, verifiedPages, fieldTargets),
+              tableCellTargets.length ? locateTableCellPositions(bytes, verifiedPages, tableCellTargets) : Promise.resolve([]),
             ]);
-            // Le compte seul (positionsFound: 3 sur 10, par exemple) ne dit pas
-            // LESQUELS des champs échouent, ce qui obligeait à deviner à
-            // l'aveugle pour corriger la recherche de libellé. On liste ici le
-            // libellé + description de chaque champ non retrouvé (ni en
-            // position, ni en crochet "[...]") pour voir directement, via les
-            // journaux Vercel, quel vocabulaire du champ ne correspond pas au
-            // texte réel de CETTE page du DAO.
-            const foundFieldKeys = new Set([
-              ...positions.map((position) => position.field_key),
-              ...redactions.map((zone) => zone.field_key).filter((key): key is string => Boolean(key)),
-            ]);
-            const unresolvedFields = fieldTargets
-              .filter((field) => !foundFieldKeys.has(field.field_key))
-              .map((field) => ({ label: field.label, description: field.description, why: matchDebug.get(field.field_key) }));
-            // Un champ "trouvé" (positionsFound) ne veut pas forcément dire
-            // qu'il est tombé sur la BONNE ligne du modèle — un score de
-            // mots-clés suffisant peut très bien pointer vers une ligne
-            // voisine qui n'est pas la sienne, ce qui donne exactement le
-            // même genre de résultat visuel qu'un vrai bug d'affichage (texte
-            // qui semble déplacé/coupé). On journalise ici, pour chaque champ
-            // résolu, le LIBELLÉ attendu à côté du texte RÉEL de la ligne
-            // choisie sur la page DAO, pour vérifier directement lequel des
-            // deux est en cause plutôt que de deviner.
-            // font_size ajouté ici (jamais utilisé pour dessiner quoi que ce
-            // soit, uniquement remonté aux journaux) : signalé sur un vrai
-            // DAO que les valeurs insérées semblent plus grandes/plus grasses
-            // que le texte reconstruit autour, sans qu'aucun code ne dessine
-            // pourtant sciemment avec une police ou une taille différente.
-            // Ce chiffre permet de vérifier directement si la taille RETENUE
-            // pour la valeur (position.font_size, mesurée sur la page DAO
-            // d'origine à cet endroit précis) est bien cohérente avec le
-            // reste du texte de la ligne, plutôt que de deviner.
-            const resolvedFieldsDebug = positions.map((position) => ({
-              field_key: position.field_key,
-              label: fieldTargets.find((field) => field.field_key === position.field_key)?.label,
-              matched_line: position.debug_matched_line,
-              blank_kind: position.debug_blank_kind,
-              font_size: position.font_size ? Math.round(position.font_size * 10) / 10 : undefined,
-              x_percent: Math.round(position.x_percent),
-              y_percent: Math.round(position.y_percent),
-              width_percent: Math.round(position.width_percent),
-            }));
+            const tableCellValues = Object.fromEntries(tableCellTargets.map((target) => [target.field_key, target.value]));
+            const foundTableFieldKeys = new Set(tablePositions.map((position) => position.field_key));
+            allTableCellsResolvedOnRealPage = tableCellTargets.length > 0 && tableCellTargets.every((target) => foundTableFieldKeys.has(target.field_key));
             // Journal temporaire pour diagnostiquer, via les journaux Vercel,
             // pourquoi certains PDF générés depuis une vraie page du DAO
             // gardent leurs pointillés d'origine intacts au lieu d'être
@@ -710,11 +706,37 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
               templateFieldsCount: templateFields.length,
               positionsFound: positions.length,
               bracketZonesFound: redactions.length,
+              tableCellTargets: tableCellTargets.length,
+              tableCellPositionsFound: tablePositions.length,
               rebuildAsText: !isGraphicOnlyDocument,
-              unresolvedFields,
-              resolvedFieldsDebug,
             });
-            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, templateValues, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
+            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
+          }
+          // La page fabriquée ci-dessous ne sert plus qu'en dernier recours :
+          // si toutes les cases du tableau ont été retrouvées et remplies
+          // directement sur la vraie page juste au-dessus, l'ajouter EN PLUS
+          // ferait apparaître le même tableau deux fois (une fois fidèle et
+          // vide en apparence pour qui ne voit pas les valeurs ajoutées, une
+          // fois fabriquée) — ce qui est justement le bug signalé. Elle ne
+          // reste utile que si une case n'a pas pu être localisée (libellé de
+          // ligne ou de colonne introuvable sur la page), pour ne jamais
+          // perdre une valeur déjà connue.
+          if (templateTables.length && !allTableCellsResolvedOnRealPage) {
+            // Les colonnes d'un tableau reconstruit gardaient une largeur
+            // égale arbitraire, très différente du vrai tableau du DAO (une
+            // colonne de désignation bien plus large que les colonnes de
+            // quantité à côté). On mesure ici la vraie largeur de chaque
+            // colonne sur la page source et on la reproduit.
+            const measuredTables = await Promise.all(templateTables.map(async (table) => ({
+              ...table,
+              column_ratios: (await measureTableColumnRatios(bytes, verifiedPages, table.columns)) ?? undefined,
+            })));
+            const tablesPdfBytes = await createPrintableSubmissionPdf(title, profileData, [], measuredTables);
+            const tablesDoc = await PDFDocument.load(tablesPdfBytes);
+            const mainDoc = await PDFDocument.load(pdf);
+            const copiedPages = await mainDoc.copyPages(tablesDoc, tablesDoc.getPageIndices());
+            copiedPages.forEach((page) => mainDoc.addPage(page));
+            pdf = Buffer.from(await mainDoc.save());
           }
           return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
         }
