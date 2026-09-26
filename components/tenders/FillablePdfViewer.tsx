@@ -29,14 +29,21 @@ export type FillablePdfViewerHandle = {
 };
 
 type Props = {
-  documentUrl: string;
-  authHeaders: Record<string, string>;
+  // Les octets du PDF, DÉJÀ téléchargés par le composant parent (avec
+  // fetchAndValidatePdf, la même fonction qui sert déjà ailleurs dans
+  // l'appli pour ouvrir un PDF sur ce même iPhone) — plutôt que de laisser
+  // pdf.js aller chercher lui-même l'URL avec ses propres en-têtes
+  // d'authentification. pdf.js fait alors du pur AFFICHAGE (aucun réseau
+  // de son côté), ce qui évite tout un système de chargement (requêtes par
+  // morceaux, en-têtes personnalisés...) plus rarement testé sur Safari/iOS
+  // que le fetch() tout simple déjà utilisé et déjà fiable ailleurs.
+  pdfBytes: Uint8Array;
   onReady?: () => void;
   onError?: (message: string) => void;
 };
 
 const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function FillablePdfViewer(
-  { documentUrl, authHeaders, onReady, onError },
+  { pdfBytes, onReady, onError },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -61,7 +68,12 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       // petit substitut, l'affichage des cases plante dès la première page.
       linkService.pdfViewer = { isInPresentationMode: false, isChangingPresentationMode: false };
 
-      const loadingTask = pdfjsLib.getDocument({ url: documentUrl, httpHeaders: authHeaders });
+      // Une COPIE des octets (slice()) : pdf.js prend possession du buffer
+      // qu'on lui donne et peut le détacher/vider — si jamais ce composant
+      // était réutilisé avec le même Uint8Array (React StrictMode double
+      // les effets en développement), pdf.js ne doit jamais voir un buffer
+      // déjà consommé par le rendu précédent.
+      const loadingTask = pdfjsLib.getDocument({ data: pdfBytes.slice() });
       const pdfDocument = await loadingTask.promise;
       if (cancelled) return;
       linkService.setDocument(pdfDocument);
@@ -135,7 +147,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       pdfDocumentRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [documentUrl]);
+  }, [pdfBytes]);
 
   useImperativeHandle(ref, () => ({
     async getFilledPdfBytes() {

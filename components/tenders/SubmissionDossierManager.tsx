@@ -246,11 +246,13 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   // dans sa propre application PDF. Un index d'item (pas l'item lui-même)
   // pour toujours lire la version la plus à jour de items[] au moment du clic.
   const [actionsForIndex, setActionsForIndex] = useState<number | null>(null);
-  // En-têtes d'authentification (jeton Supabase) à donner au lecteur PDF
-  // intégré (FillablePdfViewer) pour qu'il puisse aller chercher le document
-  // lui-même : préparés une fois à l'ouverture de la fenêtre plutôt qu'à
-  // chaque nouvelle page/pièce.
-  const [fillableAuthHeaders, setFillableAuthHeaders] = useState<Record<string, string> | null>(null);
+  // Octets du PDF, DÉJÀ téléchargés par fetchAndValidatePdf (la même fonction
+  // déjà utilisée ailleurs dans ce fichier), donnés tels quels au lecteur
+  // intégré (FillablePdfViewer) : celui-ci n'a alors plus AUCUNE requête
+  // réseau à faire lui-même, ce qui évite tout un système de chargement
+  // (morceaux, en-têtes personnalisés...) plus rarement testé sur Safari/iOS
+  // que le fetch() tout simple déjà fiable ailleurs dans l'appli.
+  const [fillablePdfBytes, setFillablePdfBytes] = useState<Uint8Array | null>(null);
   // Passe à un message + les anciens boutons de secours (onglet séparé +
   // fichier à choisir) si jamais le lecteur intégré n'arrive pas à afficher
   // ce PDF précis (navigateur trop ancien, etc.) — jamais un écran bloqué
@@ -330,25 +332,32 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     return () => window.clearTimeout(restoreTimer);
   }, [detected, estimateId, scope, storageKey, tenderId, tenderReference]);
 
-  // Prépare les en-têtes d'authentification UNE fois à l'ouverture de la
-  // fenêtre Ouvrir (pas à chaque frappe) : c'est FillablePdfViewer qui fait
-  // ensuite lui-même la requête vers printable-submission-document, avec ces
-  // en-têtes, exactement comme fetchAndValidatePdf le fait ailleurs dans ce
-  // fichier.
+  // Télécharge les octets du PDF UNE fois à l'ouverture de la fenêtre Ouvrir
+  // (pas à chaque frappe), via fetchAndValidatePdf — la même fonction qui
+  // sert déjà ailleurs dans l'appli pour ouvrir un PDF sur ce même iPhone —
+  // puis les donne tels quels à FillablePdfViewer, qui ne fait alors plus
+  // aucune requête réseau de son côté (pur affichage).
   useEffect(() => {
     setFillableViewerFailed(false);
     setFillableViewerError(null);
-    if (actionsForIndex === null) { setFillableAuthHeaders(null); return; }
+    setFillablePdfBytes(null);
+    if (actionsForIndex === null) return;
+    const item = items[actionsForIndex];
+    if (!item) return;
     let cancelled = false;
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    fetchAndValidatePdf(printableDocumentUrl(item)).then(async (pdf) => {
       if (cancelled) return;
-      setFillableAuthHeaders(session?.access_token ? {
-        Authorization: `Bearer ${session.access_token}`,
-        "X-Supabase-Access-Token": session.access_token,
-      } : {});
+      setFillablePdfBytes(new Uint8Array(await pdf.arrayBuffer()));
+    }).catch((error) => {
+      if (cancelled) return;
+      const message = error instanceof Error ? error.message : "Le PDF n’a pas pu être téléchargé.";
+      setFillableViewerFailed(true);
+      setFillableViewerError(message);
+      console.error("Téléchargement du PDF (fenêtre Ouvrir) échoué :", message);
     });
     return () => { cancelled = true; };
-  }, [actionsForIndex, supabase]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [actionsForIndex]);
 
   function scheduleSave(nextProfile: Record<string, string>, nextItems: Item[]) {
     window.localStorage.setItem(storageKey, JSON.stringify({ profile: nextProfile, items: nextItems }));
@@ -1371,13 +1380,13 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       </div>
       <p className="text-sm text-gray-600" style={{ flex: "0 0 auto", marginTop: 0 }}>{hasFilledVersion(item) ? `Version remplie déjà enregistrée : ${filledName || "document.pdf"}` : "Remplissez les cases directement ci-dessous, puis cliquez sur « Enregistrer »."}</p>
       <div style={{ flex: "1 1 auto", minHeight: 0 }}>
-        {!fillableViewerFailed && fillableAuthHeaders && <FillablePdfViewer
+        {!fillableViewerFailed && fillablePdfBytes && <FillablePdfViewer
           key={index}
-          documentUrl={printableDocumentUrl(item)}
-          authHeaders={fillableAuthHeaders}
+          ref={fillablePdfViewerRef}
+          pdfBytes={fillablePdfBytes}
           onError={(message) => { setFillableViewerFailed(true); setFillableViewerError(message); console.error("FillablePdfViewer a échoué :", message); }}
         />}
-        {!fillableViewerFailed && !fillableAuthHeaders && <p>Préparation…</p>}
+        {!fillableViewerFailed && !fillablePdfBytes && <p>Préparation…</p>}
         {fillableViewerFailed && <div className="simpleCardMuted">
           <p className="text-sm">L’affichage direct n’a pas fonctionné sur cet appareil/navigateur. Solution de secours : téléchargez le PDF, remplissez-le avec votre application PDF, puis renvoyez-le ici.</p>
           {fillableViewerError && <p className="text-xs text-gray-500" style={{ fontFamily: "monospace", wordBreak: "break-word" }}>Détail technique (à envoyer à Maxime si besoin) : {fillableViewerError}</p>}
