@@ -13,6 +13,113 @@ const daoSchema = {
   additionalProperties: false,
   properties: {
     summary: { type: "string" },
+    // Déplacés ici, JUSTE APRÈS summary (avant tout le bordereau de prix qui
+    // suit) : sur un DAO avec un bordereau très long (parfois des centaines
+    // de lignes), demander à l'IA de le terminer AVANT de s'occuper des
+    // pièces de soumission lui laissait de moins en moins de marge de
+    // réponse pour submission_checklist/submission_items — d'où des analyses
+    // où seule une poignée de pièces de soumission apparaissait, alors que le
+    // bordereau, lui, était complet. Comme submission_checklist et
+    // submission_items sont justement ce dont dépend tout le dossier de
+    // soumission (l'objet de cette fonctionnalité), ils doivent recevoir en
+    // priorité le meilleur de l'attention du modèle, quelle que soit la
+    // taille du bordereau de prix qui suit.
+    //
+    // Article, clause ou sommaire du DAO qui énumère la LISTE COMPLÈTE des
+    // pièces à fournir pour la soumission (souvent intitulé "Dossier d'Appel
+    // d'Offres", "Composition du dossier de soumission" ou équivalent) :
+    // reproduit cette énumération telle quelle et dans son ordre exact, pour
+    // que l'application puisse afficher les pièces détectées (submission_items)
+    // dans le MÊME ORDRE que le DAO lui-même — utile uniquement pour l'ordre
+    // d'affichage, jamais pour le contenu ou les modèles des pièces.
+    submission_checklist: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          title: { type: "string" },
+          sequence: { type: "number" },
+          source_reference: { type: "string" },
+          level: { type: "number" },
+        },
+        required: ["title", "sequence", "source_reference", "level"],
+      },
+    },
+    submission_items: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          kind: { type: "string", enum: ["document_to_provide", "form_to_complete"] },
+          title: { type: "string" },
+          source_reference: { type: "string" },
+          instructions: { type: "string" },
+          required: { type: "boolean" },
+          prefilled_values: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: { key: { type: "string" }, value: { type: "string" } },
+              required: ["key", "value"],
+            },
+          },
+          template_origin: { type: "string", enum: ["dao", "internet", "generated", "none"] },
+          template_source_url: { type: "string" },
+          template_text: { type: "string" },
+          template_page_numbers: { type: "array", items: { type: "number" } },
+          template_fill_positions: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: { page: { type: "number" }, field_key: { type: "string" }, x_percent: { type: "number" }, y_percent: { type: "number" }, width_percent: { type: "number" } },
+              required: ["page", "field_key", "x_percent", "y_percent", "width_percent"],
+            },
+          },
+          template_tables: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                title: { type: "string" },
+                columns: { type: "array", items: { type: "string" } },
+                rows: { type: "array", items: { type: "array", items: { type: "string" } } },
+                organization_column_indexes: { type: "array", items: { type: "number" } },
+                // true : le DAO ne montre qu'une seule ligne d'exemple par
+                // rubrique alors que le nombre réel d'entrées dépend du
+                // candidat (litiges, conventions non exécutées, marchés
+                // similaires...) — l'application dupliquera cette ligne
+                // autant de fois que nécessaire. false : le tableau a un
+                // nombre de lignes et colonnes toujours identique (ex. un
+                // chiffre d'affaires réparti sur des colonnes d'années
+                // précises déjà indiquées par le DAO).
+                repeatable: { type: "boolean" },
+              },
+              required: ["title", "columns", "rows", "organization_column_indexes", "repeatable"],
+            },
+          },
+          fields: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                key: { type: "string" },
+                label: { type: "string" },
+                required: { type: "boolean" },
+                description: { type: "string" },
+              },
+              required: ["key", "label", "required", "description"],
+            },
+          },
+        },
+        required: ["kind", "title", "source_reference", "instructions", "required", "prefilled_values", "template_origin", "template_source_url", "template_text", "template_page_numbers", "template_fill_positions", "template_tables", "fields"],
+      },
+    },
     execution_period_days: { type: ["number", "null"] },
     execution_plan: { type: "array", items: { type: "object", additionalProperties: false, properties: { title: { type: "string" }, duration_days: { type: ["number", "null"] }, sequence: { type: "number" }, source_reference: { type: "string" } }, required: ["title", "duration_days", "sequence", "source_reference"] } },
     site_execution_details: { type: "array", items: { type: "object", additionalProperties: false, properties: { title: { type: "string" }, predecessor: { type: "string" }, personnel: { type: "string" }, materials_or_equipment: { type: "string" }, control_point: { type: "string" } }, required: ["title", "predecessor", "personnel", "materials_or_equipment", "control_point"] } },
@@ -107,101 +214,6 @@ const daoSchema = {
           "kind", "title", "designation", "unit", "quantity", "reason",
           "source_basis", "options", "default_option", "requires_validation", "safety_note",
         ],
-      },
-    },
-    // Article, clause ou sommaire du DAO qui énumère la LISTE COMPLÈTE des
-    // pièces à fournir pour la soumission (souvent intitulé "Dossier d'Appel
-    // d'Offres", "Composition du dossier de soumission" ou équivalent) :
-    // reproduit cette énumération telle quelle et dans son ordre exact, pour
-    // que l'application puisse afficher les pièces détectées (submission_items)
-    // dans le MÊME ORDRE que le DAO lui-même — utile uniquement pour l'ordre
-    // d'affichage, jamais pour le contenu ou les modèles des pièces.
-    submission_checklist: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          title: { type: "string" },
-          sequence: { type: "number" },
-          source_reference: { type: "string" },
-          level: { type: "number" },
-        },
-        required: ["title", "sequence", "source_reference", "level"],
-      },
-    },
-    submission_items: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          kind: { type: "string", enum: ["document_to_provide", "form_to_complete"] },
-          title: { type: "string" },
-          source_reference: { type: "string" },
-          instructions: { type: "string" },
-          required: { type: "boolean" },
-          prefilled_values: {
-            type: "array",
-            items: {
-              type: "object",
-              additionalProperties: false,
-              properties: { key: { type: "string" }, value: { type: "string" } },
-              required: ["key", "value"],
-            },
-          },
-          template_origin: { type: "string", enum: ["dao", "internet", "generated", "none"] },
-          template_source_url: { type: "string" },
-          template_text: { type: "string" },
-          template_page_numbers: { type: "array", items: { type: "number" } },
-          template_fill_positions: {
-            type: "array",
-            items: {
-              type: "object",
-              additionalProperties: false,
-              properties: { page: { type: "number" }, field_key: { type: "string" }, x_percent: { type: "number" }, y_percent: { type: "number" }, width_percent: { type: "number" } },
-              required: ["page", "field_key", "x_percent", "y_percent", "width_percent"],
-            },
-          },
-          template_tables: {
-            type: "array",
-            items: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                title: { type: "string" },
-                columns: { type: "array", items: { type: "string" } },
-                rows: { type: "array", items: { type: "array", items: { type: "string" } } },
-                organization_column_indexes: { type: "array", items: { type: "number" } },
-                // true : le DAO ne montre qu'une seule ligne d'exemple par
-                // rubrique alors que le nombre réel d'entrées dépend du
-                // candidat (litiges, conventions non exécutées, marchés
-                // similaires...) — l'application dupliquera cette ligne
-                // autant de fois que nécessaire. false : le tableau a un
-                // nombre de lignes et colonnes toujours identique (ex. un
-                // chiffre d'affaires réparti sur des colonnes d'années
-                // précises déjà indiquées par le DAO).
-                repeatable: { type: "boolean" },
-              },
-              required: ["title", "columns", "rows", "organization_column_indexes", "repeatable"],
-            },
-          },
-          fields: {
-            type: "array",
-            items: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                key: { type: "string" },
-                label: { type: "string" },
-                required: { type: "boolean" },
-                description: { type: "string" },
-              },
-              required: ["key", "label", "required", "description"],
-            },
-          },
-        },
-        required: ["kind", "title", "source_reference", "instructions", "required", "prefilled_values", "template_origin", "template_source_url", "template_text", "template_page_numbers", "template_fill_positions", "template_tables", "fields"],
       },
     },
   },
@@ -344,6 +356,7 @@ export async function POST(request: Request) {
         max_output_tokens: 64_000,
         instructions: [
           "Tu analyses un DAO de travaux publics ou BTP à Madagascar.",
+          "PRIORITÉ ABSOLUE avant toute autre tâche décrite plus bas : commence par identifier et rédiger entièrement submission_checklist puis submission_items (le sommaire et les pièces du dossier de soumission), AVANT de passer au long travail du bordereau de prix (work_items, pricing_context, bdqe_layout...) qui suit dans ces instructions. Sur un DAO avec un bordereau très long (parfois des centaines de lignes), traiter le bordereau en premier laisse de moins en moins de place pour bien traiter les pièces de soumission ensuite, ce qui les fait bâcler ou disparaître — alors que ce sont elles qui servent directement à constituer le dossier de soumission. Assure-toi donc que submission_checklist et submission_items soient complets et soignés en priorité, quitte à résumer davantage certains détails du bordereau de prix si la place venait à manquer (jamais l'inverse).",
           "Extrais uniquement les postes explicitement présents dans le document.",
           "Reproduis l'ordre et la structure exacte du bordereau DAO.",
           "Retourne une ligne row_type=section pour chaque titre d'ouvrage ou grande rubrique, par exemple TERRASSEMENT ou ÉQUIPEMENT.",
@@ -401,7 +414,7 @@ export async function POST(request: Request) {
           "Règle GÉNÉRALE (pas seulement pour la garantie bancaire ou la caution citées ci-après à titre d'exemple, mais pour absolument TOUT document — convention, protocole, contrat, acte d'engagement...) : un numéro de garantie, de caution, de marché, de convention, de contrat ou tout autre numéro attribué par une signature, un enregistrement officiel ou un tiers (banque, autorité contractante, ministère, mairie...) n'existe pas encore au moment de l'analyse du DAO — il n'est attribué qu'après coup, lors de la signature ou de l'enregistrement de CE document précis. Ne recopie donc JAMAIS le numéro de l'avis d'appel d'offres, la référence du DAO ou tout autre numéro déjà connu ailleurs dans un champ désignant un numéro propre à un AUTRE acte (numéro de garantie, de caution, de marché, de convention, de protocole...) : ce sont des identifiants distincts, produits à des moments différents et par des parties différentes, même quand leurs libellés se ressemblent ou que le champ semble vide et facile à compléter. Laisse ce champ sans valeur préremplie (fields sans entrée correspondante dans prefilled_values) sauf si le DAO donne réellement, explicitement, CETTE valeur précise pour CE champ précis. Exemple : garantie bancaire, caution personnelle, ou tout autre engagement d'un tiers.",
           "Pour les modèles de personnel ou de matériels, ne compte jamais le gérant ou représentant légal comme personnel de chantier. Prévois une ligne vide par personne ou matériel à ajouter, et crée dans fields les clés personnel_1_name, personnel_1_role, personnel_1_qualification, personnel_1_experience (ou materiel_1_name, materiel_1_role, materiel_1_qualification, materiel_1_experience) ainsi que leurs positions dans template_fill_positions. Répète ces positions pour chaque ligne du tableau visible afin que l’utilisateur puisse ajouter plusieurs personnels ou matériels et obtenir le PDF exactement sur le tableau du DAO.",
           "Erreur constatée à éviter absolument : ne confonds jamais « liste du personnel » (l'équipe de chantier : ouvriers, maçons, ingénieurs, encadrement...) avec une pièce contenant simplement le mot « personnelle », notamment « caution personnelle et solidaire de soumission » ou tout « cautionnement émis par une compagnie de garantie ». Malgré la ressemblance des mots, une caution personnelle et solidaire est un engagement FINANCIER d'un garant (banque, compagnie de garantie ou personne physique) envers le Maître de l'Ouvrage — ce n'est jamais une liste de personnes. Ne lui applique donc jamais la structure de tableau du personnel (jamais de colonnes Nom et prénoms/Fonction/Diplôme/Expérience, jamais les clés personnel_1_name, personnel_1_role, personnel_1_qualification, personnel_1_experience). Une telle pièce doit être extraite exactement comme un modèle de garantie bancaire de soumission : cherche sa vraie page dans le DAO (souvent juste après ou juste avant l'Annexe de garantie bancaire), et reproduis fidèlement dans template_text tout son texte, ses paragraphes, sa numérotation, et transforme chaque emplacement entre crochets ou pointillés en {{cle_du_champ}} (nom et adresse du garant, nom du soumissionnaire, nom du Maître de l'Ouvrage, description des travaux, montant en chiffres et en lettres, date, nom complet et titre de la personne signataire...) — jamais un tableau vide sans rapport avec le vrai modèle de sa page.",
-          "Règle spéciale personnel : si l’Annexe 3 page 233 est présente, elle correspond uniquement à la liste des personnels affectés au chantier et à son tableau. Ne la duplique pas. Toute autre pièce demandant un contrat, petit contrat ou engagement de travail doit devenir un submission_item distinct de type form_to_complete, intitulé « Contrat individuel de travail ». Ce contrat doit être généré une fois par personnel de la liste Annexe 3, prérempli avec son nom, fonction et CIN. Cherche d’abord son modèle exact dans le DAO avec ses pages, tableau et zones à remplir ; seulement si aucun modèle n’existe, prépare un modèle généré à imprimer et indique clairement qu’il doit être vérifié avant signature.",
+          "Règle GÉNÉRALE (valable pour tout DAO, pas seulement celui qui a révélé cette confusion) : la pièce « liste du personnel affecté au chantier » (ouvriers, encadrement...) reste UNE SEULE pièce avec son tableau, quelle que soit l'annexe ou la page où le DAO la place — ne la duplique jamais en plusieurs submission_items. Toute AUTRE pièce du DAO qui demande en plus un contrat, petit contrat ou engagement de travail individuel doit devenir un submission_item SÉPARÉ et distinct, de type form_to_complete, intitulé « Contrat individuel de travail ». Ce contrat doit être généré une fois par personne de la liste du personnel, prérempli avec son nom, sa fonction et sa CIN. Cherche d'abord son modèle exact dans le DAO avec ses pages, tableau et zones à remplir ; seulement si aucun modèle n'existe, prépare un modèle généré à imprimer et indique clairement qu'il doit être vérifié avant signature.",
           "Pour tout formulaire ou document qui doit être rempli ou généré, applique impérativement cet ordre : 1) cherche d’abord un modèle dans le DAO et toutes ses annexes ; 2) seulement s’il n’existe aucun modèle exploitable, utilise la recherche web pour trouver un modèle équivalent fiable ; 3) seulement en dernier recours, prépare un modèle générique à vérifier.",
           "Pour chaque submission_item, remplis template_origin avec dao, internet, generated ou none. template_source_url contient l’URL vérifiée seulement si template_origin=internet, sinon une chaîne vide. template_text doit TOUJOURS être rempli avec le texte complet et lisible du modèle (mêmes paragraphes, même numérotation d'origine comme 1., 2., 3..., mêmes formules de politesse, tout le texte fixe du DAO), quel que soit template_origin (dao, internet ou generated) — sans aucune exception, sauf le cas purement graphique décrit plus loin (panneau, plaque, logo, plan technique). Ne laisse JAMAIS un blanc, un tiret, des pointillés ou une mention entre crochets du DAO tel quel dans template_text : chacun doit être remplacé par {{cle_du_champ}}, même quand la valeur correspondante est déjà connue et déjà placée dans prefilled_values. Règle impérative : une valeur qui existe dans prefilled_values SANS que son {{cle_du_champ}} correspondant apparaisse aussi dans template_text (ou template_tables) reste invisible sur le PDF final imprimé et retombe dans une liste séparée tout en bas de page — ce n'est jamais le résultat attendu ; vérifie donc, pour chaque entrée de fields, que sa clé apparaît au moins une fois dans template_text ou dans une cellule de template_tables. SÉPARE TOUJOURS chaque paragraphe numéroté par une ligne vide (un saut de ligne, puis une ligne complètement vide, puis le paragraphe suivant) : ne colle jamais le paragraphe « 1. » directement à la suite du paragraphe « 2. » sans ligne vide entre les deux, sinon l’application ne peut plus les distinguer et les affiche fondus en un seul bloc de texte illisible : l'application réécrit ensuite ce texte tel quel, en remplaçant chaque {{cle_du_champ}} par sa valeur en gras, sans jamais essayer de reproduire la mise en page exacte de la page scannée. Ne laisse template_text vide QUE pour un document purement graphique sans texte (panneau de chantier, plaque, logo) ou pour un plan technique — ceux-ci restent une copie de la vraie page du DAO. Si template_origin=dao, template_page_numbers contient les pages originales 1-indexées, et template_fill_positions contient les positions précises des champs sur la page : page source, field_key, x_percent et y_percent mesurés depuis le coin supérieur gauche, width_percent. Ces positions restent utiles en repli (pour un ancien DAO pas encore ré-analysé) et pour les pièces graphiques/plans ; elles doivent aussi couvrir les cellules des tableaux. template_tables contient les tableaux du modèle à reproduire avec exactement leurs colonnes, lignes, ordre et intitulés visibles dans le DAO ; utilise [] lorsqu’il n’y a pas de tableau. organization_column_indexes contient les indices à partir de 0 des seules colonnes destinées au candidat qui utilise l’application ; pour un tableau général, indique toutes ses colonnes. Si le tableau concerne plusieurs organismes, candidats, années ou lots, n’indique que la colonne du soumissionnaire courant et ne mets jamais ses données dans les autres colonnes. Dans template_text et dans les seules cellules des colonnes concernées, remplace tout emplacement à compléter par {{cle_du_champ}}, par exemple {{legal_name}}, {{nif}}, {{signature_date}} ou {{contract_reference}}. Ajoute obligatoirement ces clés dans fields afin que l’application préremplisse les données disponibles et demande seulement les valeurs absentes. Ne présente jamais un modèle Internet ou généré comme un modèle officiel du DAO.",
           "Erreur fréquente à éviter dans template_tables : une cellule destinée au candidat (montant, date, quantité, référence, désignation...) reçoit une clé {{cle_du_champ}} MÊME quand elle apparaît simplement vide dans le DAO, sans aucun pointillé, tiret ou crochet visible — une case vide dans un tableau à remplir est un emplacement à compléter au même titre qu'une case avec pointillés. Ne laisse jamais une telle cellule vide sans clé sous prétexte qu'elle ne contient aucun caractère de remplissage.",
