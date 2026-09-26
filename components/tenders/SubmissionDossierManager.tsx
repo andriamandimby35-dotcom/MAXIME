@@ -8,6 +8,7 @@ import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-refer
 import { buildDossierRecordsForInsert, type TemplateTable } from "@/lib/submission/build-dossier-items";
 import { toFriendlyPdfError } from "@/lib/submission/friendly-pdf-error";
 import { isPhoneDevice } from "@/lib/is-phone-device";
+import FillablePdfViewer, { type FillablePdfViewerHandle } from "@/components/tenders/FillablePdfViewer";
 
 type Field = { key: string; label: string; required: boolean; description: string };
 type Item = {
@@ -245,6 +246,17 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   // dans sa propre application PDF. Un index d'item (pas l'item lui-même)
   // pour toujours lire la version la plus à jour de items[] au moment du clic.
   const [actionsForIndex, setActionsForIndex] = useState<number | null>(null);
+  // En-têtes d'authentification (jeton Supabase) à donner au lecteur PDF
+  // intégré (FillablePdfViewer) pour qu'il puisse aller chercher le document
+  // lui-même : préparés une fois à l'ouverture de la fenêtre plutôt qu'à
+  // chaque nouvelle page/pièce.
+  const [fillableAuthHeaders, setFillableAuthHeaders] = useState<Record<string, string> | null>(null);
+  // Passe à un message + les anciens boutons de secours (onglet séparé +
+  // fichier à choisir) si jamais le lecteur intégré n'arrive pas à afficher
+  // ce PDF précis (navigateur trop ancien, etc.) — jamais un écran bloqué
+  // sans rien à cliquer.
+  const [fillableViewerFailed, setFillableViewerFailed] = useState(false);
+  const fillablePdfViewerRef = useRef<FillablePdfViewerHandle>(null);
   // Date à laquelle l'utilisateur a cliqué sur "Valider la complétion" — null
   // si le dossier n'est pas (ou plus) marqué comme complet. Remplace
   // l'ancienne génération d'un PDF fusionné : voir toggleDossierLock.
@@ -313,6 +325,25 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       .catch(() => undefined);
     return () => window.clearTimeout(restoreTimer);
   }, [detected, estimateId, scope, storageKey, tenderId, tenderReference]);
+
+  // Prépare les en-têtes d'authentification UNE fois à l'ouverture de la
+  // fenêtre Ouvrir (pas à chaque frappe) : c'est FillablePdfViewer qui fait
+  // ensuite lui-même la requête vers printable-submission-document, avec ces
+  // en-têtes, exactement comme fetchAndValidatePdf le fait ailleurs dans ce
+  // fichier.
+  useEffect(() => {
+    setFillableViewerFailed(false);
+    if (actionsForIndex === null) { setFillableAuthHeaders(null); return; }
+    let cancelled = false;
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (cancelled) return;
+      setFillableAuthHeaders(session?.access_token ? {
+        Authorization: `Bearer ${session.access_token}`,
+        "X-Supabase-Access-Token": session.access_token,
+      } : {});
+    });
+    return () => { cancelled = true; };
+  }, [actionsForIndex, supabase]);
 
   function scheduleSave(nextProfile: Record<string, string>, nextItems: Item[]) {
     window.localStorage.setItem(storageKey, JSON.stringify({ profile: nextProfile, items: nextItems }));
@@ -568,10 +599,20 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     void openPdfDirectly(`pdf:${item.title}:${workerIndex}`, item.title, documentUrl);
   }
 
+  // Même construction d'URL utilisée partout où on va chercher LE PDF d'une
+  // pièce précise (fenêtre de remplissage intégrée, solution de secours par
+  // onglet/téléchargement) : un seul endroit à corriger si jamais un
+  // paramètre doit changer.
+  function printableDocumentUrl(item: Item) {
+    const query = new URLSearchParams({ title: item.title, kind: item.kind, sourceReference: item.source_reference || "" });
+    if (estimateId) query.set("estimateId", estimateId);
+    return `/api/tenders/${tenderId}/printable-submission-document?${query}`;
+  }
+
   // Déclenche un VRAI téléchargement (fichier posé dans le dossier de
   // téléchargements, comme n'importe quel PDF téléchargé) : gardé comme
-  // solution de secours pour downloadPdfForEditing (voir plus bas) quand
-  // le navigateur bloque l'ouverture d'un nouvel onglet (pop-up bloquée).
+  // solution de secours pour downloadPdfForEditingFallback (voir plus bas)
+  // quand le navigateur bloque l'ouverture d'un nouvel onglet (pop-up bloquée).
   function triggerBrowserDownload(blob: Blob, fileName: string) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -586,7 +627,12 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     window.setTimeout(() => URL.revokeObjectURL(url), 4000);
   }
 
-  async function downloadPdfForEditing(item: Item) {
+  // Solution de SECOURS uniquement : utilisée seulement si le lecteur PDF
+  // intégré (FillablePdfViewer, voir la fenêtre Ouvrir plus bas) échoue à
+  // s'afficher pour une raison ou une autre (vieux navigateur, etc.) — dans
+  // le fonctionnement normal, remplir se fait directement dans la fenêtre
+  // de l'appli, sans onglet séparé ni fichier à re-choisir.
+  async function downloadPdfForEditingFallback(item: Item) {
     const key = `edit:${item.title}`;
     setPendingAction(key);
     setMessage("Préparation du PDF à remplir…");
@@ -603,9 +649,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     // que le client ait besoin d'installer une quelconque application.
     const editingTab = window.open("", "_blank");
     try {
-      const query = new URLSearchParams({ title: item.title, kind: item.kind, sourceReference: item.source_reference || "" });
-      if (estimateId) query.set("estimateId", estimateId);
-      const documentUrl = `/api/tenders/${tenderId}/printable-submission-document?${query}`;
+      const documentUrl = printableDocumentUrl(item);
       const pdf = await fetchAndValidatePdf(documentUrl);
       if (editingTab) {
         editingTab.location.href = URL.createObjectURL(pdf);
@@ -637,13 +681,17 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     return Boolean(item.form_data.__filledPdfPath);
   }
 
-  async function uploadFilledPdf(index: number, item: Item, file: File) {
+  // Accepte n'importe quel Blob (octets renvoyés par le lecteur PDF intégré
+  // via saveDocument(), ou un vrai File choisi à la main en solution de
+  // secours) — un seul chemin d'envoi pour les deux cas, plutôt que deux
+  // fonctions presque identiques.
+  async function uploadFilledPdf(index: number, item: Item, data: Blob, fileName: string) {
     const key = `save:${index}`;
     setPendingAction(key);
     setMessage("Envoi du PDF rempli…");
     try {
       const path = filledPdfStoragePath(item);
-      const upload = await supabase.storage.from("btp-documents").upload(path, file, { upsert: true, contentType: "application/pdf" });
+      const upload = await supabase.storage.from("btp-documents").upload(path, data, { upsert: true, contentType: "application/pdf" });
       if (upload.error) { setMessage(`Envoi impossible : ${upload.error.message}`); return; }
       // On repart de la version la plus à jour de cet item (items[index]),
       // pas de "item" capturé avant l'envoi : une modification faite pendant
@@ -652,12 +700,33 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       if (!current) return;
       updateItem(index, {
         status: "ready",
-        form_data: { ...current.form_data, __filledPdfPath: path, __filledPdfName: file.name, __readyAt: new Date().toISOString() },
+        form_data: { ...current.form_data, __filledPdfPath: path, __filledPdfName: fileName, __readyAt: new Date().toISOString() },
       });
       setMessage("PDF rempli enregistré. Cette pièce est marquée comme prête.");
+      // Demandé par Maxime : une fois enregistré, la fenêtre se referme toute
+      // seule — plus besoin de cliquer sur Fermer en plus d'Enregistrer.
+      setActionsForIndex((current) => current === index ? null : current);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Envoi du PDF impossible.");
     } finally {
+      setPendingAction((current) => current === key ? null : current);
+    }
+  }
+
+  // Appelée par le bouton Enregistrer de la fenêtre Ouvrir (voir plus bas) :
+  // récupère les octets DÉJÀ remplis par la personne dans le lecteur PDF
+  // intégré (FillablePdfViewer), sans aucune étape de fichier à choisir.
+  async function saveFilledPdfFromViewer(index: number, item: Item) {
+    const key = `save:${index}`;
+    setPendingAction(key);
+    setMessage("Lecture des cases remplies…");
+    try {
+      const bytes = await fillablePdfViewerRef.current?.getFilledPdfBytes();
+      if (!bytes) throw new Error("Le PDF n’est pas encore prêt, réessayez dans un instant.");
+      const blob = new Blob([new Uint8Array(bytes)], { type: "application/pdf" });
+      await uploadFilledPdf(index, item, blob, `${normalize(item.title) || "document"}.pdf`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Enregistrement impossible.");
       setPendingAction((current) => current === key ? null : current);
     }
   }
@@ -1265,10 +1334,13 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     </div>
     <iframe ref={pdfIframeRef} title={viewingPdf.title} src={`${viewingPdf.objectUrl}#toolbar=0&navpanes=0`} style={{ flex: "1 1 auto", minHeight: 0, width: "100%", border: "1px solid #e1ece4", borderRadius: "10px" }} />
   </div></div>, document.body)}
-  {/* La fenêtre Modifier/Enregistrer/Imprimer ouverte par le bouton rouge
-      "Ouvrir" de chaque pièce (voir openButton dans renderDossierCard) :
-      Modifier télécharge le PDF pour que Maxime le remplisse lui-même dans
-      son application PDF, Enregistrer renvoie ensuite le fichier rempli. */}
+  {/* La fenêtre ouverte par le bouton rouge "Ouvrir" de chaque pièce (voir
+      openButton dans renderDossierCard) : le PDF s'affiche ICI, déjà
+      remplissable (de vraies cases cliquables par-dessus la vraie page du
+      DAO) — la personne tape directement dedans, puis Enregistrer récupère
+      ce qui vient d'être tapé et l'envoie tout seul, sans fichier à
+      télécharger ni à re-choisir. La fenêtre se referme d'elle-même une
+      fois l'envoi terminé (voir uploadFilledPdf). */}
   {actionsForIndex !== null && items[actionsForIndex] && typeof document !== "undefined" && createPortal((() => {
     const index = actionsForIndex;
     const item = items[index];
@@ -1282,21 +1354,37 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     // marque en plus __acknowledgedAt (voir toggleAcknowledged) — même bouton
     // rouge/vert, juste un texte différent pour rester clair pour Maxime.
     const readingOnly = item.kind === "document_to_provide" && isReadingOnly(item);
-    return <div className="modalBackdrop" onClick={() => setActionsForIndex(null)}><div className="modal" onClick={(event) => event.stopPropagation()}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 10 }}>
-        <h2 style={{ margin: 0, fontWeight: 800, fontSize: "1.125rem", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</h2>
-        <button type="button" className="tenderButton" onClick={() => setActionsForIndex(null)}>Fermer</button>
+    const saving = pendingAction === `save:${index}`;
+    return <div className="modalBackdrop" onClick={() => setActionsForIndex(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(900px,95vw)", height: "88vh", display: "flex", flexDirection: "column" }}>
+      <div style={{ flex: "0 0 auto", display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+        <h2 style={{ margin: 0, fontWeight: 800, fontSize: "1.125rem", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "1 1 auto" }}>{item.title}</h2>
+        <div style={{ display: "flex", gap: 8, flex: "0 0 auto", flexWrap: "wrap" }}>
+          {!fillableViewerFailed && <button type="button" className="tenderButton tenderButtonPrimary" disabled={saving} onClick={() => void saveFilledPdfFromViewer(index, item)}><ButtonLabel loading={saving} label="Enregistrer" loadingLabel="Envoi…" /></button>}
+          {showPrint && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Imprimer" /></button>}
+          <button type="button" className="tenderButton" onClick={() => setActionsForIndex(null)}>Fermer</button>
+        </div>
       </div>
-      <p className="text-sm text-gray-600">{hasFilledVersion(item) ? `Version remplie déjà enregistrée : ${filledName || "document.pdf"}` : "Aucune version remplie enregistrée pour l’instant."}</p>
-      <div className="buttonRow" style={{ marginTop: 14, marginBottom: 0 }}>
-        <button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `edit:${item.title}`} onClick={() => void downloadPdfForEditing(item)}><ButtonLabel loading={pendingAction === `edit:${item.title}`} label="Modifier" loadingLabel="Préparation…" /></button>
-        <label className="tenderButton" style={{ cursor: pendingAction === `save:${index}` ? "wait" : "pointer" }}>
-          {pendingAction === `save:${index}` ? <ButtonLabel loading label="" loadingLabel="Envoi…" /> : "Enregistrer"}
-          <input style={{ display: "none" }} type="file" accept="application/pdf" disabled={pendingAction === `save:${index}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadFilledPdf(index, item, file); event.target.value = ""; }} />
-        </label>
-        {showPrint && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Imprimer" /></button>}
+      <p className="text-sm text-gray-600" style={{ flex: "0 0 auto", marginTop: 0 }}>{hasFilledVersion(item) ? `Version remplie déjà enregistrée : ${filledName || "document.pdf"}` : "Remplissez les cases directement ci-dessous, puis cliquez sur « Enregistrer »."}</p>
+      <div style={{ flex: "1 1 auto", minHeight: 0 }}>
+        {!fillableViewerFailed && fillableAuthHeaders && <FillablePdfViewer
+          key={index}
+          documentUrl={printableDocumentUrl(item)}
+          authHeaders={fillableAuthHeaders}
+          onError={() => setFillableViewerFailed(true)}
+        />}
+        {!fillableViewerFailed && !fillableAuthHeaders && <p>Préparation…</p>}
+        {fillableViewerFailed && <div className="simpleCardMuted">
+          <p className="text-sm">L’affichage direct n’a pas fonctionné sur cet appareil/navigateur. Solution de secours : téléchargez le PDF, remplissez-le avec votre application PDF, puis renvoyez-le ici.</p>
+          <div className="buttonRow" style={{ marginBottom: 0, marginTop: 10 }}>
+            <button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `edit:${item.title}`} onClick={() => void downloadPdfForEditingFallback(item)}><ButtonLabel loading={pendingAction === `edit:${item.title}`} label="Modifier (télécharger)" loadingLabel="Préparation…" /></button>
+            <label className="tenderButton" style={{ cursor: saving ? "wait" : "pointer" }}>
+              {saving ? <ButtonLabel loading label="" loadingLabel="Envoi…" /> : "Enregistrer un fichier"}
+              <input style={{ display: "none" }} type="file" accept="application/pdf" disabled={saving} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadFilledPdf(index, item, file, file.name); event.target.value = ""; }} />
+            </label>
+          </div>
+        </div>}
       </div>
-      <div className="buttonRow" style={{ marginTop: 10, marginBottom: 0 }}>
+      <div className="buttonRow" style={{ flex: "0 0 auto", marginTop: 10, marginBottom: 0 }}>
         <button type="button" className={`tenderButton ${ready ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => (readingOnly ? toggleAcknowledged(index) : toggleReady(index))}>{readingOnly ? (ready ? "Pris connaissance ✓ (annuler)" : "Prendre connaissance") : (ready ? "Prêt ✓ (annuler)" : "Marquer comme prêt")}</button>
       </div>
     </div></div>;
