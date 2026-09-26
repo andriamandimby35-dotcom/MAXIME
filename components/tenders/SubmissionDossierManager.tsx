@@ -569,10 +569,9 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   }
 
   // Déclenche un VRAI téléchargement (fichier posé dans le dossier de
-  // téléchargements, comme n'importe quel PDF téléchargé) plutôt qu'un
-  // aperçu affiché dans la page : c'est ce fichier que l'utilisateur ouvre
-  // ensuite avec l'application PDF de son choix pour remplir les cases
-  // (voir createFillableDaoTemplatePdf côté serveur) directement dedans.
+  // téléchargements, comme n'importe quel PDF téléchargé) : gardé comme
+  // solution de secours pour downloadPdfForEditing (voir plus bas) quand
+  // le navigateur bloque l'ouverture d'un nouvel onglet (pop-up bloquée).
   function triggerBrowserDownload(blob: Blob, fileName: string) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -590,15 +589,36 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   async function downloadPdfForEditing(item: Item) {
     const key = `edit:${item.title}`;
     setPendingAction(key);
-    setMessage("Préparation du PDF à modifier…");
+    setMessage("Préparation du PDF à remplir…");
+    // Ouvre un nouvel onglet ICI, de façon synchrone, AVANT le premier
+    // "await" (même astuce que openPdfDirectly plus haut — Safari et les
+    // autres navigateurs bloquent comme pop-up indésirable un window.open()
+    // déclenché après une attente réseau, mais jamais celui-ci puisqu'il
+    // vient directement du clic). L'intérêt, par rapport à un simple
+    // téléchargement : ce nouvel onglet affiche le PDF avec la VRAIE barre
+    // d'outils du navigateur (ou de l'application PDF par défaut sur
+    // téléphone) — celle que notre propre fenêtre masque exprès ailleurs
+    // dans l'appli pour un simple aperçu. C'est cette barre d'outils qui
+    // permet de remplir les cases ET d'enregistrer le fichier rempli, sans
+    // que le client ait besoin d'installer une quelconque application.
+    const editingTab = window.open("", "_blank");
     try {
       const query = new URLSearchParams({ title: item.title, kind: item.kind, sourceReference: item.source_reference || "" });
       if (estimateId) query.set("estimateId", estimateId);
       const documentUrl = `/api/tenders/${tenderId}/printable-submission-document?${query}`;
       const pdf = await fetchAndValidatePdf(documentUrl);
-      triggerBrowserDownload(pdf, `${normalize(item.title) || "document"}.pdf`);
-      setMessage("PDF téléchargé : ouvrez-le avec votre application PDF pour remplir les cases, puis revenez cliquer sur « Enregistrer ».");
+      if (editingTab) {
+        editingTab.location.href = URL.createObjectURL(pdf);
+        setMessage("PDF ouvert dans un nouvel onglet : remplissez les cases directement dedans, enregistrez le fichier rempli depuis cet onglet (bouton d’enregistrement/téléchargement du navigateur), puis revenez ici cliquer sur « Enregistrer » pour l’envoyer.");
+      } else {
+        // Fenêtres pop-up bloquées par le navigateur : on retombe sur un
+        // téléchargement classique, comme avant — le client ouvre alors le
+        // fichier lui-même avec l'application PDF de son choix.
+        triggerBrowserDownload(pdf, `${normalize(item.title) || "document"}.pdf`);
+        setMessage("Les fenêtres pop-up semblent bloquées par votre navigateur : le PDF a été téléchargé à la place. Ouvrez-le avec votre application PDF, remplissez les cases, puis revenez cliquer sur « Enregistrer ».");
+      }
     } catch (error) {
+      editingTab?.close();
       setMessage(error instanceof Error ? toFriendlyPdfError(error.message) : "Le PDF n’a pas pu être préparé.");
     } finally {
       setPendingAction((current) => current === key ? null : current);
