@@ -419,6 +419,141 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
 }
 
 /**
+ * NOUVELLE méthode demandée par Maxime : au lieu de redessiner nous-mêmes
+ * chaque mot de la page (createFilledDaoTemplatePdf ci-dessus, méthode
+ * fragile — des dizaines de corrections de décalage de quelques pixels ont
+ * déjà été nécessaires), on garde la VRAIE page du DAO copiée à l'identique
+ * (cadres, tableaux, papier en-tête, tout), et on pose par-dessus de VRAIES
+ * cases à remplir cliquables (des champs de formulaire PDF, pas du texte
+ * peint en dur) : préremplies quand la valeur est déjà connue, vides et
+ * modifiables sinon. L'utilisateur peut alors les compléter lui-même dans
+ * SA PROPRE application PDF (téléphone ou ordinateur), exactement comme un
+ * formulaire PDF classique — plus besoin que l'application devine où écrire
+ * une valeur sur une image plate.
+ *
+ * positions/redactions viennent des deux mêmes fonctions de repérage que
+ * createFilledDaoTemplatePdf (locateFieldPositions/locateBracketPlaceholders/
+ * locateTableCellPositions) : seul ce qui se passe APRÈS le repérage change.
+ * Un fond blanc sur chaque case recouvre le pointillé ou le texte entre
+ * crochets déjà imprimé au même endroit sur la vraie page.
+ *
+ * Réservée aux pièces avec un jeu de champs FIXE (voir route.ts) : un
+ * tableau à nombre de lignes variable (personnel, litiges des 5 dernières
+ * années...) garde sa propre méthode existante (texte proprement recomposé,
+ * autant de lignes que l'utilisateur en ajoute dans le dossier) — dupliquer
+ * une case cliquable un nombre de fois inconnu à l'avance n'a pas de sens ici.
+ */
+export async function createFillableDaoTemplatePdf(
+  source: Uint8Array,
+  pageNumbers: number[],
+  positions: FillPosition[],
+  redactions: RedactionZone[],
+  rawValues: Record<string, string>,
+  documentTitle?: string | null,
+) {
+  const values = Object.fromEntries(
+    Object.entries(rawValues).map(([key, value]) => [key, (value ?? "").replace(/\{\{[^{}]{1,80}\}\}/g, "").trim()]),
+  );
+  const sourcePdf = await PDFDocument.load(source);
+  const validPages = [...new Set(pageNumbers.map((page) => Math.floor(page)).filter((page) => page >= 1 && page <= sourcePdf.getPageCount()))];
+  if (!validPages.length) throw new Error("Aucune page de modèle exploitable.");
+  const result = await PDFDocument.create();
+  if (documentTitle?.trim()) result.setTitle(compact(documentTitle.trim(), 200));
+  // subset:false — voir le commentaire dans pdf-font.ts : une case encore
+  // vide doit pouvoir recevoir N'IMPORTE quel caractère tapé plus tard par
+  // l'utilisateur dans sa propre application, pas seulement les caractères
+  // déjà utilisés ailleurs dans ce document précis.
+  const { font } = await embedUnicodeFonts(result, { subset: false });
+  const copiedPages = await result.copyPages(sourcePdf, validPages.map((page) => page - 1));
+  copiedPages.forEach((page) => result.addPage(page));
+  const pageIndexByNumber = new Map(validPages.map((pageNumber, index) => [pageNumber, index]));
+  const form = result.getForm();
+
+  // Même règle de priorité que createFilledDaoTemplatePdf : un crochet
+  // repéré marque l'emplacement exact de la case (plus fiable qu'une
+  // estimation par libellé) et l'emporte toujours sur une position estimée
+  // pour le MÊME champ — sinon une case cliquable apparaissait deux fois.
+  const fieldKeysHandledByRedaction = new Set(redactions.map((zone) => zone.field_key).filter((key): key is string => Boolean(key)));
+  const dedupedPositions = positions.filter((position) => !fieldKeysHandledByRedaction.has(position.field_key));
+
+  const usedFieldNames = new Map<string, number>();
+  function uniqueFieldName(base: string): string {
+    const safeBase = (base || "champ").replace(/[^a-zA-Z0-9_.-]/g, "_") || "champ";
+    const count = usedFieldNames.get(safeBase) ?? 0;
+    usedFieldNames.set(safeBase, count + 1);
+    return count === 0 ? safeBase : `${safeBase}__${count}`;
+  }
+
+  let createdFieldCount = 0;
+  function addTextField(pageNumber: number, fieldKey: string, rect: Rect, fontSize: number, value: string) {
+    const pageIndex = pageIndexByNumber.get(pageNumber);
+    if (pageIndex === undefined) return;
+    const page = copiedPages[pageIndex];
+    const { width: pageWidth } = page.getSize();
+    const clampedWidth = Math.max(10, Math.min(rect.width, pageWidth - rect.x - 2));
+    const textField = form.createTextField(uniqueFieldName(fieldKey));
+    // ORDRE IMPORTANT : pdf-lib exige que addToPage() soit appelé (avec la
+    // police) AVANT setFontSize()/setText() — sinon "No /DA (default
+    // appearance) entry found for field", vérifié en testant les deux
+    // ordres. addToPage() établit d'abord l'apparence par défaut de la case
+    // (avec notre police embarquée), setFontSize/setText la complètent
+    // ensuite.
+    textField.addToPage(page, {
+      x: rect.x,
+      y: rect.y,
+      width: clampedWidth,
+      height: Math.max(rect.height, fontSize * 1.3),
+      // Fond blanc : recouvre le pointillé/crochet déjà imprimé à cet
+      // endroit précis sur la vraie page — même principe que le rectangle
+      // blanc utilisé ailleurs avant d'écrire une valeur par-dessus.
+      backgroundColor: rgb(1, 1, 1),
+      borderWidth: 0,
+      textColor: rgb(0, 0, 0),
+      font,
+    });
+    textField.setFontSize(Math.max(6, Math.min(12, fontSize)));
+    if (value) textField.setText(compact(value, 4000));
+    createdFieldCount += 1;
+  }
+
+  for (const position of dedupedPositions) {
+    const pageNumber = Math.floor(position.page);
+    const pageIndex = pageIndexByNumber.get(pageNumber);
+    if (pageIndex === undefined) continue;
+    const { width, height } = sourcePdf.getPage(pageNumber - 1).getSize();
+    const rect = positionRect(width, height, position);
+    addTextField(pageNumber, position.field_key, rect, clampFontSize(position.font_size), values[position.field_key] ?? "");
+  }
+  for (const zone of redactions) {
+    const pageNumber = Math.floor(zone.page);
+    const pageIndex = pageIndexByNumber.get(pageNumber);
+    if (pageIndex === undefined) continue;
+    const { width, height } = sourcePdf.getPage(pageNumber - 1).getSize();
+    const rect = redactionRect(width, height, zone);
+    if (zone.field_key) {
+      addTextField(pageNumber, zone.field_key, rect, clampFontSize(undefined), values[zone.field_key] ?? "");
+    } else {
+      // Une instruction entre crochets SANS champ associé ("[cachet et
+      // signature de l'autorité]") n'a rien à faire remplir par le candidat :
+      // on efface juste le crochet avec un rectangle blanc, sans case
+      // cliquable inutile.
+      copiedPages[pageIndex].drawRectangle({ x: rect.x, y: rect.y, width: rect.width, height: rect.height, color: rgb(1, 1, 1) });
+    }
+  }
+
+  if (createdFieldCount > 0) {
+    try {
+      form.updateFieldAppearances(font);
+    } catch {
+      // Repli silencieux : les valeurs restent enregistrées dans le PDF
+      // (visibles dans l'application de l'utilisateur) même si la régénération
+      // de l'aperçu échoue exceptionnellement ici.
+    }
+  }
+  return Buffer.from(await result.save());
+}
+
+/**
  * Filet de sécurité général : quand l'IA n'a pas su repérer où écrire une
  * valeur sur la page DAO elle-même (aucune position calculée pour ce
  * formulaire), on ajoute une page récapitulative avec les vraies valeurs

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { PDFDocument } from "pdf-lib";
 import { createServerClient } from "@/lib/supabase/server";
 import { createPrintableSubmissionPdf } from "@/lib/submission/printable-pdf";
-import { appendDaoPagesToPdf, appendExternalFileAsPages, createFilledDaoTemplatePdf } from "@/lib/submission/dao-template-pdf";
+import { appendDaoPagesToPdf, appendExternalFileAsPages, createFilledDaoTemplatePdf, createFillableDaoTemplatePdf } from "@/lib/submission/dao-template-pdf";
 import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholders, locateTableCellPositions } from "@/lib/submission/locate-field-positions";
 import { findBestTitleMatch } from "@/lib/submission/title-match";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
@@ -596,6 +596,18 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     ...(detectedTemplate?.template_page_numbers ?? []),
     ...parsePageNumbersFromReference(detectedTemplate?.source_reference),
   ])].sort((left, right) => left - right);
+  // NOUVELLE méthode (vraie page + cases cliquables, voir
+  // createFillableDaoTemplatePdf) demandée par Maxime pour remplacer le texte
+  // recomposé à la main : réservée à une pièce avec un jeu de champs FIXE et
+  // une vraie page du DAO connue. Un tableau à nombre de lignes variable
+  // (personnel, litiges des 5 dernières années...) garde sa méthode actuelle
+  // (texte proprement recomposé, autant de lignes qu'ajoutées dans le
+  // dossier) : dupliquer une case cliquable un nombre de fois inconnu
+  // n'aurait pas de sens. Un plan ou un document purement graphique garde
+  // aussi sa méthode actuelle (simple copie de page, jamais de champ).
+  const hasRepeatableTable = (detectedTemplate?.template_tables ?? []).some((table) => table.repeatable);
+  const preferFillablePage = Boolean(detectedTemplate) && !isAppComputedTableItem && !isGraphicOnlyDocument
+    && !/\bplans?\b/i.test(title) && !hasRepeatableTable && detectedTemplateKnownPages.length > 0;
   // On a longtemps exigé ICI que l'IA ait elle-même classé la pièce en
   // template_origin "dao" — mais ce classement peut rester "none"/"generated"
   // même quand l'IA a par ailleurs bien donné une vraie page ou référence
@@ -616,6 +628,35 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     templateTextLength: detectedTemplate?.template_text?.length ?? 0,
     willUseGeneratedText: Boolean(!isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && (detectedTemplate?.template_text?.trim() || templateTables.length || formLines.length)),
   });
+  // Une fois qu'une pièce "vraie page + cases cliquables" a déjà été générée
+  // une première fois, on ne retélécharge plus JAMAIS le DAO entier pour la
+  // régénérer à l'identique à chaque nouveau clic sur "Ouvrir" — c'est
+  // exactement ce qui avait dépassé un quota Supabase auparavant (le DAO,
+  // parfois plusieurs Mo ou des centaines de pages, était redemandé à chaque
+  // ouverture). On sert directement le fichier déjà enregistré s'il existe.
+  // ?regenerate=1 reste possible pour forcer une régénération volontaire
+  // (ex. après une modification du profil entreprise).
+  if (preferFillablePage && query.get("regenerate") !== "1") {
+    try {
+      const cachedFileName = pdfStorageName(title, kind, workerIndex);
+      const cachedPath = `${member.organization_id}/submission/${id}/generated/${estimateId ?? "master"}/${cachedFileName}`;
+      const cached = await supabase.storage.from("btp-documents").download(cachedPath);
+      if (cached.data) {
+        const cachedBytes = new Uint8Array(await cached.data.arrayBuffer());
+        if (clientFetch) {
+          return NextResponse.json({ pdfBase64: Buffer.from(cachedBytes).toString("base64"), fileName: cachedFileName }, {
+            headers: { "Cache-Control": "no-store", "X-PDF-Storage-Status": "cached" },
+          });
+        }
+        return new NextResponse(Buffer.from(cachedBytes), { headers: { "Content-Type": "application/pdf", "Content-Disposition": `inline; filename="${cachedFileName}"`, "Cache-Control": "no-store", "X-PDF-Storage-Status": "cached" } });
+      }
+    } catch (error) {
+      // Un stockage temporairement inaccessible ne doit jamais bloquer
+      // l'ouverture du document : on continue simplement vers la génération
+      // normale ci-dessous, comme si rien n'était encore enregistré.
+      console.error("Cached fillable submission PDF lookup failed", error);
+    }
+  }
   // NOUVELLE méthode (demandée par Maxime après plusieurs bugs de pointillés
   // mal placés) : dès que l'IA a fourni template_text — le texte intégral du
   // modèle, avec {{cle}} à la place de chaque blanc — on écrit nous-mêmes ce
@@ -642,7 +683,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // texte utilise le même contenu de repli qu'avant (formLines), donc jamais
   // pire qu'aujourd'hui. On entre donc dans cette branche dès que l'UN OU
   // L'AUTRE est disponible, jamais seulement quand les deux le sont.
-  if (!isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && (detectedTemplate?.template_text?.trim() || templateTables.length)) {
+  if (!preferFillablePage && !isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && (detectedTemplate?.template_text?.trim() || templateTables.length)) {
     try {
       const templateTextRaw = detectedTemplate?.template_text?.trim() || undefined;
       // Garde-fou : une valeur que l'IA a bien identifiée dans fields, mais a
@@ -759,9 +800,24 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
               bracketZonesFound: redactions.length,
               tableCellTargets: tableCellTargets.length,
               tableCellPositionsFound: tablePositions.length,
-              rebuildAsText: !isGraphicOnlyDocument,
+              usingFillablePage: preferFillablePage,
             });
-            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
+            // preferFillablePage : vraie page + cases cliquables (voir plus
+            // haut et createFillableDaoTemplatePdf). Sur tout échec imprévu,
+            // on retombe sur l'ancienne méthode (texte reconstruit à la main)
+            // plutôt que de faire échouer toute la génération — jamais
+            // l'inverse : la nouvelle méthode reste toujours prioritaire tant
+            // qu'elle réussit.
+            if (preferFillablePage) {
+              try {
+                pdf = await createFillableDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], redactions, { ...templateValues, ...tableCellValues }, verifiedTitle);
+              } catch (fillableError) {
+                console.error("Fillable real-page submission PDF failed, falling back", fillableError);
+                pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
+              }
+            } else {
+              pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
+            }
           }
           // La page fabriquée ci-dessous ne sert plus qu'en dernier recours :
           // si toutes les cases du tableau ont été retrouvées et remplies

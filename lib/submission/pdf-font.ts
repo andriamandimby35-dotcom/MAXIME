@@ -21,11 +21,21 @@ function readFontFile(fileName: string): Uint8Array {
   return new Uint8Array(fs.readFileSync(path.join(process.cwd(), "public", "fonts", fileName)));
 }
 
-export async function embedUnicodeFonts(doc: PDFDocument): Promise<{ font: PDFFont; boldFont: PDFFont }> {
+export async function embedUnicodeFonts(doc: PDFDocument, options: { subset?: boolean } = {}): Promise<{ font: PDFFont; boldFont: PDFFont }> {
+  // subset=false (utilisé pour un PDF avec de VRAIES cases à remplir
+  // cliquables, voir createFillableDaoTemplatePdf) : une police "subset"
+  // n'embarque que les caractères déjà utilisés ailleurs dans CE document
+  // (résumé, valeurs préremplies...). Pour une case encore vide, l'utilisateur
+  // tape ensuite N'IMPORTE quel caractère dans SA PROPRE application PDF
+  // (accents, chiffres, symboles jamais utilisés ailleurs dans ce fichier) :
+  // embarquer la police complète évite qu'un caractère tapé plus tard
+  // s'affiche vide ou en tofu faute d'exister dans le sous-ensemble embarqué
+  // au moment de la génération.
   doc.registerFontkit(fontkit);
   cachedRegular ??= readFontFile("DejaVuSans.ttf");
   cachedBold ??= readFontFile("DejaVuSans-Bold.ttf");
-  const font = await doc.embedFont(cachedRegular, { subset: true });
-  const boldFont = await doc.embedFont(cachedBold, { subset: true });
+  const subset = options.subset ?? true;
+  const font = await doc.embedFont(cachedRegular, { subset });
+  const boldFont = await doc.embedFont(cachedBold, { subset });
   return { font, boldFont };
 }
