@@ -326,23 +326,21 @@ export async function POST(request: Request) {
       body: JSON.stringify({
         model: daoModel,
         store: false,
-        // Relevé de "low" à "medium" : avec un DAO qui contient de nombreuses
-        // pièces (parfois 20-30 submission_items) et des dizaines de règles à
-        // respecter en même temps pour chacune, un raisonnement trop concis
-        // (low) faisait bâcler les dernières pièces traitées — texte non
-        // recopié avec {{cle_du_champ}}, pièces distinctes fusionnées à tort
-        // en une seule, tableau d'une pièce recopié par erreur sur une autre.
-        // "medium" laisse au modèle un peu plus de raisonnement interne pour
-        // vérifier chaque pièce une par une avant de répondre, au prix d'un
-        // appel un peu plus long (toujours sous maxDuration=300s pour un
-        // modèle mini) et d'un coût légèrement supérieur.
-        reasoning: { effort: "medium" },
-        // Relevé de 48 000 à 64 000 : le raisonnement interne (reasoning)
-        // partage le même budget de jetons que la réponse JSON elle-même. En
-        // passant l'effort à "medium" ci-dessus, il fallait aussi agrandir ce
-        // budget pour ne pas réintroduire l'ancien bug ("La nouvelle analyse
-        // est incomplète") par manque de place pour la réponse une fois le
-        // raisonnement déduit.
+        // ESSAYÉ puis ANNULÉ : passer "low" à "medium" ici a fait dépasser la
+        // limite dure de 300 secondes de Vercel (offre Hobby, non modifiable)
+        // sur un DAO volumineux — "Vercel Runtime Timeout Error: Task timed
+        // out after 300 seconds", donc une analyse qui échoue complètement au
+        // lieu d'être simplement un peu bâclée. Un échec total est pire qu'un
+        // résultat perfectible : on reste donc sur "low", et on compte
+        // uniquement sur des règles plus explicites ci-dessous (ne jamais
+        // fusionner deux pièces, ne jamais mélanger le contenu entre pièces)
+        // pour réduire les erreurs sans allonger le temps de calcul.
+        reasoning: { effort: "low" },
+        // Gardé à 64 000 (au lieu de remettre 48 000) : ce chiffre est
+        // seulement un PLAFOND, jamais un objectif à atteindre — il ne
+        // ralentit pas l'appel, il protège juste contre l'ancien bug ("La
+        // nouvelle analyse est incomplète") si la réponse JSON s'avère plus
+        // longue que prévu sur un DAO avec beaucoup de pièces.
         max_output_tokens: 64_000,
         instructions: [
           "Tu analyses un DAO de travaux publics ou BTP à Madagascar.",
