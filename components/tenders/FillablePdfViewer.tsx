@@ -48,6 +48,14 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const pdfDocumentRef = useRef<import("pdfjs-dist").PDFDocumentProxy | null>(null);
+  // destroy() n'existe QUE sur la tâche de chargement (loadingTask), jamais
+  // sur le document résolu (PDFDocumentProxy) — vérifié directement dans le
+  // code source de pdf.js, pas seulement dans ses types. L'ancien code
+  // appelait pdfDocumentRef.current.destroy(), une méthode qui n'a jamais
+  // existé : ça levait une erreur synchrone à chaque nettoyage (fermeture de
+  // la fenêtre, changement de document, double-montage de React en
+  // développement), AVANT même d'atteindre le .catch() censé l'avaler.
+  const loadingTaskRef = useRef<import("pdfjs-dist").PDFDocumentLoadingTask | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -74,6 +82,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       // les effets en développement), pdf.js ne doit jamais voir un buffer
       // déjà consommé par le rendu précédent.
       const loadingTask = pdfjsLib.getDocument({ data: pdfBytes.slice() });
+      loadingTaskRef.current = loadingTask;
       const pdfDocument = await loadingTask.promise;
       if (cancelled) return;
       linkService.setDocument(pdfDocument);
@@ -104,7 +113,16 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         pageWrapper.style.boxShadow = "0 1px 4px rgba(0,0,0,.25)";
         container.appendChild(pageWrapper);
 
-        const pageView = new PDFPageView({
+        // Cast nécessaire : les types fournis par pdfjs-dist pour
+        // PDFPageViewOptions ne déclarent pas `linkService` au niveau
+        // supérieur (seulement dans layerProperties), alors que
+        // l'implémentation réelle de pdf.js le lit bien à cet endroit aussi
+        // (vérifié en lisant son code source, et confirmé par nos propres
+        // tests réels en navigateur) — un simple oubli dans ses déclarations
+        // de types, pas une vraie erreur de notre code. On garde la valeur
+        // telle quelle plutôt que de la retirer, pour ne rien changer au
+        // comportement déjà testé et fonctionnel.
+        const pageViewOptions = {
           container: pageWrapper,
           id: pageNumber,
           scale,
@@ -122,7 +140,8 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
             hasJSActionsPromise,
             linkService,
           },
-        });
+        };
+        const pageView = new PDFPageView(pageViewOptions as ConstructorParameters<typeof PDFPageView>[0]);
         pageView.setPdfPage(page);
         await pageView.draw();
       }
@@ -143,7 +162,11 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
 
     return () => {
       cancelled = true;
-      pdfDocumentRef.current?.destroy().catch(() => {});
+      // loadingTask.destroy() (jamais pdfDocument.destroy(), qui n'existe pas
+      // — voir le commentaire sur loadingTaskRef plus haut) libère aussi le
+      // pdfDocument résolu qu'il a produit.
+      loadingTaskRef.current?.destroy().catch(() => {});
+      loadingTaskRef.current = null;
       pdfDocumentRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
