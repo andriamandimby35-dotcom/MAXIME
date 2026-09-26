@@ -373,11 +373,16 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   const hasTransportWeightTable = Boolean(transportWeightTable?.columns?.length && transportWeightTable.rows?.length);
   const planRegister = analysis?.plan_register;
   const hasPlanRegister = Boolean(planRegister?.columns?.length && planRegister.rows?.length);
-  const extraLines = /planning/i.test(title) ? [
-    `Délai prévisionnel d'exécution : ${analysis?.execution_period_days ?? "à confirmer"} jours`,
-    executionPlan.length ? "Planning d'exécution conforme au DAO :" : "Séquence des travaux à confirmer :",
-    ...(executionPlan.length ? executionPlan.map((task, index) => `${index + 1}. ${task.title || "Tâche"}${task.duration_days != null ? ` — ${task.duration_days} jour(s)` : ""}${task.source_reference ? ` (${task.source_reference})` : ""}`) : workItems.slice(0, 12).map((item, index) => `${index + 1}. ${item.designation || "Poste à confirmer"}`)),
-  ] : /mat.riaux.*transport/i.test(title) ? [
+  // Le tableau affiché juste après (executionPlanningTable) reprend déjà
+  // chaque tâche, sa durée et sa référence : recopier la même liste ici en
+  // texte, au-dessus du tableau, faisait doublon avec un modèle DAO qui, lui,
+  // n'affiche jamais ce genre de résumé (juste un titre, une consigne entre
+  // crochets, puis le tableau — voir printable-pdf.ts, tableOnly). On ne
+  // garde donc plus qu'un avertissement, et seulement quand les données sont
+  // vraiment incomplètes (rien à afficher dans le tableau sans lui).
+  const extraLines = /planning/i.test(title) ? (
+    executionPlan.length || workItems.length ? [] : ["Le planning d'exécution n'a pas encore été extrait du DAO : relancez l'analyse pour le compléter."]
+  ) : /mat.riaux.*transport/i.test(title) ? [
     hasTransportWeightTable
       ? "Tableau des poids repris du DAO."
       : "Le tableau des poids du DAO doit être extrait lors de la prochaine analyse.",
@@ -462,6 +467,21 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     : generatedLetterLines;
   const isPersonnelRoster = /personnel|personnels|ressources humaines|equipe/i.test(title) && !isWorkerContract;
   const isMaterialRoster = /materiel|matériels|equipement|équipement|engins/i.test(title);
+  // RÈGLE GÉNÉRALE (déplacée ici, avant formLines, pour pouvoir aussi
+  // s'appliquer à formLines ci-dessous — voir son utilisation plus bas pour
+  // le détail des autres endroits où elle s'applique) pour toutes les pièces
+  // dont le contenu est un tableau que l'application construit ELLE-MÊME
+  // (planning d'exécution, poids du transport, registre des plans, listes de
+  // personnel/matériel) : ces pièces ne doivent JAMAIS être remplacées par
+  // une page du DAO trouvée par ressemblance de titre, ni recevoir de texte
+  // générique inventé par l'application (coordonnées de l'entreprise,
+  // invitation à signer, résumé du planning déjà visible dans le tableau...)
+  // — rien de tout cela n'existe sur la vraie page modèle du DAO pour ce
+  // genre de pièce (juste un titre, éventuellement une courte consigne entre
+  // crochets, puis le tableau) : seul le tableau, avec les vraies valeurs
+  // entrées ou calculées, sert de contenu.
+  const isAppComputedTableItem = isExecutionPlanning || isPersonnelRoster || isMaterialRoster
+    || /mat.riaux.*transport/i.test(title) || (/\bplans?\b/i.test(title) && /liste/i.test(title));
   // Une liste de personnel/matériel a des champs GÉNÉRIQUES ("Nom et
   // prénoms", "Diplôme"...) qui ne correspondent à AUCUNE valeur unique
   // enregistrée : les vraies valeurs sont dans le tableau (rosterTable,
@@ -472,21 +492,31 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // rien n'avait été rempli, alors que les vraies informations existaient
   // bien, juste ailleurs (dans le tableau affiché juste après). On n'écrit
   // donc plus ces lignes génériques pour ce genre de pièce du tout : seul le
-  // tableau, avec les vraies lignes entrées, sert de contenu.
-  const formLines = isPersonnelRoster || isMaterialRoster
+  // tableau, avec les vraies lignes entrées, sert de contenu. Auparavant
+  // cette règle ne couvrait que isPersonnelRoster/isMaterialRoster ; elle
+  // couvre maintenant TOUTE pièce isAppComputedTableItem (par exemple le
+  // planning d'exécution affichait encore "Document à lire, imprimer et
+  // signer...", "Lieu et date :", "Signature et cachet :" au-dessus de son
+  // tableau, alors que le modèle DAO lui-même n'affiche rien de tel).
+  const formLines = isAppComputedTableItem
     ? []
     : isSubmissionLetter
       ? submissionLetterLines
       : isWorkerContract
         ? generatedWorkerContractLines
         : kind === "form_to_complete"
-          // "FORMULAIRE À SIGNER OU PARAPHER" faisait doublon avec le vrai
-          // titre de la pièce (déjà affiché comme titre du document, voir
-          // buildGeneratedDocumentBlocks) et n'apportait rien d'utile — juste
-          // une mention générique en plus, signalée par Maxime comme confuse.
-          // On garde seulement les informations utiles (les valeurs remplies)
-          // suivies d'une invitation à signer, jamais un sous-titre générique.
-          ? [...filledFields, "", "Document à lire, imprimer et signer ou parapher selon les exigences du DAO.", "", "Lieu et date :", "", "Signature et cachet :"]
+          // "FORMULAIRE À SIGNER OU PARAPHER" faisait déjà doublon avec le
+          // vrai titre de la pièce (déjà affiché comme titre du document,
+          // voir buildGeneratedDocumentBlocks) et a été retiré pour cette
+          // raison. La phrase "Document à lire, imprimer et signer ou
+          // parapher selon les exigences du DAO." qui l'avait remplacée est
+          // retirée à son tour : Maxime l'a signalée comme une mention
+          // générique en trop, présente sur PRESQUE TOUS les PDF générés
+          // (n'importe quelle pièce form_to_complete) sans apporter
+          // d'information utile. On garde seulement les informations utiles
+          // (les valeurs remplies) suivies d'une invitation à signer, jamais
+          // de phrase générique.
+          ? [...filledFields, "", "Lieu et date :", "", "Signature et cachet :"]
           : [];
   const templateTables = (detectedTemplate?.template_tables ?? []).map((table, tableIndex) => {
     if (table.repeatable) {
@@ -536,23 +566,20 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       }];
     } catch { return []; }
   })();
-  // RÈGLE UNIQUE pour toutes les pièces dont le contenu est un tableau que
-  // l'application construit ELLE-MÊME (planning d'exécution, poids du
-  // transport, registre des plans, listes de personnel/matériel) : ces
-  // pièces ne doivent JAMAIS être remplacées par une page du DAO trouvée par
-  // ressemblance de titre. Ce rapprochement (findBestTitleMatch, plus bas)
-  // reste utile pour les VRAIES pièces sourcées du DAO, mais devient un piège
-  // pour celles-ci : leur titre contient souvent un mot ("plan", "personnel",
-  // "matériel"...) qui ressemble aussi à une tout autre pièce du DAO, et
-  // cette fausse ressemblance faisait alors ouvrir la mauvaise page à la
-  // place du tableau attendu (ex. "Liste des plans" affichait de vraies
-  // pages techniques d'un autre plan au lieu de son propre registre). Toutes
-  // ces pièces suivent maintenant CETTE SEULE règle prioritaire ; la
-  // recherche dans le DAO garde un rôle, mais seulement plus bas, comme
-  // pièce jointe complémentaire (le tableau original du DAO joint en
-  // preuve), jamais comme source principale du contenu affiché.
-  const isAppComputedTableItem = isExecutionPlanning || isPersonnelRoster || isMaterialRoster
-    || /mat.riaux.*transport/i.test(title) || (/\bplans?\b/i.test(title) && /liste/i.test(title));
+  // isAppComputedTableItem est déclarée plus haut (avec formLines) pour
+  // pouvoir aussi s'appliquer à formLines : ces pièces ne doivent JAMAIS être
+  // remplacées par une page du DAO trouvée par ressemblance de titre. Ce
+  // rapprochement (findBestTitleMatch, plus bas) reste utile pour les VRAIES
+  // pièces sourcées du DAO, mais devient un piège pour celles-ci : leur titre
+  // contient souvent un mot ("plan", "personnel", "matériel"...) qui
+  // ressemble aussi à une tout autre pièce du DAO, et cette fausse
+  // ressemblance faisait alors ouvrir la mauvaise page à la place du tableau
+  // attendu (ex. "Liste des plans" affichait de vraies pages techniques d'un
+  // autre plan au lieu de son propre registre). Toutes ces pièces suivent
+  // cette seule règle prioritaire ; la recherche dans le DAO garde un rôle,
+  // mais seulement plus bas, comme pièce jointe complémentaire (le tableau
+  // original du DAO joint en preuve), jamais comme source principale du
+  // contenu affiché.
   // Une pièce "document_to_provide" (ex. garantie bancaire, caution) n'a
   // souvent aucune case à remplir sur ses pages DAO — juste les pages elles-
   // mêmes à extraire pour signature/insertion. On ne doit donc pas exiger
