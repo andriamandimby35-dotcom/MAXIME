@@ -256,6 +256,10 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   // ce PDF précis (navigateur trop ancien, etc.) — jamais un écran bloqué
   // sans rien à cliquer.
   const [fillableViewerFailed, setFillableViewerFailed] = useState(false);
+  // Message technique réel de l'échec (affiché tel quel en solution de
+  // secours) : indispensable pour comprendre POURQUOI ça échoue sur un
+  // appareil précis au lieu de deviner à l'aveugle.
+  const [fillableViewerError, setFillableViewerError] = useState<string | null>(null);
   const fillablePdfViewerRef = useRef<FillablePdfViewerHandle>(null);
   // Date à laquelle l'utilisateur a cliqué sur "Valider la complétion" — null
   // si le dossier n'est pas (ou plus) marqué comme complet. Remplace
@@ -333,6 +337,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   // fichier.
   useEffect(() => {
     setFillableViewerFailed(false);
+    setFillableViewerError(null);
     if (actionsForIndex === null) { setFillableAuthHeaders(null); return; }
     let cancelled = false;
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -1370,11 +1375,12 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
           key={index}
           documentUrl={printableDocumentUrl(item)}
           authHeaders={fillableAuthHeaders}
-          onError={() => setFillableViewerFailed(true)}
+          onError={(message) => { setFillableViewerFailed(true); setFillableViewerError(message); console.error("FillablePdfViewer a échoué :", message); }}
         />}
         {!fillableViewerFailed && !fillableAuthHeaders && <p>Préparation…</p>}
         {fillableViewerFailed && <div className="simpleCardMuted">
           <p className="text-sm">L’affichage direct n’a pas fonctionné sur cet appareil/navigateur. Solution de secours : téléchargez le PDF, remplissez-le avec votre application PDF, puis renvoyez-le ici.</p>
+          {fillableViewerError && <p className="text-xs text-gray-500" style={{ fontFamily: "monospace", wordBreak: "break-word" }}>Détail technique (à envoyer à Maxime si besoin) : {fillableViewerError}</p>}
           <div className="buttonRow" style={{ marginBottom: 0, marginTop: 10 }}>
             <button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `edit:${item.title}`} onClick={() => void downloadPdfForEditingFallback(item)}><ButtonLabel loading={pendingAction === `edit:${item.title}`} label="Modifier (télécharger)" loadingLabel="Préparation…" /></button>
             <label className="tenderButton" style={{ cursor: saving ? "wait" : "pointer" }}>
