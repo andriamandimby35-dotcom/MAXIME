@@ -237,6 +237,14 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   const [today, setToday] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [viewingPdf, setViewingPdf] = useState<{ title: string; objectUrl: string } | null>(null);
+  // Nouvelle approche (vraie page + cases cliquables, voir printable-
+  // submission-document/route.ts) : chaque pièce n'affiche plus qu'un seul
+  // bouton rouge "Ouvrir", qui ouvre CETTE petite fenêtre avec Modifier/
+  // Enregistrer/Imprimer, au lieu de montrer directement les champs à
+  // remplir dans l'appli — l'utilisateur les remplit désormais lui-même
+  // dans sa propre application PDF. Un index d'item (pas l'item lui-même)
+  // pour toujours lire la version la plus à jour de items[] au moment du clic.
+  const [actionsForIndex, setActionsForIndex] = useState<number | null>(null);
   // Date à laquelle l'utilisateur a cliqué sur "Valider la complétion" — null
   // si le dossier n'est pas (ou plus) marqué comme complet. Remplace
   // l'ancienne génération d'un PDF fusionné : voir toggleDossierLock.
@@ -558,6 +566,80 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     if (estimateId) query.set("estimateId", estimateId);
     const documentUrl = `/api/tenders/${tenderId}/printable-submission-document?${query}`;
     void openPdfDirectly(`pdf:${item.title}:${workerIndex}`, item.title, documentUrl);
+  }
+
+  // Déclenche un VRAI téléchargement (fichier posé dans le dossier de
+  // téléchargements, comme n'importe quel PDF téléchargé) plutôt qu'un
+  // aperçu affiché dans la page : c'est ce fichier que l'utilisateur ouvre
+  // ensuite avec l'application PDF de son choix pour remplir les cases
+  // (voir createFillableDaoTemplatePdf côté serveur) directement dedans.
+  function triggerBrowserDownload(blob: Blob, fileName: string) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    // Laisse le temps au navigateur de démarrer le téléchargement avant de
+    // libérer l'URL mémoire — certains navigateurs annulent sinon le
+    // téléchargement à peine commencé.
+    window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+
+  async function downloadPdfForEditing(item: Item) {
+    const key = `edit:${item.title}`;
+    setPendingAction(key);
+    setMessage("Préparation du PDF à modifier…");
+    try {
+      const query = new URLSearchParams({ title: item.title, kind: item.kind, sourceReference: item.source_reference || "" });
+      if (estimateId) query.set("estimateId", estimateId);
+      const documentUrl = `/api/tenders/${tenderId}/printable-submission-document?${query}`;
+      const pdf = await fetchAndValidatePdf(documentUrl);
+      triggerBrowserDownload(pdf, `${normalize(item.title) || "document"}.pdf`);
+      setMessage("PDF téléchargé : ouvrez-le avec votre application PDF pour remplir les cases, puis revenez cliquer sur « Enregistrer ».");
+    } catch (error) {
+      setMessage(error instanceof Error ? toFriendlyPdfError(error.message) : "Le PDF n’a pas pu être préparé.");
+    } finally {
+      setPendingAction((current) => current === key ? null : current);
+    }
+  }
+
+  // Un seul emplacement de stockage PAR PIÈCE (upsert:true, chemin fixe basé
+  // sur le titre — pas d'UUID) : renvoyer une nouvelle version après une
+  // première correction remplace l'ancienne au lieu de s'accumuler, et
+  // rouvrir l'action plus tard retrouve toujours la bonne version.
+  function filledPdfStoragePath(item: Item) {
+    return `${organizationId}/submission/${tenderId}/filled/${estimateId ?? "master"}/${normalize(item.title) || "document"}.pdf`;
+  }
+
+  function hasFilledVersion(item: Item) {
+    return Boolean(item.form_data.__filledPdfPath);
+  }
+
+  async function uploadFilledPdf(index: number, item: Item, file: File) {
+    const key = `save:${index}`;
+    setPendingAction(key);
+    setMessage("Envoi du PDF rempli…");
+    try {
+      const path = filledPdfStoragePath(item);
+      const upload = await supabase.storage.from("btp-documents").upload(path, file, { upsert: true, contentType: "application/pdf" });
+      if (upload.error) { setMessage(`Envoi impossible : ${upload.error.message}`); return; }
+      // On repart de la version la plus à jour de cet item (items[index]),
+      // pas de "item" capturé avant l'envoi : une modification faite pendant
+      // l'upload ne doit jamais être perdue.
+      const current = items[index];
+      if (!current) return;
+      updateItem(index, {
+        status: "ready",
+        form_data: { ...current.form_data, __filledPdfPath: path, __filledPdfName: file.name, __readyAt: new Date().toISOString() },
+      });
+      setMessage("PDF rempli enregistré. Cette pièce est marquée comme prête.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Envoi du PDF impossible.");
+    } finally {
+      setPendingAction((current) => current === key ? null : current);
+    }
   }
 
   async function openReadingDocument() {
@@ -916,38 +998,34 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   function renderDossierCard(item: Item) {
     const index = items.indexOf(item);
     const ready = isItemReady(item);
-    const readyButton = <button type="button" className={`tenderButton ${ready ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => toggleReady(index)}>{ready ? "Prêt ✓ (annuler)" : "Marquer comme prêt"}</button>;
+    // Bouton unique (rouge) qui ouvre la petite fenêtre Modifier/Enregistrer/
+    // Imprimer, demandé par Maxime pour remplacer les différents boutons
+    // "Ouvrir le PDF..." dispersés dans chaque carte — voir le modal
+    // actionsForIndex plus bas, tout en bas du fichier.
+    const openButton = <button type="button" className="tenderButton acknowledgeButton" onClick={() => setActionsForIndex(index)}>Ouvrir{ready ? " ✓" : ""}</button>;
     if (isAiGenerated(item)) {
       return <article key={`${item.kind}-${normalize(item.title)}-${index}`} className="simpleCard">
         <strong>{item.title}</strong>
         <p className="mt-2 text-sm">{item.instructions || "Document établi à partir des postes, quantités et du délai du DAO."}</p>
         <div className="buttonRow" style={{ marginBottom: 0, marginTop: 12 }}>
-          <button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Ouvrir le PDF" /></button>
-          {readyButton}
+          {openButton}
         </div>
         {item.source_reference && <p className="mt-2 text-xs text-gray-500">Source : {item.source_reference}</p>}
       </article>;
     }
     if (item.kind === "document_to_provide") {
       const readingOnly = isReadingOnly(item);
-      const printable = needsPrintableVersion(item);
-      return <article key={`${item.kind}-${item.title}`} className="simpleCard">
-        {readingOnly || printable
-          ? <strong>{item.title}</strong>
-          : <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}><strong>{item.title}</strong>{readyButton}</div>}
+      return <article key={`${item.kind}-${item.title}-${index}`} className="simpleCard">
+        <strong>{item.title}</strong>
         <p className="mt-2 text-sm">{item.instructions}</p>
-        {(readingOnly || printable) && <div className="buttonRow" style={{ marginBottom: 0, marginTop: 12 }}>
-          {/* Quand la pièce a de vraies pages DAO connues (printable), le
-              bouton "à imprimer" extrait déjà exactement ce texte : proposer
-              en plus "à lire" n'ouvrirait alors que le DAO entier depuis le
-              début, sans aucun intérêt de plus. Ce bouton de lecture ne sert
-              donc que de repli quand on n'a AUCUNE page précise repérée. */}
-          {readingOnly && !printable && <button type="button" className="tenderButton" disabled={!daoUrl || pendingAction === "read"} onClick={() => void openReadingDocument()}><ButtonLabel loading={pendingAction === "read"} label="Ouvrir le document à lire" /></button>}
-          {printable && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Ouvrir le document à imprimer" /></button>}
-          {readingOnly
-            ? <button type="button" className={`tenderButton ${ready ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => toggleAcknowledged(index)}>{ready ? "Lecture confirmée ✓ (annuler)" : "Prendre connaissance"}</button>
-            : readyButton}
-        </div>}
+        <div className="buttonRow" style={{ marginBottom: 0, marginTop: 12 }}>
+          {/* La lecture directe (sans passer par la fenêtre Modifier/
+              Enregistrer) ne reste utile que pour une pièce "à lire"
+              (charte, politique de fraude...) sans page DAO précise
+              repérée : le PDF à imprimer, lui, extrait déjà ce texte. */}
+          {readingOnly && !needsPrintableVersion(item) && <button type="button" className="tenderButton" disabled={!daoUrl || pendingAction === "read"} onClick={() => void openReadingDocument()}><ButtonLabel loading={pendingAction === "read"} label="Ouvrir le document à lire" /></button>}
+          {openButton}
+        </div>
         {item.source_reference && <p className="mt-1 text-xs text-gray-500">Source : {item.source_reference}</p>}
       </article>;
     }
@@ -960,14 +1038,14 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     const roster = personnel || material ? rosterFor(item, rosterKey) : workerContract ? personnelRoster : [];
     const missingFields = (personnel || material || workerContract) ? [] : item.fields.filter((field) => !resolvedFieldValue(item, field).trim());
     const formState = ready ? "Prêt ✓" : (personnel || material || workerContract) && !roster.length ? "Ajoutez au moins une ligne" : missingFields.length ? "Informations à compléter" : "Prêt à imprimer et signer";
-    return <article key={`${item.kind}-${item.title}`} className="simpleCard">
+    return <article key={`${item.kind}-${item.title}-${index}`} className="simpleCard">
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}><strong>{workerContract ? "Contrat individuel de travail — un PDF par personnel" : item.title}</strong><span style={{ fontSize: ".9rem", fontWeight: 700, color: ready ? "#15803d" : "#b45309" }}>{formState}</span></div>
       <p className="mt-2 text-sm">{item.instructions}</p>
       {!ready && <>
+        {/* Les champs à remplir un par un ont disparu : depuis « Ouvrir » ->
+            « Modifier », Maxime remplit désormais les cases directement dans
+            son application PDF, puis les renvoie avec « Enregistrer ». */}
         {!personnel && !material && !workerContract && item.fields.length > 0 && missingFields.length === 0 && <p className="mt-3 rounded-md bg-green-50 p-3 text-sm font-medium text-green-800">Les informations de ce formulaire sont déjà préremplies depuis le profil de l’entreprise.</p>}
-        {!personnel && !material && !workerContract && item.fields.map((field) => <label key={field.key} className="mt-3 grid gap-1 text-sm font-semibold">{field.label}{field.required ? " *" : ""}
-          <input value={resolvedFieldValue(item, field)} placeholder={field.description || "Information à compléter"} onChange={(event) => updateItem(index, { form_data: { ...item.form_data, [field.key]: event.target.value } })} />
-        </label>)}
         {!personnel && !material && !workerContract && (item.template_tables ?? []).map((table, tableIndex) => {
           if (!table.repeatable) return null;
           const rows = tableRowsFor(item, tableIndex);
@@ -1010,9 +1088,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
         {!item.fields.length && !personnel && !material && !workerContract && <p className="mt-3 text-sm text-amber-700">Aucune valeur n’a été identifiée à préremplir. Le PDF à imprimer reprend néanmoins le document demandé et doit être vérifié avant signature.</p>}
       </>}
       <div className="buttonRow" style={{ marginBottom: 0, marginTop: 12 }}>
-        {(needsPrintableVersion(item) || personnel || material) && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Ouvrir le PDF à imprimer" /></button>}
-        {ready && <button type="button" className="tenderButton" onClick={() => toggleReady(index)}>Modifier</button>}
-        {readyButton}
+        {openButton}
       </div>
       {item.source_reference && <p className="mt-2 text-xs text-gray-500">Source : {item.source_reference}</p>}
     </article>;
@@ -1169,5 +1245,41 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     </div>
     <iframe ref={pdfIframeRef} title={viewingPdf.title} src={`${viewingPdf.objectUrl}#toolbar=0&navpanes=0`} style={{ flex: "1 1 auto", minHeight: 0, width: "100%", border: "1px solid #e1ece4", borderRadius: "10px" }} />
   </div></div>, document.body)}
+  {/* La fenêtre Modifier/Enregistrer/Imprimer ouverte par le bouton rouge
+      "Ouvrir" de chaque pièce (voir openButton dans renderDossierCard) :
+      Modifier télécharge le PDF pour que Maxime le remplisse lui-même dans
+      son application PDF, Enregistrer renvoie ensuite le fichier rempli. */}
+  {actionsForIndex !== null && items[actionsForIndex] && typeof document !== "undefined" && createPortal((() => {
+    const index = actionsForIndex;
+    const item = items[index];
+    const ready = isItemReady(item);
+    const personnel = isPersonnelList(item);
+    const material = isMaterialList(item) && !personnel;
+    const showPrint = needsPrintableVersion(item) || personnel || material;
+    const filledName = typeof item.form_data.__filledPdfName === "string" ? item.form_data.__filledPdfName : null;
+    // Une pièce "à lire" (charte, politique de fraude...) garde son propre
+    // libellé "Prendre connaissance" au lieu de "Marquer comme prêt", et
+    // marque en plus __acknowledgedAt (voir toggleAcknowledged) — même bouton
+    // rouge/vert, juste un texte différent pour rester clair pour Maxime.
+    const readingOnly = item.kind === "document_to_provide" && isReadingOnly(item);
+    return <div className="modalBackdrop" onClick={() => setActionsForIndex(null)}><div className="modal" onClick={(event) => event.stopPropagation()}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 10 }}>
+        <h2 style={{ margin: 0, fontWeight: 800, fontSize: "1.125rem", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</h2>
+        <button type="button" className="tenderButton" onClick={() => setActionsForIndex(null)}>Fermer</button>
+      </div>
+      <p className="text-sm text-gray-600">{hasFilledVersion(item) ? `Version remplie déjà enregistrée : ${filledName || "document.pdf"}` : "Aucune version remplie enregistrée pour l’instant."}</p>
+      <div className="buttonRow" style={{ marginTop: 14, marginBottom: 0 }}>
+        <button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `edit:${item.title}`} onClick={() => void downloadPdfForEditing(item)}><ButtonLabel loading={pendingAction === `edit:${item.title}`} label="Modifier" loadingLabel="Préparation…" /></button>
+        <label className="tenderButton" style={{ cursor: pendingAction === `save:${index}` ? "wait" : "pointer" }}>
+          {pendingAction === `save:${index}` ? <ButtonLabel loading label="" loadingLabel="Envoi…" /> : "Enregistrer"}
+          <input style={{ display: "none" }} type="file" accept="application/pdf" disabled={pendingAction === `save:${index}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadFilledPdf(index, item, file); event.target.value = ""; }} />
+        </label>
+        {showPrint && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Imprimer" /></button>}
+      </div>
+      <div className="buttonRow" style={{ marginTop: 10, marginBottom: 0 }}>
+        <button type="button" className={`tenderButton ${ready ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => (readingOnly ? toggleAcknowledged(index) : toggleReady(index))}>{readingOnly ? (ready ? "Pris connaissance ✓ (annuler)" : "Prendre connaissance") : (ready ? "Prêt ✓ (annuler)" : "Marquer comme prêt")}</button>
+      </div>
+    </div></div>;
+  })(), document.body)}
   </>;
 }
