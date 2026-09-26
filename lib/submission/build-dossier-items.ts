@@ -234,12 +234,35 @@ export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDete
     if (next) return next.sequence - 0.5;
     return null;
   };
+  // RÈGLE GÉNÉRALE (pour tout DAO, pas seulement celui qui a révélé ce
+  // problème) : un intitulé d'IA ("Lettre de soumission") et sa ligne dans
+  // le sommaire officiel du DAO ("Le modèle de soumission et d'engagement")
+  // partagent souvent SEULEMENT un mot ("soumission"), ce qui reste sous le
+  // seuil strict 0.6 utilisé par ailleurs pour la déduplication — la pièce
+  // se retrouvait alors reléguée tout en bas sous "Autres pièces" alors
+  // qu'elle est bien présente et bien identifiée. On tente donc TROIS
+  // méthodes dans l'ordre, chacune ne servant que si la précédente échoue :
+  // 1) rapprochement de titre STRICT (fiable, le même seuil qu'ailleurs) ;
+  // 2) rapprochement par PAGE RÉELLE (voir interpolatedSequenceForPage plus
+  // haut) quand la page de la pièce et celle d'au moins une ligne du
+  // sommaire sont toutes les deux connues ; 3) en tout dernier recours,
+  // rapprochement de titre TOLÉRANT (seuil très abaissé, un seul mot-clé
+  // partagé suffit) — utilisé UNIQUEMENT ici pour ordonner l'affichage,
+  // jamais pour fusionner un doublon générique/IA ailleurs (qui reste au
+  // seuil strict), donc un rapprochement imprécis ne coûte au pire qu'un
+  // classement légèrement décalé au sein de la bonne grande partie du DAO —
+  // jamais une pièce qui disparaît ou qui se fait fusionner à tort.
   const checklistSequence = (item: DetectedItem) => {
     if (!orderableChecklist.length) return null;
-    const match = findBestTitleMatch(item.title, orderableChecklist);
-    if (match) return match.sequence;
+    const strictMatch = findBestTitleMatch(item.title, orderableChecklist);
+    if (strictMatch) return strictMatch.sequence;
     const page = firstKnownPage(item as TemplateDetectedItem);
-    return page === Number.POSITIVE_INFINITY ? null : interpolatedSequenceForPage(page);
+    if (page !== Number.POSITIVE_INFINITY) {
+      const byPage = interpolatedSequenceForPage(page);
+      if (byPage !== null) return byPage;
+    }
+    const looseMatch = findBestTitleMatch(item.title, orderableChecklist, 0.34);
+    return looseMatch ? looseMatch.sequence : null;
   };
   const aiChecklistSequences = new Set(
     aiItems
