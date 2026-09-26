@@ -25,10 +25,16 @@ function tokenizeTemplateParagraph(paragraph: string, templateValues: Record<str
 }
 
 function pushPlain(runs: TextRun[], text: string) {
-  // Filet de sécurité : template_text ne devrait normalement plus contenir de
-  // pointillés/tirets bruts (l'IA les remplace par {{cle}}), mais on nettoie
-  // quand même un résidu éventuel plutôt que de l'imprimer tel quel.
+  // Filet de sécurité (constaté sur un vrai DAO : "{{delai_execution_jours}}"
+  // affiché tel quel dans le PDF) : une clé que l'IA a écrite dans
+  // template_text mais qui ne correspond à AUCUNE valeur connue de
+  // l'application (orthographe différente de celle utilisée dans fields,
+  // espace ou accent glissé dans la clé...) ne doit jamais s'afficher sous sa
+  // forme brute "{{...}}" — un tel repère raté est traité exactement comme un
+  // blanc sans valeur : supprimé, jamais montré au candidat. Même filet que
+  // replaceTemplateFields dans printable-submission-document/route.ts.
   const cleaned = text
+    .replace(/\{\{[^{}]{1,80}\}\}/g, "")
     .replace(/(?:\.[ \t]?){4,}\.?/g, " ")
     .replace(/\.{4,}/g, " ")
     .replace(/…{2,}/g, " ")
@@ -38,11 +44,25 @@ function pushPlain(runs: TextRun[], text: string) {
   if (cleaned.trim() || cleaned.includes(" ")) runs.push({ text: cleaned });
 }
 
-// Un paragraphe du DAO est séparé du suivant par une ligne vide dans
-// template_text (l'IA reproduit la numérotation d'origine "1.", "2.", "3."
-// À L'INTÉRIEUR de chaque paragraphe, pas besoin de la recréer nous-mêmes).
+// Un paragraphe du DAO est normalement séparé du suivant par une ligne vide
+// dans template_text (l'IA reproduit la numérotation d'origine "1.", "2.",
+// "3." À L'INTÉRIEUR de chaque paragraphe). Mais l'IA n'ajoute pas toujours
+// cette ligne vide (constaté : toute la lettre fondue en un seul bloc, sans
+// aucune séparation entre "1." et "2.") : on détecte donc AUSSI, en secours,
+// le début d'un nouveau paragraphe numéroté ("2. Dans le cas...") même
+// collé au texte précédent, pour ne jamais fondre deux paragraphes en un
+// seul pavé de texte illisible.
+function splitIntoParagraphs(templateText: string): string[] {
+  const normalized = templateText.replace(/\r\n/g, "\n");
+  return normalized
+    .split(/\n[ \t]*\n/)
+    .flatMap((chunk) => chunk.split(/(?=(?:^|\n)[ \t]*\d{1,2}\.\s)/))
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+}
+
 export function buildParagraphBlocksFromTemplateText(templateText: string, templateValues: Record<string, string>): DocumentBlock[] {
-  const paragraphs = templateText.split(/\n\s*\n/).map((paragraph) => paragraph.trim()).filter(Boolean);
+  const paragraphs = splitIntoParagraphs(templateText);
   const blocks: DocumentBlock[] = [];
   paragraphs.forEach((paragraph, index) => {
     const runs = tokenizeTemplateParagraph(paragraph.replace(/\s*\n\s*/g, " "), templateValues);

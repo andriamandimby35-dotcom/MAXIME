@@ -74,7 +74,18 @@ function clampFontSize(size: number | undefined) {
 // soustraction en trop à CET endroit précis, pour tous les documents.
 function positionRect(width: number, height: number, position: FillPosition): Rect {
   const fontSize = clampFontSize(position.font_size);
-  const coverHeight = fontSize * 1.5;
+  // 1.5x la taille de police dépassait souvent l'espacement RÉEL entre deux
+  // lignes d'un DAO à simple interligne (repéré sur un vrai DAO : ~1.27x la
+  // taille de police entre deux lignes, soit MOINS que 1.5x) — cette zone,
+  // pourtant censée ne couvrir QUE le pointillé de sa propre ligne, débordait
+  // alors sur la ligne du DESSUS et pouvait y trouver un autre pointillé
+  // (parfois un simple trait décoratif du DAO, sans rapport avec ce champ) :
+  // drawReconstructedItem l'effaçait et y écrivait la valeur par erreur, sur
+  // la mauvaise ligne, pendant que la VRAIE ligne gardait son pointillé
+  // effacé mais sans aucune valeur écrite à la place. 1.1x reste largement
+  // suffisant pour couvrir un pointillé (qui ne dépasse jamais beaucoup la
+  // ligne de base) sans jamais atteindre la ligne voisine.
+  const coverHeight = fontSize * 1.1;
   const available = Math.max(10, width * Math.max(1, Math.min(90, position.width_percent)) / 100);
   const x = width * Math.max(0, Math.min(100, position.x_percent)) / 100;
   const y = height - (height * Math.max(0, Math.min(100, position.y_percent)) / 100);
@@ -121,12 +132,15 @@ function charIndexAtWidth(text: string, fontSize: number, font: PDFFont, targetW
 //   recevoir une vraie valeur à la place (filledZones) : sans valeur connue,
 //   il reste affiché tel quel, pour qu'on puisse encore le compléter à la
 //   main sur le document imprimé.
+type FillZone = Rect & { field_key: string; value: string };
+
 function drawReconstructedItem(
   page: PDFPage,
   item: { str?: string; transform?: number[]; width?: number },
   font: PDFFont,
-  filledZones: Rect[],
+  filledZones: FillZone[],
   redactionZones: Rect[],
+  drawnFieldKeys: Set<string>,
 ) {
   const text = item.str ?? "";
   if (!text.trim()) return;
@@ -154,6 +168,21 @@ function drawReconstructedItem(
   const itemBox: Rect = { x, y: y - fontSize * 0.3, width: itemWidth, height: fontSize * 1.3 };
 
   const removedRanges: Array<[number, number]> = [];
+  // La valeur d'un champ "embedded"/"blank-item" (un pointillé repéré DANS ou
+  // COMME un item de texte, voir locate-field-positions.ts) est maintenant
+  // écrite ICI MÊME, exactement là où le pointillé vient d'être effacé —
+  // jamais plus via une position/taille recalculée séparément (x_percent...)
+  // plus bas dans createFilledDaoTemplatePdf. Avant ce correctif, les deux
+  // calculs (ici pour effacer, là-bas pour écrire) utilisaient déjà la même
+  // police mais PAS la même taille : ICI la taille est celle RÉELLEMENT
+  // utilisée pour cet item après réduction éventuelle (voir fontSize plus
+  // haut), alors que la position/taille calculée séparément ignorait cette
+  // réduction — repéré sur un vrai DAO : la valeur "150" (délai d'exécution)
+  // atterrissait décalée, empiétant sur le mot "Jours" juste après, alors que
+  // le pointillé lui-même était pourtant effacé au bon endroit. Réutiliser
+  // ICI la géométrie déjà calculée pour l'effacement élimine ce décalage à la
+  // racine, au lieu de faire confiance à un second calcul indépendant.
+  const valuesToDraw: Array<{ x: number; text: string; maxWidth: number }> = [];
   if (itemWidth > 0) {
     for (const zone of redactionZones) {
       if (!rectsOverlap(zone, itemBox)) continue;
@@ -163,13 +192,25 @@ function drawReconstructedItem(
       removedRanges.push([charIndexAtWidth(text, fontSize, font, startWidth), charIndexAtWidth(text, fontSize, font, endWidth)]);
     }
   }
-  const blankPattern = /[.\-_·•∙]{2,}/g;
+  const blankPattern = /[.\-_·•∙\u2026]{2,}/g;
   let match: RegExpExecArray | null;
   while ((match = blankPattern.exec(text))) {
     const startWidth = estimatedWidth(text.slice(0, match.index), fontSize, undefined, font);
     const endWidth = estimatedWidth(text.slice(0, match.index + match[0].length), fontSize, undefined, font);
     const segmentBox: Rect = { x: x + startWidth, y: y - fontSize * 0.3, width: endWidth - startWidth, height: fontSize * 1.3 };
-    if (filledZones.some((zone) => rectsOverlap(zone, segmentBox))) removedRanges.push([match.index, match.index + match[0].length]);
+    const matchedZone = filledZones.find((zone) => rectsOverlap(zone, segmentBox));
+    if (!matchedZone) continue;
+    removedRanges.push([match.index, match.index + match[0].length]);
+    // Un champ trouvé par PLUSIEURS items (une zone large qui chevauche deux
+    // bouts de texte voisins) ne doit être écrit qu'UNE SEULE fois — jamais
+    // une deuxième fois sur un autre item qui chevauche la même zone.
+    if (drawnFieldKeys.has(matchedZone.field_key)) continue;
+    drawnFieldKeys.add(matchedZone.field_key);
+    // La largeur disponible reste celle, généreuse, de la zone calculée par
+    // locateFieldPositions (au moins 15% de la page) plutôt que la largeur
+    // brute du pointillé d'origine (parfois minuscule) — pour qu'une valeur
+    // plus longue que le pointillé garde de la place, comme avant.
+    valuesToDraw.push({ x: x + startWidth, text: matchedZone.value, maxWidth: Math.max(endWidth - startWidth, matchedZone.width) });
   }
   if (!removedRanges.length) {
     page.drawText(sanitizeForPdf(text), { x, y, size: fontSize, font, color: rgb(0, 0, 0) });
@@ -199,6 +240,13 @@ function drawReconstructedItem(
     const slice = text.slice(cursor);
     const offsetX = estimatedWidth(text.slice(0, cursor), fontSize, undefined, font);
     if (slice.trim()) page.drawText(sanitizeForPdf(slice), { x: x + offsetX, y, size: fontSize, font, color: rgb(0, 0, 0) });
+  }
+  // Écrites en dernier, à la même taille (fontSize) que le reste de CET item
+  // — jamais une taille recalculée ailleurs — pour ne jamais rejouer le
+  // décalage décrit plus haut.
+  for (const value of valuesToDraw) {
+    const maxChars = Math.max(4, Math.floor(value.maxWidth / (fontSize * 0.55)));
+    page.drawText(compact(value.text, maxChars), { x: value.x, y, size: fontSize, font, color: rgb(0, 0, 0) });
   }
 }
 
@@ -306,17 +354,26 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
     const pagePositions = dedupedPositions.filter((position) => Math.floor(position.page) === pageNumber);
     // Un pointillé n'est effacé de la reconstruction QUE s'il va vraiment
     // recevoir une valeur (voir drawReconstructedItem) : un champ retrouvé
-    // mais sans valeur connue garde ses pointillés d'origine intacts.
-    const pageFilledRects = pagePositions
+    // mais sans valeur connue garde ses pointillés d'origine intacts. Chaque
+    // zone porte maintenant SA PROPRE valeur (field_key + value) : c'est
+    // drawReconstructedItem qui écrit directement la valeur au bon endroit
+    // pendant l'effacement, plutôt qu'un second calcul de position séparé.
+    const pageFilledZones = pagePositions
       .filter((position) => values[position.field_key]?.trim())
-      .map((position) => positionRect(sourcePageSize.width, sourcePageSize.height, position));
+      .map((position) => ({ ...positionRect(sourcePageSize.width, sourcePageSize.height, position), field_key: position.field_key, value: values[position.field_key].trim() }));
+    // Rempli au fil de la reconstruction ci-dessous : les champs déjà écrits
+    // directement dans leur pointillé d'origine (voir drawReconstructedItem)
+    // ne doivent plus être réécrits une seconde fois par la boucle
+    // "pagePositions" plus bas — celle-ci ne sert plus qu'aux champs SANS
+    // aucun pointillé trouvé (blank_kind "inline-after-label"/"below-line").
+    const drawnFieldKeys = new Set<string>();
 
     if (pdfJsDoc) {
       try {
         const pdfJsPage = await pdfJsDoc.getPage(pageNumber);
         const content = await pdfJsPage.getTextContent();
         const items = (content.items as Array<{ str?: string; transform?: number[]; width?: number }>).filter((item) => (item.str ?? "").trim().length > 0 && item.transform);
-        for (const item of items) drawReconstructedItem(page, item, font, pageFilledRects, pageRedactionRects);
+        for (const item of items) drawReconstructedItem(page, item, font, pageFilledZones, pageRedactionRects, drawnFieldKeys);
       } catch {
         // Page illisible pour pdf.js : elle reste vide plutôt que de faire
         // échouer tout le document généré — n'arrive presque jamais en
@@ -341,10 +398,13 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
       const textY = rect.y + rect.height - fontSize * 1.05;
       page.drawText(compact(value, maxChars), { x: rect.x + 1, y: textY, size: fontSize, font, color: rgb(0, 0, 0) });
     }
-    // Champ simple (un pointillé à côté d'un libellé, ou juste après lui,
-    // ou une case de tableau) : son pointillé a déjà disparu ci-dessus
-    // (pageFilledRects), la valeur prend directement sa place.
+    // Champ SANS aucun pointillé trouvé sur la page (blank_kind
+    // "inline-after-label"/"below-line" : la valeur est ajoutée après le
+    // libellé ou sur la ligne du dessous, faute de repère précis à effacer).
+    // Un champ "embedded"/"blank-item" a déjà été écrit directement dans son
+    // pointillé ci-dessus (drawnFieldKeys) : ne plus le réécrire ici.
     for (const position of pagePositions) {
+      if (drawnFieldKeys.has(position.field_key)) continue;
       const value = values[position.field_key]?.trim();
       if (!value) continue;
       const fontSize = clampFontSize(position.font_size);

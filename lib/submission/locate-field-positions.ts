@@ -94,6 +94,43 @@ function fontSizeOfItem(item: TextItem | undefined): number | undefined {
   return Math.hypot(transform[2] ?? 0, transform[3] ?? 0) || undefined;
 }
 
+// Reproduit EXACTEMENT le calcul de taille de police que drawReconstructedItem
+// (dao-template-pdf.ts) applique avant de redessiner CE MÊME item : d'abord
+// FONT_SIZE_SAFETY (police DejaVu Sans plus "grasse" que l'original, voir
+// dao-template-pdf.ts), PUIS une réduction supplémentaire si le texte de
+// l'item, à cette taille, est plus LARGE que sa place d'origine sur le DAO
+// (une ligne trop longue pour tenir, très courant sur un DAO scanné/converti).
+// Sans ce second calcul ICI, un blanc caché AU MILIEU d'un tel item long
+// (voir embeddedBlank plus bas) était repéré à la position qu'il aurait eue
+// avec la taille de police D'ORIGINE (plus grande), alors que
+// drawReconstructedItem redessine ensuite TOUT le texte autour à une taille
+// RÉDUITE — un écart de plusieurs dizaines de points. Repéré sur un vrai DAO
+// ("... dans un délai de ....................... Jours calculés à") : la
+// valeur "150" atterrissait bien plus à droite que le blanc réellement
+// effacé, en plein milieu du mot "Jours" plutôt que juste avant. Toute
+// modification de FONT_SIZE_SAFETY ou de cette formule dans
+// dao-template-pdf.ts doit être répétée ICI à l'identique.
+const FONT_SIZE_SAFETY = 0.9;
+function effectiveFontSize(item: TextItem | undefined, font: PDFFont): number | undefined {
+  const raw = fontSizeOfItem(item);
+  if (raw === undefined) return undefined;
+  let fontSize = Math.max(4, raw * FONT_SIZE_SAFETY);
+  const realWidth = item?.width;
+  if (realWidth && realWidth > 0) {
+    const text = item?.str ?? "";
+    let naturalWidth: number;
+    try {
+      naturalWidth = font.widthOfTextAtSize(text, fontSize);
+    } catch {
+      naturalWidth = fontSize * text.length * 0.55;
+    }
+    if (naturalWidth > realWidth) {
+      fontSize *= Math.max(0.6, realWidth / naturalWidth);
+    }
+  }
+  return fontSize;
+}
+
 // pdf.js ne renseigne pas toujours item.width pour un item de texte (constaté
 // sur un vrai DAO, notamment pour une ligne de tableau sans pointillé comme
 // "Numéro d'immatriculation Fiscale :") : le laisser tomber à 0 dans ce cas
@@ -171,13 +208,6 @@ const RELAXED_MATCH_SCORE = 0.5;
 // futur cas similaire, il suffit d'ajouter une entrée ici plutôt que de
 // changer la logique de recherche.
 const FIELD_LABEL_SYNONYMS: Record<string, string[]> = {
-  // "représentant" (de l'entreprise) désigne, dans le vocabulaire juridique
-  // d'un DAO, exactement la même personne que "le signataire" : celle
-  // habilitée à engager l'entreprise par sa signature ("... représentant
-  // ................ (nom et adresse de l'Entrepreneur)" est la même case que
-  // "Nom du signataire"). Terme standard d'un DAO à l'autre, jamais propre à
-  // un dossier précis.
-  signataire: ["soussigne", "representant"],
   lieu: ["fait"],
   raison: ["denomination"],
   sociale: ["societe", "entreprise", "entrepreneur", "candidat"],
@@ -186,6 +216,32 @@ const FIELD_LABEL_SYNONYMS: Record<string, string[]> = {
   reference: ["numero"],
   delai: ["duree"],
   duree: ["delai"],
+};
+
+// Repéré sur un vrai DAO ("Lettre de soumission") : la phrase-type "Je
+// soussigné .......... (nom, prénom, fonction) représentant ..........
+// (nom et adresse de l'Entrepreneur)" contient DEUX blancs bien DISTINCTS —
+// celui juste après "soussigné" attend le NOM du signataire, celui juste
+// après "représentant" attend le nom (et l'adresse) de l'ENTREPRISE qu'il
+// représente. Confondre les deux (comme "représentant" listé plus haut comme
+// synonyme de "signataire") faisait atterrir le nom de la personne dans la
+// case de l'entreprise, et inversement. "représentant" n'est donc PLUS un
+// synonyme de "signataire" : c'est le mot de liaison de la phrase, pas
+// l'indice du bon blanc pour ce champ.
+//
+// Ces deux mots ("soussigné" pour "signataire", "l'Entrepreneur" pour
+// "raison sociale") sont des équivalences juridiques quasi-EXACTES d'un DAO à
+// l'autre (pas une simple coïncidence de vocabulaire comme "offre"/"objet"
+// plus haut, qui elles ne comptent que pour 40% - voir le commentaire dans
+// findBestLine) : elles comptent ici pour un mot RETROUVÉ TEL QUEL (100%),
+// pour pouvoir dépasser le seuil même quand AUCUN des deux mots du libellé
+// ("nom"/"signataire", "raison"/"sociale") n'apparaît littéralement nulle
+// part sur la page - un simple 40% par mot ne suffisait jamais à franchir le
+// seuil dans ce cas (repéré sur un vrai DAO : les deux champs restaient
+// bloqués à un score de 0.2-0.4, sous le seuil minimal de 0.5).
+const FIELD_LABEL_STRONG_SYNONYMS: Record<string, string[]> = {
+  signataire: ["soussigne"],
+  raison: ["entrepreneur"],
 };
 
 // Un DAO répète très souvent le même mot-clé sur PLUSIEURS lignes différentes
@@ -203,7 +259,7 @@ const FIELD_LABEL_SYNONYMS: Record<string, string[]> = {
 // à effacer n'importe quel grand espace blanc (voir la réponse donnée à
 // Maxime : un texte justifié a souvent des espaces plus larges que la
 // normale entre certains mots, qui ressembleraient à tort à un blanc).
-const BLANK_RUN_PATTERN = /[.\-_·•∙]{2,}/;
+const BLANK_RUN_PATTERN = /[.\-_·•∙\u2026]{2,}/;
 function lineHasBlank(text: string): boolean {
   return BLANK_RUN_PATTERN.test(text);
 }
@@ -219,7 +275,21 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
   // avoir retiré "de/du/des...", déjà filtrés par significantWords) est
   // TOUJOURS ce mot principal, quel que soit le DAO — jamais un mot à retenir
   // à la main pour ce document précis.
-  const headKeyword = keywords[0];
+  // EXCEPTION : "nom" (ex. "Nom du signataire") n'est JAMAIS un bon mot
+  // principal, quel que soit le DAO — quasiment CHAQUE blanc d'un DAO porte
+  // une annotation générique du genre "(nom, prénom, fonction)" ou "(nom et
+  // adresse de l'Entrepreneur)", donc littéralement n'importe quelle case
+  // contient le mot "nom" par pure coïncidence de formulaire, sans rapport
+  // avec LA case cherchée. Contrairement à "Appel d'Offres" (repéré et écarté
+  // par le calcul de fréquence plus bas), "nom" n'apparaît pas forcément assez
+  // souvent SUR CETTE PAGE précise pour être pénalisé par ce calcul, alors
+  // qu'il reste tout aussi peu fiable comme mot principal — repéré sur un vrai
+  // DAO : "Nom du signataire" s'accrochait à la case "(nom, prénom, fonction)
+  // représentant ..." (l'entreprise représentée) au lieu de la case "Je
+  // soussigné ..." (la vraie case du signataire, juste au-dessus), simplement
+  // parce que "nom" y figurait aussi en toutes lettres. Le second mot du
+  // libellé ("signataire") est TOUJOURS le vrai mot distinctif dans ce cas.
+  const headKeyword = keywords.find((word) => word !== "nom") ?? keywords[0];
   // Un mot très répété sur la page (le nom du DAO lui-même : "Appel
   // d'Offres" revient très souvent, dans quasiment tous les DAO) est un bien
   // moins bon indice qu'un mot rare et spécifique ("récépissé", "soussigné")
@@ -302,6 +372,18 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
         if (isHead) headKeywordMatched = true;
         continue;
       }
+      // Voir FIELD_LABEL_STRONG_SYNONYMS plus haut : une équivalence
+      // juridique quasi-exacte ("soussigné" pour "signataire", "l'Entrepreneur"
+      // pour "raison sociale") compte comme un mot retrouvé TEL QUEL (100%),
+      // jamais seulement 40% comme un synonyme de vocabulaire administratif
+      // ordinaire — sans quoi un champ dont AUCUN des deux mots du libellé
+      // n'apparaît jamais littéralement sur la page reste bloqué sous le seuil
+      // minimal, quelle que soit la ligne.
+      if ((FIELD_LABEL_STRONG_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym))) {
+        weightedScore += 1 * factor;
+        if (isHead) headKeywordMatched = true;
+        continue;
+      }
       if ((FIELD_LABEL_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym))) {
         weightedScore += 0.4 * factor;
         if (isHead) headKeywordMatched = true;
@@ -315,11 +397,27 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
     if (score < minScore) continue;
     if (!headKeywordMatched) continue;
     const hasBlank = lineHasBlank(group.text);
+    const lineLength = group.text.trim().length;
     // À score STRICTEMENT meilleur, on change toujours de ligne comme avant.
     // À score ÉGAL, on ne change que si la nouvelle ligne a un blanc à
     // remplir et pas l'actuelle — jamais l'inverse, pour ne jamais remplacer
     // une ligne déjà retenue par une moins bonne à score identique.
-    if (score > bestScore || (score === bestScore && hasBlank && !bestHasBlank)) {
+    // À score ET blanc identiques (aucune des deux n'a de pointillé, ou les
+    // deux en ont un), on préfère la ligne la plus COURTE : un libellé de
+    // champ ("Signature du Soumissionnaire", "Lieu de signature :") est
+    // presque toujours une ligne courte, dédiée, alors qu'une longue phrase
+    // de paragraphe qui mentionne le même mot EN PASSANT ("...je m'engage à
+    // procéder à la signature du contrat. Au moment de la signature du
+    // contrat, je...") est un bien moins bon candidat, même si son score est
+    // identique — repéré sur un vrai DAO : le champ "Signature" (un seul mot,
+    // donc sans aucun garde-fou d'ambiguïté possible, voir "keywords.length
+    // <= 1" plus bas) atterrissait au milieu d'une phrase du DAO,
+    // interrompant la vraie phrase, au lieu de se placer juste à côté de la
+    // ligne "Signature du Soumissionnaire", bien plus courte et bien plus
+    // logique, simplement parce que cette phrase avait été rencontrée en
+    // premier sur la page.
+    const isShorterAtTie = score === bestScore && hasBlank === bestHasBlank && best !== null && lineLength < best.text.trim().length;
+    if (score > bestScore || (score === bestScore && hasBlank && !bestHasBlank) || isShorterAtTie) {
       bestScore = score;
       best = group;
       bestHasBlank = hasBlank;
@@ -350,7 +448,9 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
   // laquelle des deux est la bonne.
   const bestNormalized = normalize(best.text);
   const matchesWord = (normalizedLine: string, word: string) =>
-    normalizedLine.includes(word) || (FIELD_LABEL_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym));
+    normalizedLine.includes(word)
+    || (FIELD_LABEL_STRONG_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym))
+    || (FIELD_LABEL_SYNONYMS[word] ?? []).some((synonym) => normalizedLine.includes(synonym));
   const bestHasQualifierMatch = keywords.some((word) => word !== headKeyword && matchesWord(bestNormalized, word));
   if (!bestHasQualifierMatch) {
     const otherAmbiguousCandidate = lineGroups.some((group) => {
@@ -497,11 +597,11 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
           // Seuil à 2 (pas 4) : même raison que BLANK_RUN_PATTERN plus haut —
           // un blanc caché au milieu d'une phrase peut lui aussi être très
           // court (2-3 caractères) sur certains DAO.
-          const blankRunPattern = /[.\-_·•∙]{2,}/g;
+          const blankRunPattern = /[.\-_·•∙\u2026]{2,}/g;
           for (const item of bestLine.items) {
             const str = item.str ?? "";
             const itemX = item.transform?.[4] ?? 0;
-            const itemFontSize = fontSizeOfItem(item) ?? 10;
+            const itemFontSize = effectiveFontSize(item, widthFont) ?? 10;
             blankRunPattern.lastIndex = 0;
             let match: RegExpExecArray | null;
             while ((match = blankRunPattern.exec(str))) {
@@ -537,7 +637,7 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
               const trailingText = str.slice(match.index + match[0].length);
               const hardCap = trailingText.trim().length > 0 && !isBlankMarkerRun(trailingText);
               if (!embeddedBlank || startX < embeddedBlank.x) {
-                embeddedBlank = { x: startX, width: Math.max(10, endX - startX), fontSize: fontSizeOfItem(item), hardCap };
+                embeddedBlank = { x: startX, width: Math.max(10, endX - startX), fontSize: itemFontSize, hardCap };
               }
             }
           }
@@ -549,7 +649,7 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
         // chance sur certains DAO, mais pas sur un pointillé nettement plus
         // court ou plus long que ça.
         const chosenBlank = blankRunItem
-          ? { x: blankRunItem.transform?.[4] ?? rightmost + 4, width: Math.max(10, estimatedWidth(blankRunItem, widthFont)), fontSize: fontSizeOfItem(blankRunItem), hardCap: false }
+          ? { x: blankRunItem.transform?.[4] ?? rightmost + 4, width: Math.max(10, estimatedWidth(blankRunItem, widthFont)), fontSize: effectiveFontSize(blankRunItem, widthFont), hardCap: false }
           : embeddedBlank;
         // Largeur maximale que la zone à remplir peut atteindre sans jamais
         // empiéter sur le texte qui suit sur la même ligne : soit le texte
@@ -574,7 +674,7 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
         // ligne d'origine qu'une valeur qui efface le début d'une phrase du
         // DAO qui continue juste en dessous.
         const placeBelow = !chosenBlank && remainingWidth < pageData.width * 0.12
-          && !hasRealContentBelow(pageData.lineGroups, topY, fontSizeOfItem(bestLine.items[0]) ?? 10);
+          && !hasRealContentBelow(pageData.lineGroups, topY, effectiveFontSize(bestLine.items[0], widthFont) ?? 10);
         const x = chosenBlank ? chosenBlank.x : placeBelow ? (bestLine.items[0].transform?.[4] ?? 0) : rightmost + 4;
         const y = placeBelow ? topY - 14 : topY;
         results.push({
@@ -593,7 +693,7 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
           // La taille du pointillé remplacé (ou, à défaut, celle du libellé
           // lui-même) reflète la taille de police réellement utilisée à cet
           // endroit précis de la page — plus fiable qu'une taille fixe.
-          font_size: chosenBlank?.fontSize ?? fontSizeOfItem(bestLine.items[0]),
+          font_size: chosenBlank?.fontSize ?? effectiveFontSize(bestLine.items[0], widthFont),
           debug_matched_line: bestLine.text.trim().slice(0, 100),
           debug_blank_kind: blankRunItem ? "blank-item" : embeddedBlank ? "embedded" : placeBelow ? "below-line" : "inline-after-label",
         });
@@ -711,7 +811,7 @@ export async function locateBracketPlaceholders(pdfBytes: Uint8Array, candidateP
             let charStartX: number;
             let charEndX: number;
             try {
-              const itemFontSize = fontSizeOfItem(item) ?? 10;
+              const itemFontSize = effectiveFontSize(item, widthFont) ?? 10;
               charStartX = itemX + widthFont.widthOfTextAtSize(str.slice(0, localIndex), itemFontSize);
               charEndX = itemX + widthFont.widthOfTextAtSize(str.slice(0, localIndex + 1), itemFontSize);
             } catch {
@@ -895,7 +995,7 @@ export async function locateTableCellPositions(pdfBytes: Uint8Array, candidatePa
           width_percent: Math.max(10, Math.min(40, ((columnEnd - columnStart) / pageData.width) * 100 - 2)),
           // Taille du libellé de LIGNE ("Travaux", "Fournitures"...) : c'est
           // le texte le plus proche de la case remplie dans ce tableau.
-          font_size: fontSizeOfItem(rowLine.items[0]),
+          font_size: effectiveFontSize(rowLine.items[0], widthFont),
         });
         foundKeys.add(target.field_key);
       }

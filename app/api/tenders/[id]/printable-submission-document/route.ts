@@ -480,7 +480,13 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       : isWorkerContract
         ? generatedWorkerContractLines
         : kind === "form_to_complete"
-          ? ["FORMULAIRE À SIGNER OU PARAPHER", "", ...filledFields]
+          // "FORMULAIRE À SIGNER OU PARAPHER" faisait doublon avec le vrai
+          // titre de la pièce (déjà affiché comme titre du document, voir
+          // buildGeneratedDocumentBlocks) et n'apportait rien d'utile — juste
+          // une mention générique en plus, signalée par Maxime comme confuse.
+          // On garde seulement les informations utiles (les valeurs remplies)
+          // suivies d'une invitation à signer, jamais un sous-titre générique.
+          ? [...filledFields, "", "Document à lire, imprimer et signer ou parapher selon les exigences du DAO.", "", "Lieu et date :", "", "Signature et cachet :"]
           : [];
   const templateTables = (detectedTemplate?.template_tables ?? []).map((table, tableIndex) => {
     if (table.repeatable) {
@@ -581,7 +587,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     hasDocumentUrl: Boolean(tender.document_url),
     detectedTemplateKnownPages,
     templateTextLength: detectedTemplate?.template_text?.length ?? 0,
-    willUseGeneratedText: Boolean(!isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && (detectedTemplate?.template_text?.trim() || templateTables.length)),
+    willUseGeneratedText: Boolean(!isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && (detectedTemplate?.template_text?.trim() || templateTables.length || formLines.length)),
   });
   // NOUVELLE méthode (demandée par Maxime après plusieurs bugs de pointillés
   // mal placés) : dès que l'IA a fourni template_text — le texte intégral du
