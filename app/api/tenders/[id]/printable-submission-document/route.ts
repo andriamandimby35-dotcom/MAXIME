@@ -151,9 +151,24 @@ function buildExecutionPlanningTable(items: PlanningWorkItem[], executionDays: n
   };
 }
 
+// Chaque document g\u00e9n\u00e9r\u00e9 est enregistr\u00e9 dans Supabase Storage et RESERVI TEL
+// QUEL \u00e0 chaque nouvelle ouverture (voir plus bas, "cachedPath") \u2014 sans
+// jamais rev\u00e9rifier si la fa\u00e7on de le g\u00e9n\u00e9rer a chang\u00e9 depuis. Sans ce
+// num\u00e9ro dans le nom du fichier, un document d\u00e9j\u00e0 ouvert AVANT un changement
+// de m\u00e9thode (ex. l'ajout des vraies cases cliquables ci-dessous) restait
+// bloqu\u00e9 pour toujours sur son ancienne version, m\u00eame apr\u00e8s avoir corrig\u00e9 le
+// code \u2014 donnant l'impression \u00e0 tort qu'"une trace de l'ancien code" tra\u00eenait
+// quelque part, alors que le code lui-m\u00eame \u00e9tait bien \u00e0 jour. Augmenter ce
+// num\u00e9ro \u00e0 chaque changement important de g\u00e9n\u00e9ration fait que TOUS les
+// fichiers d\u00e9j\u00e0 enregistr\u00e9s sous l'ancien nom sont automatiquement ignor\u00e9s et
+// r\u00e9g\u00e9n\u00e9r\u00e9s avec la nouvelle m\u00e9thode, sans avoir \u00e0 aller les supprimer \u00e0 la
+// main dans Supabase, et sans avoir besoin de relancer une analyse du DAO
+// (qui ne sert \u00e0 rien ici : le souci vient du fichier PDF d\u00e9j\u00e0 g\u00e9n\u00e9r\u00e9, jamais
+// de l'analyse elle-m\u00eame).
+const GENERATED_PDF_VERSION = "v2";
 function pdfStorageName(title: string, kind: string, workerIndex: number) {
   const normalized = title.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 96) || "document";
-  return `${kind === "form_to_complete" ? "formulaire" : "piece"}-${normalized}-${workerIndex + 1}.pdf`;
+  return `${kind === "form_to_complete" ? "formulaire" : "piece"}-${normalized}-${workerIndex + 1}-${GENERATED_PDF_VERSION}.pdf`;
 }
 
 async function savedPdfResponse(supabase: Awaited<ReturnType<typeof createServerClient>>, pdf: Uint8Array, organizationId: string, tenderId: string, estimateId: string | null, title: string, kind: string, workerIndex: number, clientFetch = false) {
@@ -888,7 +903,27 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             locateFieldPositions(bytes, verifiedPages, fieldTargets),
             locateBracketPlaceholders(bytes, verifiedPages, fieldTargets),
           ]);
-          const pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, templateValues, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
+          // Même règle que la branche principale plus haut (preferFillablePage) :
+          // dès qu'on a une vraie page du DAO avec des positions repérées, on
+          // essaie D'ABORD les vraies cases cliquables, et on ne retombe sur le
+          // texte peint en dur que si ça échoue. Avant ce correctif, CETTE
+          // branche précise (page retrouvée par la référence donnée par le DAO
+          // lui-même plutôt que par le classement de l'IA) gardait TOUJOURS
+          // l'ancienne méthode, même pour un document par ailleurs éligible —
+          // exactement le genre de pièce que Maxime a signalée comme non
+          // modifiable malgré le nouveau lecteur PDF intégré.
+          const shouldPreferFillable = !isGraphicOnlyDocument && !/\bplans?\b/i.test(title);
+          let pdf: Buffer;
+          if (shouldPreferFillable) {
+            try {
+              pdf = await createFillableDaoTemplatePdf(bytes, verifiedPages, positions, redactions, templateValues, verifiedTitle);
+            } catch (fillableError) {
+              console.error("Fillable real-page submission PDF failed (source-reference branch), falling back", fillableError);
+              pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, templateValues, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
+            }
+          } else {
+            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, templateValues, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
+          }
           return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
         }
       } catch (error) {
@@ -912,7 +947,21 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
               locateFieldPositions(bytes, locatedPages, fieldTargets),
               locateBracketPlaceholders(bytes, locatedPages, fieldTargets),
             ]);
-            const pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, positions, templateValues, redactions, blindSearchResult.title, { rebuildAsText: !isGraphicOnlyDocument });
+            // Même correctif que la branche "référence du DAO" juste au-dessus :
+            // essayer d'abord les vraies cases cliquables avant de retomber sur
+            // le texte peint en dur.
+            const shouldPreferFillable = !isGraphicOnlyDocument && !/\bplans?\b/i.test(title);
+            let pdf: Buffer;
+            if (shouldPreferFillable) {
+              try {
+                pdf = await createFillableDaoTemplatePdf(bytes, locatedPages, positions, redactions, templateValues, blindSearchResult.title);
+              } catch (fillableError) {
+                console.error("Fillable real-page submission PDF failed (blind title search branch), falling back", fillableError);
+                pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, positions, templateValues, redactions, blindSearchResult.title, { rebuildAsText: !isGraphicOnlyDocument });
+              }
+            } else {
+              pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, positions, templateValues, redactions, blindSearchResult.title, { rebuildAsText: !isGraphicOnlyDocument });
+            }
             return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
           }
         }
