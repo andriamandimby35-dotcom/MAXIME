@@ -93,11 +93,35 @@ export const daoSourcedGenericTitles = [
 ];
 const daoSourcedGenericTitleSet = new Set(daoSourcedGenericTitles);
 
-export const standardSubmissionItems: DetectedItem[] = [
-  "Plan à parapher", "Certificats de bonnes fins ou procès-verbaux de réception", "Photocopie certifiée conforme de la carte d’immatriculation fiscale", "Photocopie certifiée conforme de la carte statistique", "Reçu d’achat du Dossier d’Appel d’Offres", "Attestation de disponibilité de liquidité ou de ligne de crédit", "Relevé d’identité bancaire", "CIN légalisée du signataire", "Certificat de résidence du signataire", "Pièces justificatives des matériels", "Calendrier cultural", "Code de conduite signé", "Cahier des clauses administratives particulières (CCAP) signé",
+// DEUX catégories bien différentes dans la liste de secours (demandé par
+// Maxime après avoir vu trop de cartes génériques "va le chercher toi-même"
+// pour des pièces que le DAO ne demande en fait pas du tout) :
+//
+// 1) companyStandardItems : des documents que L'ENTREPRISE possède déjà (CIN,
+//    NIF, STAT, registre du commerce, RIB, attestations bancaires,
+//    certificats...) — jamais un vrai modèle imprimé du DAO. Un dossier de
+//    soumission BTP à Madagascar les exige presque toujours en pratique,
+//    même quand le DAO précis ne les cite pas mot pour mot : on continue donc
+//    de toujours les proposer comme rappel, que l'IA les ait retrouvées ou
+//    non dans CE DAO.
+//
+// 2) daoFormStandardItems : de VRAIS formulaires/modèles qui doivent venir du
+//    DAO lui-même (garantie bancaire, pouvoir, litiges, planning...). Pour
+//    ceux-là, on n'affiche PLUS de carte générique quand l'IA ne les a pas
+//    retrouvés pour ce DAO précis (voir buildMasterDetectedItems plus bas) :
+//    si l'analyse (renforcée côté analyze-dao pour bien chercher dans tout le
+//    document, pas seulement dans le sommaire) ne trouve vraiment rien, la
+//    pièce n'apparaît pas du tout plutôt que d'encombrer le dossier d'une
+//    pièce que ce DAO ne demande simplement pas.
+export const companyStandardItems: DetectedItem[] = [
+  "Certificats de bonnes fins ou procès-verbaux de réception", "Photocopie certifiée conforme de la carte d’immatriculation fiscale", "Photocopie certifiée conforme de la carte statistique", "Registre du commerce (ou des métiers)", "Reçu d’achat du Dossier d’Appel d’Offres", "Attestation de disponibilité de liquidité ou de ligne de crédit", "Relevé d’identité bancaire", "CIN légalisée du signataire", "Certificat de résidence du signataire", "Pièces justificatives des matériels",
+].map((title) => ({ kind: "document_to_provide" as const, title, source_reference: "À confirmer dans le DAO", instructions: "Joignez le document signé ou certifié conforme demandé par le DAO.", required: true, fields: [] }));
+
+export const daoFormStandardItems: DetectedItem[] = [
+  "Plan à parapher", "Calendrier cultural", "Code de conduite signé", "Cahier des clauses administratives particulières (CCAP) signé",
 ].map((title) => ({ kind: "document_to_provide" as const, title, source_reference: "À confirmer dans le DAO", instructions: "Joignez le document signé ou certifié conforme demandé par le DAO.", required: true, fields: [], ...(daoSourcedGenericTitleSet.has(title) ? { likely_in_dao: true } : {}) }));
 
-standardSubmissionItems.push(
+daoFormStandardItems.push(
   { kind: "form_to_complete", title: "Lettre de soumission / acte d’engagement", source_reference: "À confirmer dans le DAO", instructions: "Complétez, imprimez, signez puis insérez la version signée.", required: true, fields: [{ key: "legal_name", label: "Entreprise soumissionnaire", required: true, description: "Raison sociale" }, { key: "representative_name", label: "Signataire", required: true, description: "Nom du signataire" }] },
   { kind: "form_to_complete", title: "Pouvoir du signataire", source_reference: "À confirmer dans le DAO", instructions: "Complétez le pouvoir puis joignez la version signée.", required: true, fields: [{ key: "representative_name", label: "Signataire", required: true, description: "Nom complet" }, { key: "representative_role", label: "Fonction", required: true, description: "Fonction du signataire" }] },
   { kind: "form_to_complete", title: "Fiches de renseignements du candidat A1 à A5", source_reference: "À confirmer dans le DAO", instructions: "Complétez les fiches avec les informations de l’entreprise, puis joignez-les.", required: true, fields: [{ key: "legal_name", label: "Raison sociale", required: true, description: "Entreprise" }, { key: "address", label: "Adresse", required: true, description: "Adresse complète" }, { key: "nif", label: "NIF", required: true, description: "NIF" }, { key: "stat", label: "STAT", required: true, description: "STAT" }] },
@@ -109,6 +133,11 @@ standardSubmissionItems.push(
   { kind: "form_to_complete", title: "Liste et poids des matériaux estimés à transporter", source_reference: "À confirmer dans le DAO", instructions: "Vérifiez les quantités déduites du devis puis joignez la liste validée.", required: true, fields: [] },
   { kind: "form_to_complete", title: "Liste des plans", source_reference: "À confirmer dans le DAO", instructions: "Liste générée par l’IA à partir des plans et annexes présents dans le DAO.", required: true, fields: [] },
 );
+
+// Conservé pour compatibilité (rien d'autre dans le projet ne l'importe
+// directement aujourd'hui, mais mieux vaut ne pas supprimer un export
+// public sans y être obligé) : la réunion des deux catégories ci-dessus.
+export const standardSubmissionItems: DetectedItem[] = [...companyStandardItems, ...daoFormStandardItems];
 
 const hasAppComputedContent = (title: string) => /planning.*ex.cution/i.test(title)
   || /mat.riaux.*transport/i.test(title) || /\bplans?\b/i.test(title) || /personnel/i.test(title);
@@ -167,7 +196,17 @@ export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDete
       .map((item) => checklistSequence(item))
       .filter((sequence): sequence is number => sequence !== null),
   );
-  const genericItemsWithoutRealMatch = standardSubmissionItems
+  // SEULEMENT companyStandardItems ici (jamais daoFormStandardItems) : c'est
+  // le changement demandé par Maxime après avoir vu trop de cartes
+  // génériques "va le chercher toi-même" pour des pièces que le DAO ne
+  // demande en fait pas du tout. Un vrai formulaire du DAO (garantie
+  // bancaire, pouvoir, litiges, planning...) que l'IA n'a pas retrouvé pour
+  // CE DAO précis ne doit plus jamais apparaître comme une carte de secours
+  // : soit l'IA l'a trouvé (aiItems, plus bas), soit ce DAO précis ne le
+  // demande simplement pas et la pièce n'apparaît pas du tout. Seuls les
+  // documents que l'entreprise possède déjà (CIN, NIF, STAT, RIB...)
+  // continuent d'apparaître systématiquement en rappel.
+  const genericItemsWithoutRealMatch = companyStandardItems
     .filter((item) => {
       if (findBestTitleMatch(item.title, aiItems)) return false;
       const sequence = checklistSequence(item);
