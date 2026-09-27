@@ -103,6 +103,19 @@ const MIN_FONT_SIZE_PT = 6;
 const MAX_FONT_SIZE_PT = 24;
 const FONT_SIZE_STEP_PT = 1;
 
+// Les 3 styles de police proposés (choix volontairement limité aux polices
+// "standard" de pdf-lib, déjà embarquées dans tout lecteur PDF — pas besoin
+// d'ajouter un fichier de police au projet). `cssFamily` sert à l'aperçu à
+// l'écran (dans le navigateur) ; `pdf`/`pdfBold` servent au moment
+// d'enregistrer, pour choisir la bonne police pdf-lib selon que "Gras" est
+// coché ou non pour cette case (voir getFilledPdfBytes).
+type FontFamilyKey = "helvetica" | "times" | "courier";
+const FONT_FAMILIES: Record<FontFamilyKey, { label: string; cssFamily: string; pdf: string; pdfBold: string }> = {
+  helvetica: { label: "Standard", cssFamily: "Helvetica, Arial, sans-serif", pdf: "Helvetica", pdfBold: "HelveticaBold" },
+  times: { label: "Classique (Times)", cssFamily: "'Times New Roman', Times, serif", pdf: "TimesRoman", pdfBold: "TimesRomanBold" },
+  courier: { label: "Machine à écrire", cssFamily: "'Courier New', Courier, monospace", pdf: "Courier", pdfBold: "CourierBold" },
+};
+
 type PdfPageProxy = import("pdfjs-dist").PDFPageProxy;
 type PageViewport = ReturnType<PdfPageProxy["getViewport"]>;
 type PDFPageViewCtor = typeof import("pdfjs-dist/legacy/web/pdf_viewer.mjs").PDFPageView;
@@ -131,6 +144,7 @@ type FieldOverride = {
   heightPercent: number;
   fontSizePt: number;
   bold: boolean;
+  fontFamily: FontFamilyKey;
   // Couleur du texte en hexadécimal ("#rrggbb"), le format que comprend
   // directement <input type="color">.
   color: string;
@@ -178,6 +192,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
   const [selectedFontSizePt, setSelectedFontSizePt] = useState(10);
   const [selectedBold, setSelectedBold] = useState(false);
   const [selectedColor, setSelectedColor] = useState("#000000");
+  const [selectedFontFamily, setSelectedFontFamily] = useState<FontFamilyKey>("helvetica");
   // Quand le clavier du téléphone est ouvert (pour taper dans une case),
   // Safari iOS réduit la zone visible SANS redimensionner la fenêtre : notre
   // barre d'outils "Ajuster"/"+ Ajouter une case", positionnée en bas de la
@@ -225,6 +240,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       heightPercent: parseFloat(section.style.height) || 3,
       fontSizePt: fontMatch ? parseFloat(fontMatch[1]) : 10,
       bold: false,
+      fontFamily: "helvetica",
       color: "#000000",
     };
     fieldOverridesRef.current.set(fieldName, created);
@@ -253,6 +269,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     setSelectedFontSizePt(override.fontSizePt);
     setSelectedBold(override.bold);
     setSelectedColor(override.color);
+    setSelectedFontFamily(override.fontFamily);
   }
 
   // Empêche Safari/iOS de proposer sa propre suggestion "Préremplir le
@@ -277,6 +294,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     input.style.fontSize = `calc(${override.fontSizePt}px * var(--total-scale-factor))`;
     input.style.fontWeight = override.bold ? "bold" : "normal";
     input.style.color = override.color;
+    input.style.fontFamily = FONT_FAMILIES[override.fontFamily].cssFamily;
   }
 
   function applyEditVisual(section: HTMLElement, input: HTMLInputElement, handle: HTMLElement | null, on: boolean) {
@@ -450,7 +468,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
 
     fieldOverridesRef.current.set(fieldName, {
       pageNumber: entry.pageNumber, leftPercent, topPercent, widthPercent, heightPercent, fontSizePt,
-      bold: false, color: "#000000",
+      bold: false, color: "#000000", fontFamily: "helvetica",
     });
     customFieldNamesRef.current.add(fieldName);
     attachFieldEditing(entry, section, input, fieldName);
@@ -553,6 +571,16 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     override.color = hex;
     applyOverride(found.section, found.input, override);
     setSelectedColor(hex);
+  }
+
+  function setSelectedFontFamilyValue(family: FontFamilyKey) {
+    if (!selectedField) return;
+    const found = findFieldElements(selectedField);
+    if (!found) return;
+    const override = ensureOverride(found.entry, found.section, found.input, selectedField);
+    override.fontFamily = family;
+    applyOverride(found.section, found.input, override);
+    setSelectedFontFamily(family);
   }
 
   useEffect(() => {
@@ -758,19 +786,26 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
         const doc = await PDFDocument.load(baseBytes);
         const form = doc.getForm();
-        // Une seule police "grasse" embarquée pour tout le PDF, réutilisée
-        // pour chaque case en gras (voir plus bas) — inutile d'en embarquer
-        // une par case.
-        let boldFont: Awaited<ReturnType<typeof doc.embedFont>> | null = null;
-        async function getBoldFont() {
-          if (!boldFont) boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
-          return boldFont;
+        // Une police pdf-lib embarquée par combinaison (style, gras) —
+        // réutilisée pour toutes les cases qui partagent la même combinaison,
+        // inutile d'en embarquer une par case.
+        const fontCache = new Map<string, Awaited<ReturnType<typeof doc.embedFont>>>();
+        async function getFont(family: FontFamilyKey, bold: boolean) {
+          const key = `${family}:${bold}`;
+          let font = fontCache.get(key);
+          if (!font) {
+            const standardFontName = bold ? FONT_FAMILIES[family].pdfBold : FONT_FAMILIES[family].pdf;
+            font = await doc.embedFont(StandardFonts[standardFontName as keyof typeof StandardFonts]);
+            fontCache.set(key, font);
+          }
+          return font;
         }
         // Convertit "#rrggbb" en 0..1 (rgb() de pdf-lib) pour l'écrire dans
         // la chaîne "DA" (apparence par défaut) de la case, au format PDF
         // "r g b rg" — vérifié par un vrai test d'aller-retour (écrire,
         // enregistrer, relire) avant d'écrire ce code : la couleur ET la
-        // police grasse ressortent bien telles quelles après enregistrement.
+        // police (gras, Times, machine à écrire...) ressortent bien telles
+        // quelles après enregistrement.
         function hexToRgbOperator(hex: string): string {
           const clean = hex.replace("#", "");
           const r = parseInt(clean.slice(0, 2), 16) / 255;
@@ -778,24 +813,24 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
           const b = parseInt(clean.slice(4, 6), 16) / 255;
           return `${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg`;
         }
-        // Applique couleur + gras à une case texte déjà positionnée/dont la
-        // taille de police est déjà posée (setFontSize doit être appelé
-        // AVANT, car il reconstruit une partie de la chaîne DA — voir
-        // PDFAcroField.setFontSize dans pdf-lib, qui garde heureusement tout
-        // ce qui suit "Tf", dont notre couleur, si on l'ajoute après).
-        async function applyColorAndBold(field: Awaited<ReturnType<typeof form.getTextField>>, override: FieldOverride) {
+        // Applique couleur + style de police + gras à une case texte déjà
+        // positionnée/dont la taille de police est déjà posée (setFontSize
+        // doit être appelé AVANT, car il reconstruit une partie de la chaîne
+        // DA — voir PDFAcroField.setFontSize dans pdf-lib, qui garde
+        // heureusement tout ce qui suit "Tf", dont notre couleur, si on
+        // l'ajoute après).
+        async function applyTextStyle(field: Awaited<ReturnType<typeof form.getTextField>>, override: FieldOverride) {
           const da = field.acroField.getDefaultAppearance() ?? "";
           const fontMatch = /\/(\S+)\s+([\d.]+)\s+Tf/.exec(da);
           const fontName = fontMatch ? fontMatch[1] : "Helv";
           const fontSize = fontMatch ? fontMatch[2] : String(Math.max(4, Math.round(override.fontSizePt)));
           field.acroField.setDefaultAppearance(`/${fontName} ${fontSize} Tf ${hexToRgbOperator(override.color)}`);
-          if (override.bold) {
-            // updateAppearances() dessine tout de suite l'aperçu avec la
-            // police grasse ET marque la case "propre" : le passage générique
-            // form.updateFieldAppearances() plus bas ne la retouchera donc
-            // pas avec une police normale par-dessus (vérifié).
-            field.updateAppearances(await getBoldFont());
-          }
+          // updateAppearances() dessine tout de suite l'aperçu avec LA police
+          // choisie (style + gras) ET marque la case "propre" : le passage
+          // générique form.updateFieldAppearances() plus bas ne la
+          // retouchera donc pas avec la police par défaut par-dessus
+          // (vérifié par un aller-retour enregistrer/relire).
+          field.updateAppearances(await getFont(override.fontFamily, override.bold));
         }
         for (const [fieldName, override] of fieldOverridesRef.current) {
           try {
@@ -819,12 +854,12 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
               });
               field.setFontSize(Math.max(4, Math.round(override.fontSizePt)));
               if (value) field.setText(value);
-              await applyColorAndBold(field, override);
+              await applyTextStyle(field, override);
             } else {
               const field = form.getTextField(fieldName);
               field.acroField.getWidgets().forEach((widget) => widget.setRectangle({ x: xPt, y: yPt, width: widthPt, height: heightPt }));
               field.setFontSize(Math.max(4, Math.round(override.fontSizePt)));
-              await applyColorAndBold(field, override);
+              await applyTextStyle(field, override);
             }
           } catch {
             // Une case qu'on ne retrouve plus (nom introuvable...) ne doit
@@ -902,6 +937,17 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         )}
         {editModeOn && selectedField && (
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, background: "rgba(255,255,255,.96)", borderRadius: 8, padding: 6, boxShadow: "0 1px 6px rgba(0,0,0,.3)" }}>
+            {/* Style de police (la police elle-même, pas sa taille) — 3 choix standards, suffisants pour ne pas ajouter de fichier de police au projet. */}
+            <select
+              value={selectedFontFamily}
+              onChange={(e) => setSelectedFontFamilyValue(e.target.value as FontFamilyKey)}
+              aria-label="Style de police"
+              style={{ height: 34, borderRadius: 6, border: "1px solid #d1d5db", background: "#fff", color: "#111", fontSize: 12, padding: "0 4px" }}
+            >
+              {(Object.keys(FONT_FAMILIES) as FontFamilyKey[]).map((key) => (
+                <option key={key} value={key}>{FONT_FAMILIES[key].label}</option>
+              ))}
+            </select>
             {/* Taille de police : en points PDF réels, séparée du zoom — zoomer/dézoomer l'écran ne change jamais ce nombre. */}
             <button type="button" onClick={() => adjustSelectedFontSize(-FONT_SIZE_STEP_PT)} style={zoomButtonStyle} aria-label="Police plus petite">A−</button>
             <span style={{ fontSize: 12, minWidth: 34, textAlign: "center", color: "#111" }}>{selectedFontSizePt}pt</span>
