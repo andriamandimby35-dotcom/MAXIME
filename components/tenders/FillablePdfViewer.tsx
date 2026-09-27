@@ -961,13 +961,15 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
             const fontSizePt = Math.max(4, Math.round(override.fontSizePt));
             // Une case trop basse pour la taille de police demandée se fait
             // "rétrécir" visuellement par pdf.js à la RÉOUVERTURE (même si
-            // la case DA garde bien la bonne taille), ce qui donnait
-            // l'impression que la taille choisie (11pt) ne se réappliquait
-            // pas tant qu'on ne la changeait pas puis remettait à la main —
-            // même filet de sécurité déjà utilisé côté serveur pour les
-            // nouvelles cases cliquables (voir addTextField dans
-            // dao-template-pdf.ts, "Math.max(rect.height, fontSize * 1.3)").
-            const heightPt = Math.max((override.heightPercent / 100) * pageHeight, fontSizePt * 1.3);
+            // la case DA garde bien la bonne taille) : pdf.js n'affiche
+            // JAMAIS plus grand que hauteur_case/1.35 (moins 2pt de bordure)
+            // — formule exacte relue dans son propre code source
+            // (_setTextStyle, LINE_FACTOR = 1.35) — donc SEULE une case
+            // d'au moins taille*1.35 + 2pt de haut garantit un réaffichage
+            // fidèle à la taille choisie. Le premier chiffre utilisé ici
+            // (fontSize * 1.3, sans le "+2") était trop juste et laissait
+            // encore rétrécir le texte à la réouverture.
+            const heightPt = Math.max((override.heightPercent / 100) * pageHeight, fontSizePt * 1.35 + 2);
             const xPt = (override.leftPercent / 100) * pageWidth;
             // top% est mesuré depuis le HAUT (convention CSS) ; /Rect PDF
             // mesure y depuis le BAS de la page — même conversion que
