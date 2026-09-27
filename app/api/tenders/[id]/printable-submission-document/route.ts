@@ -52,6 +52,53 @@ function pagesNotClaimedByOtherItems(
   return candidatePages.filter((page) => !claimedByOthers.has(page));
 }
 
+// Même souci que otherItemsClaimedPages/pagesNotClaimedByOtherItems
+// ci-dessus, mais pour le texte : quand l'IA fusionne par erreur plusieurs
+// pages titrées du DAO en UN SEUL submission_item (déjà constaté avec un
+// item "Modèles de fiches de renseignements A1 à A5" — malgré la consigne
+// explicite du prompt d'analyse de ne JAMAIS fusionner des pages ayant
+// chacune leur propre titre), le titre et la consigne d'un AUTRE document
+// du dossier ("Sécurité de soumission (garantie bancaire)", par exemple)
+// peuvent se retrouver mélangés dans le template_text/les champs de CET
+// item. otherItemsClaimedPages ne protège que la méthode "vraie page du
+// DAO copiée telle quelle" (elle compare des numéros de page) : ce
+// garde-fou-ci s'applique en plus au texte RESYNTHÉTISÉ (template_text,
+// champs restants) — les deux méthodes de génération doivent être
+// protégées, pas une seule. On ne fait confiance à AUCUN texte de cette
+// pièce s'il contient, mot pour mot, le titre COMPLET d'une AUTRE pièce du
+// même dossier (on exige un titre assez long pour éviter un faux positif
+// sur un mot isolé qui apparaîtrait par coïncidence dans une phrase
+// normale).
+const MIN_SIBLING_TITLE_LENGTH_FOR_BLEED_CHECK = 12;
+function siblingTitlesFor(items: Array<{ title?: string }>, ownTitle: string): string[] {
+  const ownNormalized = ownTitle.toLocaleLowerCase("fr-FR");
+  return items
+    .map((item) => item.title?.trim())
+    .filter((otherTitle): otherTitle is string => typeof otherTitle === "string"
+      && otherTitle.length >= MIN_SIBLING_TITLE_LENGTH_FOR_BLEED_CHECK
+      && otherTitle.toLocaleLowerCase("fr-FR") !== ownNormalized);
+}
+function containsOtherItemTitle(text: string, siblingTitles: string[]): boolean {
+  const normalizedText = normalizeIdentifier(text);
+  return siblingTitles.some((otherTitle) => normalizedText.includes(normalizeIdentifier(otherTitle)));
+}
+// Coupe le texte juste AVANT le titre d'une autre pièce plutôt que de tout
+// rejeter : le début du texte (celui qui appartient vraiment à cette pièce)
+// reste ainsi affiché normalement. Recherche insensible à la casse mais SANS
+// retirer les accents/la ponctuation (contrairement à normalizeIdentifier),
+// pour que la position trouvée corresponde exactement à un index valide dans
+// le texte d'ORIGINE (normalizeIdentifier changerait la longueur du texte en
+// retirant des caractères, décalant tous les index).
+function truncateBeforeOtherItemTitle(text: string, siblingTitles: string[]): string {
+  const lowerText = text.toLowerCase();
+  let earliestIndex = -1;
+  for (const otherTitle of siblingTitles) {
+    const index = lowerText.indexOf(otherTitle.toLowerCase());
+    if (index !== -1 && (earliestIndex === -1 || index < earliestIndex)) earliestIndex = index;
+  }
+  return earliestIndex === -1 ? text : text.slice(0, earliestIndex).trimEnd();
+}
+
 type TableForCellTargets = { columns: string[]; rows: string[][]; organization_column_indexes?: number[] };
 
 // Un tableau comme "Chiffre d'affaires" est un vrai quadrillage sur la page
@@ -166,7 +213,7 @@ function buildExecutionPlanningTable(items: PlanningWorkItem[], executionDays: n
 // main dans Supabase, et sans avoir besoin de relancer une analyse du DAO
 // (qui ne sert \u00e0 rien ici : le souci vient du fichier PDF d\u00e9j\u00e0 g\u00e9n\u00e9r\u00e9, jamais
 // de l'analyse elle-m\u00eame).
-const GENERATED_PDF_VERSION = "v5";
+const GENERATED_PDF_VERSION = "v6";
 function pdfStorageName(title: string, kind: string, workerIndex: number) {
   const normalized = title.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 96) || "document";
   return `${kind === "form_to_complete" ? "formulaire" : "piece"}-${normalized}-${workerIndex + 1}-${GENERATED_PDF_VERSION}.pdf`;
@@ -462,6 +509,18 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // stricte, sinon les vraies pages/le vrai modèle du DAO ne sont jamais
   // utilisés pour les pièces de la liste générique.
   const detectedTemplate = findBestTitleMatch(title, analysis?.submission_items ?? []);
+  // Garde-fou contre la fusion de plusieurs pages titrées en un seul
+  // submission_item par l'IA (voir containsOtherItemTitle/
+  // truncateBeforeOtherItemTitle plus haut, et la consigne correspondante
+  // dans analyze-dao/route.ts) : dès qu'on connaît detectedTemplate, on
+  // nettoie IMMÉDIATEMENT son template_text une seule fois ici, avant
+  // toute utilisation plus bas (lettre de soumission, texte resynthétisé,
+  // longueur pour le journal de débogage...) — tous ces usages profitent
+  // ainsi du même nettoyage, sans avoir à le refaire à chaque branche.
+  const siblingTitlesForThisItem = siblingTitlesFor(analysis?.submission_items ?? [], detectedTemplate?.title || title);
+  const cleanedTemplateText = detectedTemplate?.template_text?.trim()
+    ? truncateBeforeOtherItemTitle(detectedTemplate.template_text.trim(), siblingTitlesForThisItem)
+    : undefined;
   // Ces quelques pièces génériques (Plan à parapher, CCAP, Calendrier
   // cultural, Code de conduite) sont censées presque toujours faire partie
   // du DAO lui-même. Si, après TOUTES les méthodes de recherche ci-dessous
@@ -511,9 +570,9 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     "", "Signature de l’entreprise :", "", "Signature du travailleur :",
     ...(workerCinPath ? ["", "La copie de la CIN du travailleur est jointe en dernière(s) page(s) de ce document."] : []),
   ] : [];
-  const submissionLetterLines = detectedTemplate?.template_text?.trim()
+  const submissionLetterLines = cleanedTemplateText
     ? [
-      replaceTemplateFields(detectedTemplate.template_text),
+      replaceTemplateFields(cleanedTemplateText),
       // Le titre "Informations du formulaire :" n'a de sens que s'il y a au
       // moins une ligne en dessous — sinon il reste un titre suivi de rien,
       // ce qui a l'air d'un oubli plutôt que d'une absence volontaire.
@@ -696,8 +755,8 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     hasDetectedTemplate: Boolean(detectedTemplate),
     hasDocumentUrl: Boolean(tender.document_url),
     detectedTemplateKnownPages,
-    templateTextLength: detectedTemplate?.template_text?.length ?? 0,
-    willUseGeneratedText: Boolean(!isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && (detectedTemplate?.template_text?.trim() || templateTables.length || formLines.length)),
+    templateTextLength: cleanedTemplateText?.length ?? 0,
+    willUseGeneratedText: Boolean(!isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && (cleanedTemplateText || templateTables.length || formLines.length)),
   });
   // Une fois qu'une pièce "vraie page + cases cliquables" a déjà été générée
   // une première fois, on ne retélécharge plus JAMAIS le DAO entier pour la
@@ -754,9 +813,9 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // texte utilise le même contenu de repli qu'avant (formLines), donc jamais
   // pire qu'aujourd'hui. On entre donc dans cette branche dès que l'UN OU
   // L'AUTRE est disponible, jamais seulement quand les deux le sont.
-  if (!preferFillablePage && !isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && (detectedTemplate?.template_text?.trim() || templateTables.length)) {
+  if (!preferFillablePage && !isAppComputedTableItem && !isGraphicOnlyDocument && !/\bplans?\b/i.test(title) && (cleanedTemplateText || templateTables.length)) {
     try {
-      const templateTextRaw = detectedTemplate?.template_text?.trim() || undefined;
+      const templateTextRaw = cleanedTemplateText;
       // Garde-fou : une valeur que l'IA a bien identifiée dans fields, mais a
       // oublié d'insérer dans template_text lui-même, ne doit pas disparaître
       // silencieusement — elle s'affiche alors à part, sous forme "Libellé :
@@ -775,8 +834,18 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             // generated-document-blocks.ts), pas juste un texte figé.
             return value ? { label: field.label ?? field.key, value } : null;
           })
-          .filter((line): line is { label: string; value: string } => Boolean(line));
+          // Même garde-fou que pour template_text (voir cleanedTemplateText
+          // plus haut) : un champ "restant" dont le libellé OU la valeur est
+          // en fait le titre/la consigne d'une AUTRE pièce du dossier (l'IA a
+          // mélangé les deux pièces lors de l'analyse) ne doit jamais
+          // s'afficher ici — ni comme "Libellé :", ni comme valeur.
+          .filter((line): line is { label: string; value: string } => line !== null
+            && !containsOtherItemTitle(line.label, siblingTitlesForThisItem)
+            && !containsOtherItemTitle(line.value, siblingTitlesForThisItem));
       })() : undefined;
+      // Un tableau détecté par erreur pour une AUTRE pièce du dossier (même
+      // souci de fusion par l'IA) ne doit pas non plus apparaître ici.
+      const safeTemplateTables = templateTables.filter((table) => !containsOtherItemTitle(table.title, siblingTitlesForThisItem));
       const blocks = buildGeneratedDocumentBlocks({
         title: detectedTemplate?.title || title,
         templateText: templateTextRaw,
@@ -785,7 +854,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
         // le même texte de repli qu'avant (formLines) — seul le TABLEAU change
         // de méthode dans ce cas.
         fallbackParagraphs: !templateTextRaw ? formLines : undefined,
-        tables: templateTables.length ? templateTables : undefined,
+        tables: safeTemplateTables.length ? safeTemplateTables : undefined,
         leftoverFieldLines,
       });
       const pdf = await renderGeneratedDocumentPdf(blocks);
