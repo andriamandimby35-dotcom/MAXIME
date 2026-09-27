@@ -43,6 +43,12 @@ export type TemplateFillPosition = { page: number; field_key: string; x_percent:
 export type TemplateDetectedItem = DetectedItem & {
   prefilled_values?: Array<{ key: string; value: string }>;
   template_origin?: "dao" | "internet" | "generated" | "none";
+  template_source_url?: string;
+  // Texte complet du modèle avec {{cle_du_champ}} à la place de chaque blanc
+  // (voir le schéma dans analyze-dao/route.ts) — utilisé ici uniquement pour
+  // le répartir entre les segments après un découpage (voir
+  // splitMergedDaoItems plus bas).
+  template_text?: string;
   template_page_numbers?: number[];
   template_fill_positions?: TemplateFillPosition[];
   // Transmis tel quel jusqu'au dossier affiché côté client, uniquement pour
@@ -211,6 +217,41 @@ export async function splitMergedDaoItems<T extends TemplateDetectedItem>(items:
       tablesBySegment[placedIndex === -1 ? 0 : placedIndex].push(table);
     }
 
+    // Le texte complet du modèle (template_text) couvrait jusqu'ici TOUTE la
+    // pièce fusionnée à tort : sans le répartir lui aussi, chaque morceau
+    // séparé continuait de recevoir le texte des 5 fiches à la fois, d'où le
+    // mélange/débordement observé à l'impression (mots coupés, colonnes de
+    // tableau écrasées dans un paragraphe). On repère où le titre de CHAQUE
+    // segment apparaît dans ce texte (déjà écrit dans l'ordre du DAO), puis
+    // on découpe entre deux titres consécutifs — jamais de mot recherché en
+    // dur, seulement les titres déjà détectés page par page ci-dessus.
+    const templateText = item.template_text?.trim() ?? "";
+    const textBySegment: (string | undefined)[] = segments.map(() => undefined);
+    if (templateText) {
+      const lowerText = templateText.toLowerCase();
+      const found = segments
+        .map((segment, index) => ({ index, start: segment.title ? lowerText.indexOf(segment.title.toLowerCase()) : -1 }))
+        .filter((entry) => entry.start !== -1)
+        .sort((a, b) => a.start - b.start);
+      if (found.length) {
+        found.forEach((entry, orderIndex) => {
+          const nextStart = orderIndex + 1 < found.length ? found[orderIndex + 1].start : templateText.length;
+          textBySegment[entry.index] = templateText.slice(entry.start, nextStart).trim();
+        });
+        // Texte avant le tout premier titre retrouvé (souvent un en-tête
+        // commun aux 5 fiches, ex. "Nom ou raison sociale du candidat :")
+        // rattaché au premier segment plutôt que perdu.
+        const leadingText = templateText.slice(0, found[0].start).trim();
+        if (leadingText) textBySegment[0] = textBySegment[0] ? `${leadingText}\n\n${textBySegment[0]}` : leadingText;
+      } else {
+        // Aucun des titres détectés sur les vraies pages ne se retrouve mot
+        // pour mot dans template_text (formulation légèrement différente) :
+        // on garde tout le texte d'origine sur le premier segment plutôt que
+        // de le perdre ou de le deviner.
+        textBySegment[0] = templateText;
+      }
+    }
+
     segments.forEach((segment, index) => {
       result.push({
         ...item,
@@ -219,6 +260,7 @@ export async function splitMergedDaoItems<T extends TemplateDetectedItem>(items:
         source_reference: `Pages ${segment.pages.join(", ")}`,
         fields: fieldsBySegment[index],
         template_tables: tablesBySegment[index],
+        template_text: textBySegment[index],
       });
     });
   }
@@ -405,14 +447,32 @@ export function buildMasterDetectedItems(analysis: MasterAnalysis): TemplateDete
     .map((entry) => ({ ...entry.item, dossierSection: sectionTitleForSequence(entry.sequence) }));
 }
 
+// RÈGLE GÉNÉRALE (pour n'importe quel DAO, pas seulement celui qui a révélé
+// ce problème) : l'IA détecte parfois DEUX FOIS la même pièce avec un titre
+// presque identique, juste complété d'une précision entre parenthèses — par
+// exemple "A1 - Identification du candidat" ET "A1 - Identification du
+// candidat (version image A3 page 267-268)", quand le même formulaire existe
+// une fois en texte dans le DAO et une fois en photo/scan dans une annexe
+// plus loin. La déduplication par titre STRICTEMENT identique (juste en
+// dessous) ne les reconnaît jamais comme doublons puisque les titres
+// diffèrent. Une fois les espaces/ponctuations retirés par normalize(), le
+// titre le plus long commence alors EXACTEMENT par le titre le plus court :
+// ce test ne dépend d'aucun mot ni d'aucune pièce précis(e) (jamais "A1" ni
+// "version image" codés en dur), il repère uniquement une élaboration d'un
+// titre déjà connu. Le seuil minimal de longueur évite qu'un titre très
+// court (un sigle) ne déclenche ce rapprochement par accident.
+function isTitleVariant(normalizedA: string, normalizedB: string) {
+  const [shorter, longer] = normalizedA.length <= normalizedB.length ? [normalizedA, normalizedB] : [normalizedB, normalizedA];
+  return shorter.length >= 8 && longer.length > shorter.length && longer.startsWith(shorter);
+}
+
 // Reproduit exactement deduplicate() de SubmissionDossierManager.tsx : ajoute
-// le BDQE externe s'il manque, retire les doublons de titre, et calcule le
-// statut de départ + les valeurs déjà connues (prefilled_values). Utilisée
-// à la fois pour l'aperçu côté client ET pour l'enregistrement initial en
-// base lors d'une génération explicite, afin que les deux ne divergent
-// jamais.
+// le BDQE externe s'il manque, retire les doublons de titre (stricts ET
+// variantes, voir isTitleVariant ci-dessus), et calcule le statut de départ +
+// les valeurs déjà connues (prefilled_values). Utilisée à la fois pour
+// l'aperçu côté client ET pour l'enregistrement initial en base lors d'une
+// génération explicite, afin que les deux ne divergent jamais.
 export function buildDossierRecordsForInsert<T extends TemplateDetectedItem>(items: T[]) {
-  const known = new Set<string>();
   const candidates: TemplateDetectedItem[] = [...items];
   if (!candidates.some((item) => /bdqe|bordereau.*quantitatif|bordereau.*estimatif/i.test(item.title))) {
     candidates.push({
@@ -424,12 +484,20 @@ export function buildDossierRecordsForInsert<T extends TemplateDetectedItem>(ite
       fields: [],
     });
   }
-  return candidates.filter((item) => {
-    const key = `${item.kind}:${normalize(item.title)}`;
-    if (!item.title.trim() || known.has(key)) return false;
-    known.add(key);
-    return true;
-  }).map((item) => ({
+  const kept: TemplateDetectedItem[] = [];
+  for (const item of candidates) {
+    if (!item.title.trim()) continue;
+    const key = normalize(item.title);
+    const exactIndex = kept.findIndex((existing) => existing.kind === item.kind && normalize(existing.title) === key);
+    if (exactIndex !== -1) continue;
+    const variantIndex = kept.findIndex((existing) => existing.kind === item.kind && isTitleVariant(normalize(existing.title), key));
+    if (variantIndex !== -1) {
+      if (key.length < normalize(kept[variantIndex].title).length) kept[variantIndex] = item;
+      continue;
+    }
+    kept.push(item);
+  }
+  return kept.map((item) => ({
     ...item,
     status: (item.kind === "form_to_complete" ? "needs_information" : "missing") as "missing" | "needs_information",
     form_data: Object.fromEntries((item.prefilled_values ?? []).filter((value) => value.key && value.value).map((value) => [value.key, value.value])),

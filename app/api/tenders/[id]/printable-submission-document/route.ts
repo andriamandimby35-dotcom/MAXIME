@@ -7,7 +7,7 @@ import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholde
 import { findBestTitleMatch } from "@/lib/submission/title-match";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
 import { trimToRelevantStart, extractRelevantPageRange, locateTitleInFullDocument } from "@/lib/submission/trim-to-relevant-pages";
-import { daoSourcedGenericTitles } from "@/lib/submission/build-dossier-items";
+import { daoSourcedGenericTitles, splitMergedDaoItems, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
 import { renderGeneratedDocumentPdf } from "@/lib/submission/generated-document-pdf";
 import { buildGeneratedDocumentBlocks } from "@/lib/submission/generated-document-blocks";
 import { resolveKnownFieldValue, normalizeIdentifier, isGuaranteeBankIdentityTitle } from "@/lib/submission/resolve-known-field-value";
@@ -417,15 +417,34 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     templateValues.montant_estime = `${estimatedAmount.toLocaleString("fr-FR")} Ar`;
     templateValues.montant_du_marche = `${estimatedAmount.toLocaleString("fr-FR")} Ar`;
   }
-  const analysis = tender.ai_analysis as {
+  let analysis = tender.ai_analysis as {
     execution_period_days?: number;
     execution_plan?: Array<{ title?: string; duration_days?: number | null; sequence?: number; source_reference?: string }>;
     transport_weight_table?: { title?: string; columns?: string[]; rows?: string[][]; total_label?: string; total_weight?: string; source_reference?: string };
     plan_register?: { title?: string; columns?: string[]; rows?: string[][]; total_label?: string; total_count?: string; source_reference?: string; page_numbers?: number[] };
     worksite_location?: string;
     work_items?: Array<PlanningWorkItem>;
-    submission_items?: Array<{ title?: string; template_origin?: "dao" | "internet" | "generated" | "none"; template_source_url?: string; template_text?: string; template_page_numbers?: number[]; template_fill_positions?: Array<{ page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number }>; template_tables?: Array<{ title: string; columns: string[]; rows: string[][]; organization_column_indexes?: number[]; repeatable?: boolean }>; source_reference?: string; fields?: Array<{ key: string; label: string; description?: string }> }>;
+    submission_items?: TemplateDetectedItem[];
   } | null;
+  // Même correctif après coup qu'à l'affichage du dossier (voir
+  // splitMergedDaoItems) : sans lui, cette route cherche detectedTemplate en
+  // comparant "title" (déjà séparé, ex. "A5 - Litiges...") à l'ANCIENNE
+  // liste encore fusionnée dans tenders.ai_analysis — aucune correspondance
+  // trouvée, donc plus aucun champ ni texte de modèle correctement rattaché
+  // pour cette pièce précise (c'est ce qui provoquait le texte mélangé et
+  // les mots coupés à l'impression). Réutilise le PDF déjà mis en cache par
+  // getDocumentBytes ci-dessus : jamais un second téléchargement du DAO.
+  if (analysis?.submission_items?.some((item) => item.template_origin === "dao" && (item.template_page_numbers?.length ?? 0) > 1)) {
+    try {
+      const bytes = await getDocumentBytes();
+      if (bytes) {
+        const splitItems = await splitMergedDaoItems(analysis.submission_items ?? [], bytes);
+        analysis = { ...analysis, submission_items: splitItems };
+      }
+    } catch (error) {
+      console.error("splitMergedDaoItems failed in printable-submission-document", error);
+    }
+  }
   templateValues.worksite_location = analysis?.worksite_location || "";
   templateValues.chantier_location = analysis?.worksite_location || "";
   // Préremplit une case dont la clé donnée par l'IA d'analyse ne correspond à
