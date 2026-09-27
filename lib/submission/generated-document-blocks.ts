@@ -17,7 +17,11 @@ function tokenizeTemplateParagraph(paragraph: string, templateValues: Record<str
     const [full, key] = match;
     if (match.index > lastIndex) pushPlain(runs, paragraph.slice(lastIndex, match.index));
     const value = templateValues[key.toLowerCase()]?.trim();
-    if (value) runs.push({ text: value, bold: true });
+    // field:true en plus de bold:true : cette valeur devient une VRAIE case
+    // cliquable dans le PDF généré (voir generated-document-pdf.ts), pas
+    // seulement un mot en gras — pour rester modifiable dans notre lecteur
+    // intégré, exactement comme sur une vraie page de DAO.
+    if (value) runs.push({ text: value, bold: true, field: true });
     lastIndex = match.index + full.length;
   }
   if (lastIndex < paragraph.length) pushPlain(runs, paragraph.slice(lastIndex));
@@ -91,7 +95,7 @@ export function buildGeneratedDocumentBlocks(params: {
   templateValues: Record<string, string>;
   fallbackParagraphs?: string[];
   tables?: Array<{ title?: string; columns: string[]; rows: string[][] }>;
-  leftoverFieldLines?: string[];
+  leftoverFieldLines?: Array<{ label: string; value: string }>;
 }): DocumentBlock[] {
   const blocks: DocumentBlock[] = [
     { kind: "heading", text: params.title.toLocaleUpperCase("fr-FR") },
@@ -114,8 +118,14 @@ export function buildGeneratedDocumentBlocks(params: {
   }
   if (params.leftoverFieldLines?.length) {
     blocks.push({ kind: "spacer", height: 16 });
+    // "Informations complémentaires :" reste un simple titre de section EN
+    // GRAS (bold sans field) : jamais une case à remplir. Seule la valeur
+    // après chaque libellé (field:true) devient une vraie case cliquable.
     blocks.push({ kind: "paragraph", runs: [{ text: "Informations complémentaires :", bold: true }] });
-    params.leftoverFieldLines.forEach((line) => blocks.push({ kind: "paragraph", runs: [{ text: line }] }));
+    params.leftoverFieldLines.forEach(({ label, value }) => blocks.push({
+      kind: "paragraph",
+      runs: [{ text: `${label} : ` }, { text: value, bold: true, field: true }],
+    }));
   }
   return blocks;
 }

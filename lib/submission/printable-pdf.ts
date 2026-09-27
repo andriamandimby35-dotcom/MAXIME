@@ -46,7 +46,13 @@ const BOTTOM_Y = 50;
 export async function createPrintableSubmissionPdf(title: string, company: Record<string, unknown>, extraLines: string[] = [], tables: PrintableTable[] = [], options: { tableOnly?: boolean } = {}) {
   const doc = await PDFDocument.create();
   doc.setTitle(cleanText(title).slice(0, 200));
-  const { font, boldFont } = await embedUnicodeFonts(doc);
+  // subset:false — même raison que dans createFillableDaoTemplatePdf et
+  // renderGeneratedDocumentPdf : les cases de tableau créées plus bas
+  // (drawRow) restent modifiables, y compris avec des caractères qui
+  // n'apparaissent nulle part ailleurs dans ce document précis.
+  const { font, boldFont } = await embedUnicodeFonts(doc, { subset: false });
+  const form = doc.getForm();
+  const fieldCounter = { current: 0 };
 
   // tableOnly : pour une pièce dont le SEUL vrai contenu est un tableau que
   // l'application construit elle-même à partir de vraies valeurs entrées
@@ -103,7 +109,7 @@ export async function createPrintableSubmissionPdf(title: string, company: Recor
     page.drawText(cleanText(table.title || "Tableau du DAO"), { x: MARGIN_X, y, size: 12, font: boldFont, color: rgb(0, 0, 0) });
     y -= TITLE_GAP;
 
-    const drawRow = (values: string[]) => {
+    const drawRow = (values: string[], isHeader: boolean) => {
       if (y - ROW_HEIGHT < BOTTOM_Y) { page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]); y = TOP_Y; }
       values.forEach((value, columnIndex) => {
         const width = widths[columnIndex];
@@ -122,6 +128,29 @@ export async function createPrintableSubmissionPdf(title: string, company: Recor
         if (fullWidthAtDefault > maxWidth) {
           fontSize = Math.max(6, fontSize * (maxWidth / fullWidthAtDefault));
         }
+        // Une case d'EN-TÊTE (nom des colonnes) reste fixe, comme avant. Une
+        // case de DONNÉE (une ligne de personnel/matériel, un poids, un
+        // chiffre d'affaires...) devient une vraie case cliquable — même
+        // méthode que dans generated-document-pdf.ts (drawTable) — pour que
+        // Maxime puisse corriger une valeur directement dans le lecteur PDF
+        // intégré, sans devoir tout refaire depuis le dossier.
+        if (!isHeader) {
+          fieldCounter.current += 1;
+          const field = form.createTextField(`case_roster_${fieldCounter.current}`);
+          field.addToPage(page, {
+            x: x + 2,
+            y: y - ROW_HEIGHT + 2,
+            width: Math.max(4, width - 4),
+            height: Math.max(4, ROW_HEIGHT - 4),
+            borderWidth: 0,
+            textColor: rgb(0, 0, 0),
+            font,
+          });
+          field.enableMultiline();
+          field.setFontSize(fontSize);
+          field.setText(text);
+          return;
+        }
         let display = text;
         // Si même à la taille minimale le texte ne rentre toujours pas, on
         // tronque avec "…" pour signaler clairement une coupure plutôt que
@@ -136,10 +165,19 @@ export async function createPrintableSubmissionPdf(title: string, company: Recor
       });
       y -= ROW_HEIGHT;
     };
-    drawRow(columns);
-    for (const row of rows) drawRow(columns.map((_, columnIndex) => String(row[columnIndex] ?? "")));
+    drawRow(columns, true);
+    for (const row of rows) drawRow(columns.map((_, columnIndex) => String(row[columnIndex] ?? "")), false);
     y -= TABLE_GAP;
   }
 
+  if (fieldCounter.current > 0) {
+    try {
+      form.updateFieldAppearances(font);
+    } catch {
+      // Repli silencieux, comme dans createFillableDaoTemplatePdf et
+      // renderGeneratedDocumentPdf : les valeurs restent enregistrées dans
+      // les cases même si la régénération de l'aperçu échoue ici.
+    }
+  }
   return Buffer.from(await doc.save());
 }

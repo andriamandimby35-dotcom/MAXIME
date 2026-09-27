@@ -1,4 +1,4 @@
-import { PDFDocument, PDFFont, PDFPage, rgb } from "pdf-lib";
+import { PDFDocument, PDFFont, PDFForm, PDFPage, rgb } from "pdf-lib";
 import { embedUnicodeFonts } from "@/lib/submission/pdf-font";
 
 // NOUVELLE approche de génération de pièces (Lettre de soumission, garanties,
@@ -18,7 +18,13 @@ import { embedUnicodeFonts } from "@/lib/submission/pdf-font";
 // insère les valeurs directement dans le texte (en gras, pour qu'elles
 // ressortent), et on ne montre plus jamais de pointillés une fois qu'une
 // valeur est connue.
-export type TextRun = { text: string; bold?: boolean };
+// field:true marque une valeur INSÉRÉE (montant, date, référence, nom du
+// signataire...) plutôt qu'un simple mot en gras (ex. un titre de section
+// comme "Informations complémentaires :") : SEULES ces valeurs deviennent de
+// vraies cases cliquables plus bas (voir addInlineValueField) — un mot en
+// gras sans field ne devient jamais une case, juste du texte stylé comme
+// avant.
+export type TextRun = { text: string; bold?: boolean; field?: boolean };
 export type ParagraphBlock = { kind: "paragraph"; runs: TextRun[] };
 export type HeadingBlock = { kind: "heading"; text: string };
 export type SpacerBlock = { kind: "spacer"; height?: number };
@@ -60,10 +66,14 @@ function wrapRuns(runs: TextRun[], maxWidth: number, font: PDFFont, boldFont: PD
       }
       const lastLine = lines[lines.length - 1];
       const lastRun = lastLine[lastLine.length - 1];
-      if (lastRun && Boolean(lastRun.bold) === Boolean(run.bold)) {
+      // field doit aussi correspondre, pas seulement bold : sinon un mot
+      // d'une valeur cliquable (field:true) pouvait fusionner avec un mot en
+      // gras voisin qui n'en est pas une (ex. un titre de section), et toute
+      // la fusion héritait alors à tort du statut du premier des deux.
+      if (lastRun && Boolean(lastRun.bold) === Boolean(run.bold) && Boolean(lastRun.field) === Boolean(run.field)) {
         lastRun.text += word;
       } else {
-        lastLine.push({ text: word, bold: run.bold });
+        lastLine.push({ text: word, bold: run.bold, field: run.field });
       }
       currentWidth += wordWidth;
     }
@@ -81,22 +91,63 @@ function ensureSpace(cursor: Cursor, doc: PDFDocument, needed: number): Cursor {
   return { page, y: PAGE_HEIGHT - MARGIN };
 }
 
-function drawWrappedLine(page: PDFPage, line: TextRun[], x: number, y: number, font: PDFFont, boldFont: PDFFont, fontSize: number) {
+// Compteur de cases partagé sur tout le document (form.createTextField exige
+// un nom UNIQUE par case dans tout le PDF) — un simple objet plutôt qu'une
+// variable de module, pour repartir de zéro à chaque appel de
+// renderGeneratedDocumentPdf (deux appels concurrents ne doivent jamais se
+// marcher dessus).
+type FieldCounter = { current: number };
+
+// Pose une VRAIE case à remplir cliquable directement là où le texte aurait
+// été dessiné (même police, même position) — plutôt que du texte peint en
+// dur — pour qu'une valeur insérée automatiquement (montant, date,
+// référence...) reste modifiable dans notre lecteur PDF intégré, exactement
+// comme sur une vraie page de DAO (voir dao-template-pdf.ts). Une ligne trop
+// longue qui a été coupée en plusieurs morceaux par wrapRuns devient
+// plusieurs petites cases à la suite plutôt qu'une seule : limitation connue
+// (rare en pratique — une valeur assez courte pour tenir sur une ligne reste
+// une seule case), acceptée pour ne pas complexifier tout le découpage de
+// lignes existant.
+function addInlineValueField(form: PDFForm, page: PDFPage, font: PDFFont, counter: FieldCounter, text: string, x: number, y: number, fontSize: number) {
+  counter.current += 1;
+  const width = Math.max(8, font.widthOfTextAtSize(text, fontSize) + 3);
+  const height = fontSize * 1.35;
+  const field = form.createTextField(`valeur_generee_${counter.current}`);
+  // ORDRE IMPORTANT (vérifié en testant les deux ordres, voir
+  // dao-template-pdf.ts) : addToPage() AVANT setFontSize()/setText().
+  field.addToPage(page, {
+    x,
+    y: y - height * 0.24,
+    width,
+    height,
+    borderWidth: 0,
+    textColor: rgb(0, 0, 0),
+    font,
+  });
+  field.setFontSize(fontSize);
+  field.setText(text);
+}
+
+function drawWrappedLine(page: PDFPage, line: TextRun[], x: number, y: number, font: PDFFont, boldFont: PDFFont, fontSize: number, form: PDFForm, counter: FieldCounter) {
   let cursorX = x;
   for (const run of line) {
     const activeFont = run.bold ? boldFont : font;
-    page.drawText(run.text, { x: cursorX, y, size: fontSize, font: activeFont, color: rgb(0, 0, 0) });
+    if (run.field && run.text.trim()) {
+      addInlineValueField(form, page, activeFont, counter, run.text, cursorX, y, fontSize);
+    } else {
+      page.drawText(run.text, { x: cursorX, y, size: fontSize, font: activeFont, color: rgb(0, 0, 0) });
+    }
     cursorX += activeFont.widthOfTextAtSize(run.text, fontSize);
   }
 }
 
-function drawParagraph(doc: PDFDocument, cursor: Cursor, block: ParagraphBlock, font: PDFFont, boldFont: PDFFont): Cursor {
+function drawParagraph(doc: PDFDocument, cursor: Cursor, block: ParagraphBlock, font: PDFFont, boldFont: PDFFont, form: PDFForm, counter: FieldCounter): Cursor {
   const maxWidth = PAGE_WIDTH - MARGIN * 2;
   const lines = wrapRuns(block.runs, maxWidth, font, boldFont, BODY_FONT_SIZE);
   let current = cursor;
   for (const line of lines) {
     current = ensureSpace(current, doc, LINE_HEIGHT);
-    drawWrappedLine(current.page, line, MARGIN, current.y - BODY_FONT_SIZE, font, boldFont, BODY_FONT_SIZE);
+    drawWrappedLine(current.page, line, MARGIN, current.y - BODY_FONT_SIZE, font, boldFont, BODY_FONT_SIZE, form, counter);
     current = { page: current.page, y: current.y - LINE_HEIGHT };
   }
   return current;
@@ -129,7 +180,7 @@ function wrapPlainText(text: string, maxWidth: number, font: PDFFont, fontSize: 
   return lines.length ? lines : [""];
 }
 
-function drawTable(doc: PDFDocument, cursor: Cursor, block: TableBlock, font: PDFFont, boldFont: PDFFont): Cursor {
+function drawTable(doc: PDFDocument, cursor: Cursor, block: TableBlock, font: PDFFont, boldFont: PDFFont, form: PDFForm, counter: FieldCounter): Cursor {
   let current = cursor;
   if (block.title) {
     current = ensureSpace(current, doc, LINE_HEIGHT + 4);
@@ -151,10 +202,34 @@ function drawTable(doc: PDFDocument, cursor: Cursor, block: TableBlock, font: PD
     const rowTopY = current.y;
     for (const [columnIndex, lines] of wrappedCells.entries()) {
       const cellX = MARGIN + columnIndex * columnWidth + cellPaddingX;
-      let lineY = rowTopY - TABLE_ROW_PADDING / 2 - TABLE_FONT_SIZE;
-      for (const line of lines) {
-        current.page.drawText(line, { x: cellX, y: lineY, size: TABLE_FONT_SIZE, font: cellFont, color: rgb(0, 0, 0) });
-        lineY -= TABLE_FONT_SIZE + 3;
+      const rawValue = (row[columnIndex] ?? "").toString();
+      // Une case de la ligne d'en-tête reste du texte fixe (jamais une valeur
+      // à modifier). Une case de donnée devient une VRAIE case cliquable
+      // couvrant toute la cellule, en mode multi-lignes — plutôt qu'un champ
+      // par ligne déjà découpée comme pour un paragraphe : une cellule de
+      // tableau a déjà un rectangle bien défini (sa ligne du tableau), donc
+      // pas besoin de fragmenter une valeur un peu longue en plusieurs cases.
+      if (!isHeader && rawValue.trim()) {
+        counter.current += 1;
+        const field = form.createTextField(`case_tableau_${counter.current}`);
+        field.addToPage(current.page, {
+          x: cellX - cellPaddingX + 2,
+          y: rowTopY - rowHeight + 2,
+          width: columnWidth - 4,
+          height: rowHeight - 4,
+          borderWidth: 0,
+          textColor: rgb(0, 0, 0),
+          font: cellFont,
+        });
+        field.enableMultiline();
+        field.setFontSize(TABLE_FONT_SIZE);
+        field.setText(rawValue);
+      } else {
+        let lineY = rowTopY - TABLE_ROW_PADDING / 2 - TABLE_FONT_SIZE;
+        for (const line of lines) {
+          current.page.drawText(line, { x: cellX, y: lineY, size: TABLE_FONT_SIZE, font: cellFont, color: rgb(0, 0, 0) });
+          lineY -= TABLE_FONT_SIZE + 3;
+        }
       }
     }
     // Ligne de séparation sous chaque rangée (fine, grise) - repère visuel du
@@ -178,7 +253,13 @@ function drawTable(doc: PDFDocument, cursor: Cursor, block: TableBlock, font: PD
  */
 export async function renderGeneratedDocumentPdf(blocks: DocumentBlock[]): Promise<Buffer> {
   const doc = await PDFDocument.create();
-  const { font, boldFont } = await embedUnicodeFonts(doc);
+  // subset:false — même raison que dans createFillableDaoTemplatePdf (voir
+  // dao-template-pdf.ts) : ce document contient maintenant de VRAIES cases à
+  // remplir, où l'utilisateur peut retaper une valeur avec des caractères qui
+  // n'apparaissent nulle part ailleurs dans ce PDF précis.
+  const { font, boldFont } = await embedUnicodeFonts(doc, { subset: false });
+  const form = doc.getForm();
+  const fieldCounter: FieldCounter = { current: 0 };
   let cursor: Cursor = { page: doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]), y: PAGE_HEIGHT - MARGIN };
   for (const block of blocks) {
     switch (block.kind) {
@@ -186,16 +267,26 @@ export async function renderGeneratedDocumentPdf(blocks: DocumentBlock[]): Promi
         cursor = drawHeading(doc, cursor, block, boldFont);
         break;
       case "paragraph":
-        cursor = drawParagraph(doc, cursor, block, font, boldFont);
+        cursor = drawParagraph(doc, cursor, block, font, boldFont, form, fieldCounter);
         cursor = { page: cursor.page, y: cursor.y - 8 }; // espace entre paragraphes
         break;
       case "table":
-        cursor = drawTable(doc, cursor, block, font, boldFont);
+        cursor = drawTable(doc, cursor, block, font, boldFont, form, fieldCounter);
         break;
       case "spacer":
         cursor = ensureSpace(cursor, doc, block.height ?? LINE_HEIGHT);
         cursor = { page: cursor.page, y: cursor.y - (block.height ?? LINE_HEIGHT) };
         break;
+    }
+  }
+  if (fieldCounter.current > 0) {
+    try {
+      form.updateFieldAppearances(font);
+    } catch {
+      // Repli silencieux : les valeurs restent enregistrées dans les cases
+      // (visibles dans l'application de l'utilisateur) même si la
+      // régénération de l'aperçu échoue exceptionnellement ici — même
+      // principe que createFillableDaoTemplatePdf.
     }
   }
   return Buffer.from(await doc.save());

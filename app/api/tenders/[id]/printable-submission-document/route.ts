@@ -713,9 +713,13 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           .filter((field): field is { key: string; label?: string } => Boolean(field.key && !referencedKeys.has(field.key.toLowerCase())))
           .map((field) => {
             const value = formData[field.key] || profileData[field.key] || templateValues[field.key];
-            return value ? `${field.label ?? field.key} : ${value}` : null;
+            // {label, value} plutôt qu'une ligne "Libellé : valeur" déjà
+            // assemblée : buildGeneratedDocumentBlocks a besoin de la valeur à
+            // part pour en faire une vraie case cliquable (voir
+            // generated-document-blocks.ts), pas juste un texte figé.
+            return value ? { label: field.label ?? field.key, value } : null;
           })
-          .filter((line): line is string => Boolean(line));
+          .filter((line): line is { label: string; value: string } => Boolean(line));
       })() : undefined;
       const blocks = buildGeneratedDocumentBlocks({
         title: detectedTemplate?.title || title,
