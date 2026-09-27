@@ -721,7 +721,17 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     setMessage("Envoi du PDF rempli…");
     try {
       const path = filledPdfStoragePath(item);
-      const upload = await supabase.storage.from("btp-documents").upload(path, data, { upsert: true, contentType: "application/pdf" });
+      // cacheControl: "0" — INDISPENSABLE ici : ce chemin de stockage est
+      // FIXE (upsert:true, voir filledPdfStoragePath) et redemandé À CHAQUE
+      // réouverture (voir l'effet plus haut qui télécharge item.form_data.__filledPdfPath).
+      // Sans ce réglage, Supabase Storage garde la réponse en cache par
+      // défaut (voir aussi savedPdfResponse côté serveur, qui le fait déjà
+      // pour cette même raison) : rouvrir juste après un NOUVEL enregistrement
+      // pouvait alors encore renvoyer l'ancienne version mise en cache — ce
+      // qui donnait l'impression que les derniers ajustements/déplacements/
+      // cases ajoutées n'avaient jamais été enregistrés, alors qu'ils
+      // l'étaient bien (juste pas encore visibles à cause du cache).
+      const upload = await supabase.storage.from("btp-documents").upload(path, data, { upsert: true, contentType: "application/pdf", cacheControl: "0" });
       if (upload.error) { setMessage(`Envoi impossible : ${upload.error.message}`); return; }
       // On repart de la version la plus à jour de cet item (items[index]),
       // pas de "item" capturé avant l'envoi : une modification faite pendant
