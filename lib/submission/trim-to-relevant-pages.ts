@@ -602,6 +602,31 @@ export async function extractRelevantPageRange(
 // quel DAO.
 export type MergedItemSegment = { pages: number[]; title: string };
 
+// BUG corrigé (Maxime, sur la pièce malgache Annexe 6/7/8) : looksMalagasy()
+// empêche bien la fragmentation en petites pièces (un article malgache =
+// une pièce), mais laisse alors TOUTE la convention (Annexe 6, 7 ET 8)
+// fusionnée en une seule pièce sans aucun titre propre à chacune — l'inverse
+// de ce que demande Maxime (trois pièces bien distinctes "Annexe 6",
+// "Annexe 7", "Annexe 8", visibles dans la liste AVANT même d'ouvrir un PDF,
+// pour faciliter le contrôle visuel). Un numéro d'annexe imprimé ("Annexe
+// 6", "ANNEXE 7", "Annexe n°8"...) est un signal bien plus fiable qu'une
+// simple mise en forme (gras/majuscules/couleur) pour marquer le début
+// d'une nouvelle pièce : il fonctionne même quand le DAO n'a mis AUCUNE
+// mise en forme distincte sur ce mot précis, et il donne directement un
+// titre propre et déjà en français, sans dépendre du contenu malgache
+// environnant. On se limite au tout DÉBUT de la page (jamais tout son
+// texte) pour ne jamais confondre un vrai intitulé d'annexe avec un simple
+// renvoi cité en passant au milieu d'un paragraphe ("voir aussi l'annexe 6
+// alinéa 2"). Générique par construction (le numéro est capturé, jamais
+// codé en dur) : reconnaît "Annexe 6", "Annexe 7", "Annexe 8" pareil que
+// n'importe quel autre numéro, sur n'importe quel DAO.
+const ANNEXE_HEADING_WINDOW = 150;
+function annexeNumberAtPageStart(normalizedFullPageText: string): number | null {
+  const start = normalizedFullPageText.slice(0, ANNEXE_HEADING_WINDOW);
+  const match = /\bannexe\s*(?:n[o°]?\.?\s*)?(\d{1,2})\b/.exec(start);
+  return match ? Number(match[1]) : null;
+}
+
 export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: number[], ownTableTitles?: string[]): Promise<MergedItemSegment[]> {
   if (!sortedPages.length) return [];
   try {
@@ -671,9 +696,19 @@ export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: nu
 
     const segments: MergedItemSegment[] = [{ pages: [workingSortedPages[0]], title: "" }];
     let referenceHeading = "";
+    // Numéro de l'annexe en cours (voir annexeNumberAtPageStart plus haut) :
+    // null tant qu'aucune page n'a encore montré de numéro d'annexe explicite.
+    let referenceAnnexeNumber: number | null = null;
     try {
-      const first = await pageHeadingLine(doc, workingSortedPages[0]);
-      if (first.titleLine && !looksMalagasy(first.titleLine)) { segments[0].title = first.titleLine; referenceHeading = first.heading; }
+      const firstAnnexeNumber = annexeNumberAtPageStart(await normalizedPageText(doc, workingSortedPages[0]));
+      if (firstAnnexeNumber !== null) {
+        segments[0].title = `Annexe ${firstAnnexeNumber}`;
+        referenceAnnexeNumber = firstAnnexeNumber;
+      }
+      if (!segments[0].title) {
+        const first = await pageHeadingLine(doc, workingSortedPages[0]);
+        if (first.titleLine && !looksMalagasy(first.titleLine)) { segments[0].title = first.titleLine; referenceHeading = first.heading; }
+      }
     } catch {
       // Première page illisible : segment de départ gardé sans titre connu.
     }
@@ -682,6 +717,20 @@ export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: nu
       const currentSegment = segments[segments.length - 1];
       if (pageNumber < 1 || pageNumber > doc.numPages) { currentSegment.pages.push(pageNumber); continue; }
       try {
+        // Priorité au numéro d'annexe explicite (voir annexeNumberAtPageStart
+        // plus haut) : signal bien plus fiable que la mise en forme, et qui
+        // donne directement un titre propre ("Annexe 6") même quand le corps
+        // de la page qui suit est rédigé dans une langue où looksMalagasy
+        // bloque par ailleurs la détection de titre par mise en forme (voir
+        // plus bas) — sans ce cas prioritaire, plusieurs annexes différentes
+        // se retrouvaient fusionnées en une seule pièce sans titre à elles.
+        const annexeNumber = annexeNumberAtPageStart(await normalizedPageText(doc, pageNumber));
+        if (annexeNumber !== null && annexeNumber !== referenceAnnexeNumber) {
+          segments.push({ pages: [pageNumber], title: `Annexe ${annexeNumber}` });
+          referenceAnnexeNumber = annexeNumber;
+          referenceHeading = ""; // Nouvelle annexe : un titre stylé à l'intérieur ne doit plus être comparé à l'ancienne pièce.
+          continue;
+        }
         const { heading, titleLine } = await pageHeadingLine(doc, pageNumber);
         // Un titre trouvé, différent du titre déjà en cours : une AUTRE
         // pièce commence ici, jamais une simple continuation (même règle que
