@@ -347,8 +347,29 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
     pdfJsDoc = null; // Repli silencieux : la page reste vide plutôt que de faire échouer tout le document — n'arrive presque jamais en pratique.
   }
   for (const pageNumber of validPages) {
-    const sourcePageSize = sourcePdf.getPage(pageNumber - 1).getSize();
+    const sourcePage = sourcePdf.getPage(pageNumber - 1);
+    const sourcePageSize = sourcePage.getSize();
     const page = result.addPage([sourcePageSize.width, sourcePageSize.height]);
+    // BUG corrigé (pièce "A5 - Litiges" signalée par Maxime : texte coupé à
+    // gauche ET à droite, comme "une page trop grande sur une petite
+    // feuille"). Cause : getSize() renvoie toujours la taille BRUTE de la
+    // page (sa MediaBox), sans jamais tenir compte de sa rotation d'origine
+    // (/Rotate, ex. un scan tourné à 90°/270° pour être lisible). La
+    // nouvelle page créée ci-dessus gardait donc les bonnes dimensions
+    // brutes, mais perdait cette rotation (page vierge = toujours 0°) alors
+    // que le texte reconstruit juste après (drawReconstructedItem, à partir
+    // des positions pdf.js) reste, lui, dans le même repère NON tourné que
+    // pdf-lib (les deux bibliothèques utilisent l'espace brut de la page,
+    // la rotation n'étant qu'un simple réglage d'affichage appliqué PAR-
+    // DESSUS) : il suffit donc de reporter cette rotation sur la nouvelle
+    // page pour que tout s'affiche exactement comme sur la page DAO
+    // d'origine. Sans ce report, une page tournée s'affichait "sur le
+    // côté", ce qui donnait exactement l'effet zoomé/coupé aux bords
+    // signalé (le texte, en réalité vertical, débordait alors largement
+    // d'un cadre pensé pour du texte horizontal). Ce correctif est général :
+    // il s'applique à N'IMPORTE QUELLE pièce reconstruite à partir d'une
+    // page du DAO tournée, pas seulement à "A5 - Litiges".
+    page.setRotation(sourcePage.getRotation());
     const pageRedactionZones = redactions.filter((zone) => Math.floor(zone.page) === pageNumber);
     const pageRedactionRects = pageRedactionZones.map((zone) => redactionRect(sourcePageSize.width, sourcePageSize.height, zone));
     const pagePositions = dedupedPositions.filter((position) => Math.floor(position.page) === pageNumber);

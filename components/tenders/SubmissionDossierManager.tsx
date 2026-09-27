@@ -1106,6 +1106,17 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     }
     if (item.kind === "document_to_provide") {
       const readingOnly = isReadingOnly(item);
+      // Un document que l'entreprise possède déjà (CIN, NIF, STAT, RIB,
+      // registre du commerce...) n'a par définition AUCUNE page de DAO ni
+      // aucun modèle à générer — needsPrintableVersion(item) le dit déjà
+      // (voir son commentaire : "proposer un PDF générique... ne sert à
+      // rien"). Le bouton "Ouvrir" (qui ouvre un aperçu PDF vide/inutile)
+      // n'a donc pas de sens ici : seul un bouton "Marquer comme prêt"
+      // reste utile, pour indiquer que le document est en main, physique,
+      // prêt à joindre — sans passer par une fenêtre PDF qui n'a rien à
+      // montrer.
+      const printable = needsPrintableVersion(item);
+      const readyToggleButton = <button type="button" className={`tenderButton ${ready ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => toggleReady(index)}>{ready ? "Prêt ✓" : "Marquer comme prêt"}</button>;
       return <article key={`${item.kind}-${item.title}-${index}`} className="simpleCard">
         <strong>{item.title}</strong>
         <p className="mt-2 text-sm">{item.instructions}</p>
@@ -1114,8 +1125,8 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
               Enregistrer) ne reste utile que pour une pièce "à lire"
               (charte, politique de fraude...) sans page DAO précise
               repérée : le PDF à imprimer, lui, extrait déjà ce texte. */}
-          {readingOnly && !needsPrintableVersion(item) && <button type="button" className="tenderButton" disabled={!daoUrl || pendingAction === "read"} onClick={() => void openReadingDocument()}><ButtonLabel loading={pendingAction === "read"} label="Ouvrir le document à lire" /></button>}
-          {openButton}
+          {readingOnly && !printable && <button type="button" className="tenderButton" disabled={!daoUrl || pendingAction === "read"} onClick={() => void openReadingDocument()}><ButtonLabel loading={pendingAction === "read"} label="Ouvrir le document à lire" /></button>}
+          {printable ? openButton : readyToggleButton}
         </div>
         {item.source_reference && <p className="mt-1 text-xs text-gray-500">Source : {item.source_reference}</p>}
       </article>;
