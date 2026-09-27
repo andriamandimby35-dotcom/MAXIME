@@ -231,7 +231,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
   // source de vérité utilisée pour l'enregistrement) — séparé du zoom : le
   // zoom (zoomDisplay) ne change jamais ces valeurs, seulement l'affichage à
   // l'écran, exactement ce qui manquait pour que ce soit clair.
-  const [selectedFontSizePt, setSelectedFontSizePt] = useState(10);
+  const [selectedFontSizePt, setSelectedFontSizePt] = useState(11);
   const [selectedBold, setSelectedBold] = useState(false);
   const [selectedColor, setSelectedColor] = useState("#000000");
   const [selectedFontFamily, setSelectedFontFamily] = useState<FontFamilyKey>("times");
@@ -280,7 +280,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       topPercent: parseFloat(section.style.top) || 0,
       widthPercent: parseFloat(section.style.width) || 20,
       heightPercent: parseFloat(section.style.height) || 3,
-      fontSizePt: fontMatch ? parseFloat(fontMatch[1]) : 10,
+      fontSizePt: fontMatch ? parseFloat(fontMatch[1]) : 11,
       bold: false,
       fontFamily: "times",
       color: "#000000",
@@ -480,7 +480,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     const fieldName = `custom_field_${customFieldCounterRef.current}`;
     const widthPercent = 30;
     const heightPercent = 3;
-    const fontSizePt = 10;
+    const fontSizePt = 11;
 
     const section = document.createElement("section");
     section.className = "textWidgetAnnotation customField";
@@ -985,6 +985,22 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
          On le désactive uniquement dans ce lecteur. */
       .fillable-pdf-viewer, .fillable-pdf-viewer * {
         -webkit-tap-highlight-color: transparent;
+      }
+      /* Fond bleu qui apparaît APRÈS avoir tapé dans une case (visible sur
+         ordinateur, pas avant d'écrire dedans) : ce n'est ni notre CSS ni
+         pdf.js — c'est Chrome/Edge qui reconnaît un nom/une adresse et
+         applique SA PROPRE coloration de "champ auto-rempli", même avec
+         autocomplete="off" (Chrome ignore volontairement ce réglage pour ce
+         genre de champ). Ce fond n'est pas modifiable directement en CSS
+         (Chrome l'impose) : l'astuce reconnue consiste à peindre un immense
+         "box-shadow" intérieur blanc PAR-DESSUS, en boucle infinie via une
+         transition très longue pour qu'il ne réapparaisse jamais. */
+      .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea):-webkit-autofill,
+      .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea):-webkit-autofill:hover,
+      .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea):-webkit-autofill:focus {
+        -webkit-box-shadow: 0 0 0 1000px #fff inset !important;
+        box-shadow: 0 0 0 1000px #fff inset !important;
+        transition: background-color 999999s ease-in-out 0s;
       }
     `}</style>
     <div
