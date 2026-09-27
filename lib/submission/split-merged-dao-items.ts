@@ -21,13 +21,29 @@
 // construire). N'importer ce fichier QUE depuis du code serveur (pages,
 // routes API) — jamais depuis un composant "use client".
 import { splitPagesByOwnTitle, pagesContainingText } from "@/lib/submission/trim-to-relevant-pages";
+import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
 import type { Field, TemplateDetectedItem, TemplateTable } from "@/lib/submission/build-dossier-items";
 
 export async function splitMergedDaoItems<T extends TemplateDetectedItem>(items: T[], pdfBytes: Uint8Array | null): Promise<T[]> {
   if (!pdfBytes) return items;
   const result: T[] = [];
   for (const item of items) {
-    const pages = item.template_page_numbers ?? [];
+    // BUG corrigé (pièce "A3 - Chiffres d'affaires" signalée par Maxime :
+    // toujours affichée comme UNE seule pièce, sans tableau ni bouton
+    // "Ajouter une ligne", alors que ses pages "16, 267-268" montrent bien
+    // deux tableaux distincts et éloignés dans le DAO). Cause : l'IA note
+    // parfois une page réelle SEULEMENT sous forme de texte dans
+    // source_reference ("Pages 16, 267-268"), sans la répéter aussi dans
+    // template_page_numbers (ex. resté à [16] tout seul) — déjà rencontré et
+    // corrigé ailleurs (route.ts, "detectedTemplateKnownPages") mais pas
+    // encore ici : cette pièce ne voyait donc jamais sa page 267/268, et le
+    // découpage ci-dessous ne pouvait jamais la détecter comme une pièce
+    // séparée. On combine donc toujours les deux sources, exactement comme
+    // route.ts le fait déjà pour la génération du PDF.
+    const pages = [...new Set([
+      ...(item.template_page_numbers ?? []),
+      ...parsePageNumbersFromReference(item.source_reference),
+    ])];
     // Un item qui ne vient pas d'une vraie page du DAO ne peut par définition
     // pas avoir fusionné deux pièces différentes : rien à vérifier. Une seule
     // page déclarée ne suffit PAS à elle seule à l'exclure : l'IA compte

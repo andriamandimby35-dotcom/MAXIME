@@ -660,12 +660,23 @@ export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: nu
         // justement sur cette page (voir tableBoundaryPages plus haut), donc
         // le DAO original les a mis sur des pages séparées — l'extraction
         // doit faire pareil.
-        const newTableBoundary = !newStyledTitle && tableBoundaryPages.has(pageNumber);
+        const matchedTableTitle = tableBoundaryPages.get(pageNumber);
+        const newTableBoundary = !newStyledTitle && Boolean(matchedTableTitle);
         if (newStyledTitle || newTableBoundary) {
-          // Sans titre stylé détecté, on nomme le segment d'après le tableau
-          // qui a déclenché cette limite : bien plus utile qu'un titre vide
-          // pour distinguer les pièces séparées à l'affichage.
-          segments.push({ pages: [pageNumber], title: newStyledTitle ? (titleLine ?? "") : (tableBoundaryPages.get(pageNumber) ?? "") });
+          // BUG corrigé : le titre stylé (gras + majuscules) l'emportait
+          // encore ici sur le titre du tableau déjà connu (matchedTableTitle),
+          // alors que "pageHeadingLine" (détection par simple mise en forme)
+          // se trompe régulièrement sur l'EN-TÊTE DE COLONNES d'un tableau
+          // ("NOM ET PRENOM DIPLOME FONCTION ANNEE D'EXPERIENCE..."), qui est
+          // lui aussi en gras/majuscules mais n'est PAS un titre de section —
+          // ce qui donnait ce texte comme titre de la pièce au lieu du vrai
+          // titre du tableau ("A2-b Personnel"). Un tableau déjà identifié
+          // par son propre intitulé (matchedTableTitle, trouvé plus haut dans
+          // ownTableTitles) est une source bien plus fiable que cette
+          // détection de mise en forme : il l'emporte donc TOUJOURS quand les
+          // deux existent pour la même page, quel que soit l'ordre dans
+          // lequel ils ont été détectés.
+          segments.push({ pages: [pageNumber], title: matchedTableTitle ?? (titleLine ?? "") });
           if (newStyledTitle) referenceHeading = heading;
         } else {
           currentSegment.pages.push(pageNumber);
