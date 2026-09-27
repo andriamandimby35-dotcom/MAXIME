@@ -486,17 +486,40 @@ function findBestLine(lineGroups: LineGroup[], label: string, usedItems: Set<Tex
 // fonction)" affiché "f)", "concernant" affiché "ncernant") — cette mesure de
 // précision ne servait qu'à trouver où le blanc COMMENCE, pas jusqu'où il est
 // prudent de l'AGRANDIR ensuite. On cherche donc ici le premier texte RÉEL
-// (pas un autre repère de blanc) sur la même ligne, à droite du blanc : la
-// zone à remplir ne doit jamais s'étendre au-delà.
-function nextRealTextX(items: TextItem[], afterX: number): number | null {
-  let best: number | null = null;
-  for (const item of items) {
-    const itemX = item.transform?.[4] ?? 0;
-    if (itemX <= afterX + 0.5) continue;
-    if (isBlankMarkerRun(item.str ?? "")) continue;
-    if (best === null || itemX < best) best = itemX;
+// (pas un autre repère de blanc, et pas non plus une simple indication entre
+// parenthèses — voir isParentheticalHint juste en dessous, qui ne compte
+// plus comme un obstacle) sur la même ligne, à droite du blanc : la zone à
+// remplir ne doit jamais s'étendre au-delà.
+
+// Un item qui n'est QUE l'indication entre parenthèses imprimée sur le
+// modèle DAO pour dire à la personne quoi écrire ("(nom, prénom, forme
+// juridique)", "(en lettres et en chiffres)"...) — jamais une vraie phrase
+// qui commence juste par une parenthèse. Repéré sur un vrai DAO : une fois
+// qu'une VRAIE case cliquable existe au même endroit que le pointillé,
+// cette indication ne sert plus à rien et peut être recouverte elle aussi
+// (voir nextRealTextXSkippingHints et le bloc "hintMatch" plus bas).
+function isParentheticalHint(text: string): boolean {
+  return /^\([^()]{1,140}\)[.,;:]?$/.test(text.trim());
+}
+
+// Comme nextRealTextX, mais un item qui n'est qu'une indication entre
+// parenthèses ne compte plus comme un obstacle à ne pas dépasser : on
+// continue à chercher après elle, pas avant.
+function nextRealTextXSkippingHints(items: TextItem[], afterX: number, widthFont: PDFFont): number | null {
+  let boundary = afterX;
+  for (;;) {
+    let next: TextItem | null = null;
+    let nextX = Infinity;
+    for (const item of items) {
+      const itemX = item.transform?.[4] ?? 0;
+      if (itemX <= boundary + 0.5) continue;
+      if (isBlankMarkerRun(item.str ?? "")) continue;
+      if (itemX < nextX) { next = item; nextX = itemX; }
+    }
+    if (!next) return null;
+    if (!isParentheticalHint(next.str ?? "")) return nextX;
+    boundary = nextX + estimatedWidth(next, widthFont);
   }
-  return best;
 }
 
 // Quand la ligne trouvée pour un champ n'a AUCUN pointillé (ni en item à
@@ -633,11 +656,29 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
               // suivi tout de suite de "(nom, prénom, fonction)" dans le
               // même bloc de texte), ce texte reprend exactement à endX :
               // aucune marge d'agrandissement n'est alors possible sans
-              // manger son tout début (voir nextSafeWidth plus bas).
+              // manger son tout début (voir nextSafeWidth plus bas). SAUF si
+              // ce texte n'est justement QUE l'indication entre parenthèses
+              // ("(nom, prénom, forme juridique)") : elle ne sert plus à
+              // rien une fois qu'une vraie case cliquable existe ici, donc
+              // on l'inclut dans la zone recouverte au lieu de la protéger.
               const trailingText = str.slice(match.index + match[0].length);
-              const hardCap = trailingText.trim().length > 0 && !isBlankMarkerRun(trailingText);
+              const trailingTrimmed = trailingText.replace(/^\s+/, "");
+              const hintMatch = /^\([^()]{1,140}\)[.,;:]?/.exec(trailingTrimmed);
+              let coveredEndX = endX;
+              let hardCap: boolean;
+              if (hintMatch) {
+                const afterHint = trailingTrimmed.slice(hintMatch[0].length);
+                hardCap = afterHint.trim().length > 0 && !isBlankMarkerRun(afterHint);
+                try {
+                  coveredEndX = itemX + widthFont.widthOfTextAtSize(str.slice(0, str.length - afterHint.length), itemFontSize);
+                } catch {
+                  coveredEndX = endX;
+                }
+              } else {
+                hardCap = trailingText.trim().length > 0 && !isBlankMarkerRun(trailingText);
+              }
               if (!embeddedBlank || startX < embeddedBlank.x) {
-                embeddedBlank = { x: startX, width: Math.max(10, endX - startX), fontSize: itemFontSize, hardCap };
+                embeddedBlank = { x: startX, width: Math.max(10, coveredEndX - startX), fontSize: itemFontSize, hardCap };
               }
             }
           }
@@ -661,7 +702,14 @@ export async function locateFieldPositions(pdfBytes: Uint8Array, candidatePages:
           ? (chosenBlank.hardCap
             ? chosenBlank.width
             : (() => {
-                const boundaryX = nextRealTextX(bestLine.items, chosenBlank.x);
+                // nextRealTextXSkippingHints (pas nextRealTextX) : une
+                // indication entre parenthèses juste après le pointillé
+                // ("(nom, prénom, forme juridique)", en item séparé cette
+                // fois, pas dans le même item que le pointillé — voir le
+                // commentaire équivalent plus haut pour le cas "même item")
+                // ne doit plus arrêter l'agrandissement de la case, elle
+                // peut être recouverte elle aussi.
+                const boundaryX = nextRealTextXSkippingHints(bestLine.items, chosenBlank.x, widthFont);
                 return boundaryX === null ? Infinity : Math.max(chosenBlank.width, boundaryX - chosenBlank.x - 2);
               })())
           : Infinity;
