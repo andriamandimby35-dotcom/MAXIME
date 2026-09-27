@@ -103,28 +103,51 @@ const MIN_FONT_SIZE_PT = 6;
 const MAX_FONT_SIZE_PT = 24;
 const FONT_SIZE_STEP_PT = 1;
 
-// Les styles de police proposés. "document" (police par défaut — voir plus
-// bas) N'EST PAS une police standard pdf-lib : c'est LA MÊME police que le
-// reste du PDF (DejaVu Sans, dans public/fonts/ — voir lib/submission/
-// pdf-font.ts, déjà utilisée par tout ce que ce projet génère, justement
-// parce que les polices standards comme Helvetica ne savent pas afficher
-// beaucoup de caractères pourtant courants en français : œ, certains
-// accents...). Sans ce choix par défaut, un simple déplacement/redimension-
-// nement d'une case déjà présente sur le modèle (donc SANS toucher au style)
+// Les styles de police proposés, de 2 sortes différentes :
+// - kind "embed" : une VRAIE police (fichier .ttf dans public/fonts/),
+//   embarquée telle quelle dans le PDF final — rendu identique partout
+//   (téléphone, ordinateur, n'importe quel lecteur PDF), pas de surprise.
+//   "document" = la police du reste du PDF (DejaVu Sans — voir
+//   lib/submission/pdf-font.ts). "times" = une vraie police "façon Times
+//   New Roman" (Liberation Serif, gratuite et prévue exactement pour
+//   remplacer Times New Roman à l'identique, même mesures) : Microsoft ne
+//   permet pas de redistribuer sa propre police Times New Roman dans un
+//   site web, donc on utilise ce remplaçant, visuellement indiscernable.
+// - kind "standard" : une police "standard PDF" (Helvetica, Courier) NON
+//   embarquée par pdf-lib — c'est le LECTEUR PDF de la personne qui choisit
+//   quoi afficher à sa place, ce qui peut donc varier légèrement d'un
+//   appareil à l'autre (c'est justement ce qui causait "les polices ne sont
+//   pas les mêmes").
+// Sans un choix "embed" par défaut, un simple déplacement/redimensionnement
+// d'une case déjà présente sur le modèle (donc SANS toucher au style)
 // suffisait à lui faire perdre discrètement sa vraie police une fois le PDF
 // enregistré : pdf-lib retombe sur Helvetica dès qu'une case est retouchée
-// (voir PDFForm.embedDefaultFont dans pdf-lib — non configurable). Les 3
-// autres styles restent proposés pour qui veut VRAIMENT un rendu différent
-// du reste du document. `cssFamily` sert à l'aperçu à l'écran (dans le
-// navigateur) ; `pdf`/`pdfBold` (absents pour "document", traité à part —
-// voir getFilledPdfBytes) servent au moment d'enregistrer, pour choisir la
-// bonne police pdf-lib selon que "Gras" est coché ou non pour cette case.
-type FontFamilyKey = "document" | "helvetica" | "times" | "courier";
-const FONT_FAMILIES: Record<FontFamilyKey, { label: string; cssFamily: string; pdf?: string; pdfBold?: string }> = {
-  document: { label: "Comme le PDF", cssFamily: "'DejaVu Sans', Verdana, sans-serif" },
-  helvetica: { label: "Standard", cssFamily: "Helvetica, Arial, sans-serif", pdf: "Helvetica", pdfBold: "HelveticaBold" },
-  times: { label: "Classique (Times)", cssFamily: "'Times New Roman', Times, serif", pdf: "TimesRoman", pdfBold: "TimesRomanBold" },
-  courier: { label: "Machine à écrire", cssFamily: "'Courier New', Courier, monospace", pdf: "Courier", pdfBold: "CourierBold" },
+// (voir PDFForm.embedDefaultFont dans pdf-lib — non configurable).
+// `cssFamily` sert seulement à l'aperçu à l'écran (dans le navigateur).
+type FontFamilyKey = "document" | "times" | "helvetica" | "courier";
+const FONT_FAMILIES: Record<FontFamilyKey, {
+  label: string;
+  cssFamily: string;
+} & (
+  | { kind: "embed"; regularUrl: string; boldUrl: string }
+  | { kind: "standard"; pdf: string; pdfBold: string }
+)> = {
+  document: {
+    label: "Comme le PDF", cssFamily: "'DejaVu Sans', Verdana, sans-serif",
+    kind: "embed", regularUrl: "/fonts/DejaVuSans.ttf", boldUrl: "/fonts/DejaVuSans-Bold.ttf",
+  },
+  times: {
+    label: "Times New Roman", cssFamily: "'Times New Roman', 'Liberation Serif', Times, serif",
+    kind: "embed", regularUrl: "/fonts/LiberationSerif-Regular.ttf", boldUrl: "/fonts/LiberationSerif-Bold.ttf",
+  },
+  helvetica: {
+    label: "Standard", cssFamily: "Helvetica, Arial, sans-serif",
+    kind: "standard", pdf: "Helvetica", pdfBold: "HelveticaBold",
+  },
+  courier: {
+    label: "Machine à écrire", cssFamily: "'Courier New', Courier, monospace",
+    kind: "standard", pdf: "Courier", pdfBold: "CourierBold",
+  },
 };
 
 type PdfPageProxy = import("pdfjs-dist").PDFPageProxy;
@@ -802,19 +825,23 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         // inutile d'en embarquer une par case.
         const fontCache = new Map<string, Awaited<ReturnType<typeof doc.embedFont>>>();
         let fontkitRegistered = false;
-        // "document" (le choix par défaut) : PAS une police standard pdf-lib
-        // — on va chercher les MÊMES fichiers DejaVu Sans que le serveur
-        // utilise pour générer ce PDF (servis tels quels depuis /public/
-        // fonts/, donc accessibles ici par un simple fetch), pour que la
-        // case retouchée garde une apparence identique au reste du document
-        // (accents, œ... inclus) au lieu de retomber sur Helvetica.
-        async function embedDocumentFont(bold: boolean) {
+        // "document"/"times" (kind "embed") : PAS une police standard
+        // pdf-lib — on va chercher un vrai fichier .ttf servi tel quel
+        // depuis /public/fonts/ (donc accessible ici par un simple fetch,
+        // exactement comme le fait déjà le serveur — voir
+        // lib/submission/pdf-font.ts) et on l'embarque nous-mêmes avec
+        // fontkit, pour un rendu identique partout (téléphone, ordinateur,
+        // n'importe quel lecteur PDF) au lieu de dépendre de ce que CHAQUE
+        // lecteur choisit d'afficher à la place d'une police "standard" —
+        // c'est justement ce qui causait "les polices ne sont pas les
+        // mêmes" pour Times New Roman.
+        async function embedTtfFont(regularUrl: string, boldUrl: string, bold: boolean) {
           if (!fontkitRegistered) {
             const fontkit = (await import("@pdf-lib/fontkit")).default;
             doc.registerFontkit(fontkit);
             fontkitRegistered = true;
           }
-          const url = bold ? "/fonts/DejaVuSans-Bold.ttf" : "/fonts/DejaVuSans.ttf";
+          const url = bold ? boldUrl : regularUrl;
           const response = await fetch(url);
           if (!response.ok) throw new Error(`Police introuvable : ${url}`);
           const fontBytes = new Uint8Array(await response.arrayBuffer());
@@ -824,18 +851,16 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
           const key = `${family}:${bold}`;
           let font = fontCache.get(key);
           if (!font) {
+            const spec = FONT_FAMILIES[family];
             try {
-              if (family === "document") {
-                font = await embedDocumentFont(bold);
-              } else {
-                const standardFontName = bold ? FONT_FAMILIES[family].pdfBold! : FONT_FAMILIES[family].pdf!;
-                font = await doc.embedFont(StandardFonts[standardFontName as keyof typeof StandardFonts]);
-              }
+              font = spec.kind === "embed"
+                ? await embedTtfFont(spec.regularUrl, spec.boldUrl, bold)
+                : await doc.embedFont(StandardFonts[(bold ? spec.pdfBold : spec.pdf) as keyof typeof StandardFonts]);
             } catch {
-              // Repli : si les fichiers DejaVu Sans ne sont pas joignables
-              // pour une raison quelconque (réseau...), Helvetica reste un
-              // repli correct plutôt que de faire échouer tout
-              // l'enregistrement des positions/tailles déjà en cours.
+              // Repli : si le fichier .ttf n'est pas joignable pour une
+              // raison quelconque (réseau...), Helvetica reste un repli
+              // correct plutôt que de faire échouer tout l'enregistrement
+              // des positions/tailles déjà en cours.
               font = await doc.embedFont(bold ? StandardFonts.HelveticaBold : StandardFonts.Helvetica);
             }
             fontCache.set(key, font);
