@@ -107,12 +107,20 @@ const FONT_SIZE_STEP_PT = 1;
 // - kind "embed" : une VRAIE police (fichier .ttf dans public/fonts/),
 //   embarquée telle quelle dans le PDF final — rendu identique partout
 //   (téléphone, ordinateur, n'importe quel lecteur PDF), pas de surprise.
-//   "document" = la police du reste du PDF (DejaVu Sans — voir
-//   lib/submission/pdf-font.ts). "times" = une vraie police "façon Times
-//   New Roman" (Liberation Serif, gratuite et prévue exactement pour
-//   remplacer Times New Roman à l'identique, même mesures) : Microsoft ne
-//   permet pas de redistribuer sa propre police Times New Roman dans un
-//   site web, donc on utilise ce remplaçant, visuellement indiscernable.
+//   "times" = une vraie police "façon Times New Roman" (Liberation Serif,
+//   gratuite et prévue exactement pour remplacer Times New Roman à
+//   l'identique, même mesures) : Microsoft ne permet pas de redistribuer sa
+//   propre police Times New Roman dans un site web, donc on utilise ce
+//   remplaçant, visuellement indiscernable. C'est le choix PAR DÉFAUT
+//   (voir plus bas) car la plupart des DAO (documents administratifs
+//   exportés depuis Word) utilisent ce style pour leur texte — confirmé par
+//   une vraie capture d'écran envoyée : le texte du "modèle" autour des
+//   cases est à empattements (Times), pas la police "document" ci-dessous.
+//   "document" = la police que CE PROJET dessine lui-même pour reconstruire
+//   certaines zones d'un DAO (DejaVu Sans — voir lib/submission/
+//   pdf-font.ts) : utile seulement quand la case tombe exactement sur une
+//   zone déjà redessinée par l'appli, pas pour le texte d'origine du DAO
+//   (Word) qui l'entoure la plupart du temps.
 // - kind "standard" : une police "standard PDF" (Helvetica, Courier) NON
 //   embarquée par pdf-lib — c'est le LECTEUR PDF de la personne qui choisit
 //   quoi afficher à sa place, ce qui peut donc varier légèrement d'un
@@ -124,7 +132,7 @@ const FONT_SIZE_STEP_PT = 1;
 // enregistré : pdf-lib retombe sur Helvetica dès qu'une case est retouchée
 // (voir PDFForm.embedDefaultFont dans pdf-lib — non configurable).
 // `cssFamily` sert seulement à l'aperçu à l'écran (dans le navigateur).
-type FontFamilyKey = "document" | "times" | "helvetica" | "courier";
+type FontFamilyKey = "times" | "document" | "helvetica" | "courier";
 const FONT_FAMILIES: Record<FontFamilyKey, {
   label: string;
   cssFamily: string;
@@ -132,13 +140,13 @@ const FONT_FAMILIES: Record<FontFamilyKey, {
   | { kind: "embed"; regularUrl: string; boldUrl: string }
   | { kind: "standard"; pdf: string; pdfBold: string }
 )> = {
-  document: {
-    label: "Comme le PDF", cssFamily: "'DejaVu Sans', Verdana, sans-serif",
-    kind: "embed", regularUrl: "/fonts/DejaVuSans.ttf", boldUrl: "/fonts/DejaVuSans-Bold.ttf",
-  },
   times: {
     label: "Times New Roman", cssFamily: "'Times New Roman', 'Liberation Serif', Times, serif",
     kind: "embed", regularUrl: "/fonts/LiberationSerif-Regular.ttf", boldUrl: "/fonts/LiberationSerif-Bold.ttf",
+  },
+  document: {
+    label: "Police de l'appli (DejaVu Sans)", cssFamily: "'DejaVu Sans', Verdana, sans-serif",
+    kind: "embed", regularUrl: "/fonts/DejaVuSans.ttf", boldUrl: "/fonts/DejaVuSans-Bold.ttf",
   },
   helvetica: {
     label: "Standard", cssFamily: "Helvetica, Arial, sans-serif",
@@ -226,7 +234,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
   const [selectedFontSizePt, setSelectedFontSizePt] = useState(10);
   const [selectedBold, setSelectedBold] = useState(false);
   const [selectedColor, setSelectedColor] = useState("#000000");
-  const [selectedFontFamily, setSelectedFontFamily] = useState<FontFamilyKey>("document");
+  const [selectedFontFamily, setSelectedFontFamily] = useState<FontFamilyKey>("times");
   // Quand le clavier du téléphone est ouvert (pour taper dans une case),
   // Safari iOS réduit la zone visible SANS redimensionner la fenêtre : notre
   // barre d'outils "Ajuster"/"+ Ajouter une case", positionnée en bas de la
@@ -274,7 +282,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       heightPercent: parseFloat(section.style.height) || 3,
       fontSizePt: fontMatch ? parseFloat(fontMatch[1]) : 10,
       bold: false,
-      fontFamily: "document",
+      fontFamily: "times",
       color: "#000000",
     };
     fieldOverridesRef.current.set(fieldName, created);
@@ -502,7 +510,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
 
     fieldOverridesRef.current.set(fieldName, {
       pageNumber: entry.pageNumber, leftPercent, topPercent, widthPercent, heightPercent, fontSizePt,
-      bold: false, color: "#000000", fontFamily: "document",
+      bold: false, color: "#000000", fontFamily: "times",
     });
     customFieldNamesRef.current.add(fieldName);
     attachFieldEditing(entry, section, input, fieldName);
