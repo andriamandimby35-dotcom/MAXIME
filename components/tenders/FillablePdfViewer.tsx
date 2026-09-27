@@ -130,6 +130,10 @@ type FieldOverride = {
   widthPercent: number;
   heightPercent: number;
   fontSizePt: number;
+  bold: boolean;
+  // Couleur du texte en hexadécimal ("#rrggbb"), le format que comprend
+  // directement <input type="color">.
+  color: string;
 };
 
 const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function FillablePdfViewer(
@@ -165,9 +169,15 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
   // React) doublées d'un state (pour redessiner la barre d'outils).
   const editModeRef = useRef(false);
   const [editModeOn, setEditModeOn] = useState(false);
-  const addFieldModeRef = useRef(false);
-  const [addFieldModeOn, setAddFieldModeOn] = useState(false);
   const [selectedField, setSelectedField] = useState<string | null>(null);
+  // Juste pour AFFICHER dans la barre d'outils la police/taille/couleur
+  // actuelle de la case sélectionnée (fieldOverridesRef, lui, reste la seule
+  // source de vérité utilisée pour l'enregistrement) — séparé du zoom : le
+  // zoom (zoomDisplay) ne change jamais ces valeurs, seulement l'affichage à
+  // l'écran, exactement ce qui manquait pour que ce soit clair.
+  const [selectedFontSizePt, setSelectedFontSizePt] = useState(10);
+  const [selectedBold, setSelectedBold] = useState(false);
+  const [selectedColor, setSelectedColor] = useState("#000000");
   // Quand le clavier du téléphone est ouvert (pour taper dans une case),
   // Safari iOS réduit la zone visible SANS redimensionner la fenêtre : notre
   // barre d'outils "Ajuster"/"+ Ajouter une case", positionnée en bas de la
@@ -214,9 +224,35 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       widthPercent: parseFloat(section.style.width) || 20,
       heightPercent: parseFloat(section.style.height) || 3,
       fontSizePt: fontMatch ? parseFloat(fontMatch[1]) : 10,
+      bold: false,
+      color: "#000000",
     };
     fieldOverridesRef.current.set(fieldName, created);
     return created;
+  }
+
+  // Cherche la case (entrée de page + <section> + <input>) qui correspond à
+  // un nom de case donné, parmi les pages déjà dessinées — sert pour tout ce
+  // qui agit sur "la case actuellement sélectionnée" (police, gras, couleur,
+  // suppression).
+  function findFieldElements(fieldName: string): { entry: PageEntry; section: HTMLElement; input: HTMLInputElement } | null {
+    for (const entry of pagesRef.current) {
+      const input = entry.wrapper.querySelector<HTMLInputElement>(`input[name="${CSS.escape(fieldName)}"]`);
+      const section = input?.closest<HTMLElement>(".textWidgetAnnotation");
+      if (input && section) return { entry, section, input };
+    }
+    return null;
+  }
+
+  // Affiche dans la barre d'outils la police/taille/couleur RÉELLE de la
+  // case qu'on vient de sélectionner (pas des valeurs par défaut figées).
+  function refreshSelectedDisplay(fieldName: string) {
+    const found = findFieldElements(fieldName);
+    if (!found) return;
+    const override = ensureOverride(found.entry, found.section, found.input, fieldName);
+    setSelectedFontSizePt(override.fontSizePt);
+    setSelectedBold(override.bold);
+    setSelectedColor(override.color);
   }
 
   // Empêche Safari/iOS de proposer sa propre suggestion "Préremplir le
@@ -239,6 +275,8 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     section.style.width = `${override.widthPercent}%`;
     section.style.height = `${override.heightPercent}%`;
     input.style.fontSize = `calc(${override.fontSizePt}px * var(--total-scale-factor))`;
+    input.style.fontWeight = override.bold ? "bold" : "normal";
+    input.style.color = override.color;
   }
 
   function applyEditVisual(section: HTMLElement, input: HTMLInputElement, handle: HTMLElement | null, on: boolean) {
@@ -295,7 +333,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     let dragState: DragState | null = null;
 
     function begin(e: PointerEvent, mode: "move" | "resize") {
-      if (!editModeRef.current || addFieldModeRef.current) return;
+      if (!editModeRef.current) return;
       e.preventDefault();
       e.stopPropagation();
       const wrapperRect = entry.wrapper.getBoundingClientRect();
@@ -342,7 +380,10 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       override.topPercent = parseFloat(section.style.top) || override.topPercent;
       override.widthPercent = parseFloat(section.style.width) || override.widthPercent;
       override.heightPercent = parseFloat(section.style.height) || override.heightPercent;
-      if (!wasMoved) setSelectedField(fieldName);
+      if (!wasMoved) {
+        setSelectedField(fieldName);
+        refreshSelectedDisplay(fieldName);
+      }
     }
 
     section.onpointerdown = (e) => begin(e, "move");
@@ -407,11 +448,49 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     section.appendChild(input);
     entry.wrapper.appendChild(section);
 
-    fieldOverridesRef.current.set(fieldName, { pageNumber: entry.pageNumber, leftPercent, topPercent, widthPercent, heightPercent, fontSizePt });
+    fieldOverridesRef.current.set(fieldName, {
+      pageNumber: entry.pageNumber, leftPercent, topPercent, widthPercent, heightPercent, fontSizePt,
+      bold: false, color: "#000000",
+    });
     customFieldNamesRef.current.add(fieldName);
     attachFieldEditing(entry, section, input, fieldName);
     applyEditVisual(section, input, section.querySelector<HTMLElement>(".field-resize-handle"), editModeRef.current);
     setSelectedField(fieldName);
+    refreshSelectedDisplay(fieldName);
+  }
+
+  // Bouton "+ Ajouter une case" : ajoute la case TOUT DE SUITE (avant, il
+  // fallait d'abord toucher la page pour choisir l'endroit — source de
+  // confusion : "je clique et ça n'ajoute pas de case", car le clic sur le
+  // bouton lui-même ne comptait jamais comme le "clic sur la page"). On la
+  // fait apparaître au milieu de ce qui est actuellement visible à l'écran
+  // (sur la page la plus visible), puis on la déplace ensuite au bon endroit
+  // avec le doigt — déjà possible depuis le dernier correctif.
+  function addFieldNow() {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer || pagesRef.current.length === 0) return;
+    const containerRect = scrollContainer.getBoundingClientRect();
+    const viewportCenterY = containerRect.top + containerRect.height / 2;
+
+    let targetEntry: PageEntry | null = null;
+    let bestDistance = Infinity;
+    for (const entry of pagesRef.current) {
+      const rect = entry.wrapper.getBoundingClientRect();
+      if (rect.bottom < containerRect.top || rect.top > containerRect.bottom) continue;
+      const distance = Math.abs(rect.top + rect.height / 2 - viewportCenterY);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        targetEntry = entry;
+      }
+    }
+    if (!targetEntry) targetEntry = pagesRef.current[0];
+
+    const rect = targetEntry.wrapper.getBoundingClientRect();
+    const visibleTop = Math.max(rect.top, containerRect.top);
+    const visibleBottom = Math.min(rect.bottom, containerRect.bottom);
+    const targetY = (visibleTop + visibleBottom) / 2;
+    const topPercent = Math.max(2, Math.min(90, ((targetY - rect.top) / rect.height) * 100));
+    createCustomField(targetEntry, 35, topPercent);
   }
 
   function removeSelectedCustomField() {
@@ -431,8 +510,6 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     editModeRef.current = next;
     setEditModeOn(next);
     if (!next) {
-      addFieldModeRef.current = false;
-      setAddFieldModeOn(false);
       setSelectedField(null);
     }
     const container = pagesContainerRef.current;
@@ -444,17 +521,38 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     });
   }
 
+  // Taille de police, gras, couleur : trois réglages SÉPARÉS du zoom (le
+  // zoom — zoomDisplay/zoomRef — ne change QUE l'affichage à l'écran, jamais
+  // ces valeurs, qui sont en points PDF réels et s'appliquent pareil quel
+  // que soit le zoom).
   function adjustSelectedFontSize(deltaPt: number) {
     if (!selectedField) return;
-    for (const entry of pagesRef.current) {
-      const input = entry.wrapper.querySelector<HTMLInputElement>(`input[name="${CSS.escape(selectedField)}"]`);
-      const section = input?.closest<HTMLElement>(".textWidgetAnnotation");
-      if (!input || !section) continue;
-      const override = ensureOverride(entry, section, input, selectedField);
-      override.fontSizePt = Math.max(MIN_FONT_SIZE_PT, Math.min(MAX_FONT_SIZE_PT, override.fontSizePt + deltaPt));
-      applyOverride(section, input, override);
-      break;
-    }
+    const found = findFieldElements(selectedField);
+    if (!found) return;
+    const override = ensureOverride(found.entry, found.section, found.input, selectedField);
+    override.fontSizePt = Math.max(MIN_FONT_SIZE_PT, Math.min(MAX_FONT_SIZE_PT, override.fontSizePt + deltaPt));
+    applyOverride(found.section, found.input, override);
+    setSelectedFontSizePt(override.fontSizePt);
+  }
+
+  function toggleSelectedBold() {
+    if (!selectedField) return;
+    const found = findFieldElements(selectedField);
+    if (!found) return;
+    const override = ensureOverride(found.entry, found.section, found.input, selectedField);
+    override.bold = !override.bold;
+    applyOverride(found.section, found.input, override);
+    setSelectedBold(override.bold);
+  }
+
+  function setSelectedColorValue(hex: string) {
+    if (!selectedField) return;
+    const found = findFieldElements(selectedField);
+    if (!found) return;
+    const override = ensureOverride(found.entry, found.section, found.input, selectedField);
+    override.color = hex;
+    applyOverride(found.section, found.input, override);
+    setSelectedColor(hex);
   }
 
   useEffect(() => {
@@ -465,8 +563,6 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     setZoomDisplay(1);
     editModeRef.current = false;
     setEditModeOn(false);
-    addFieldModeRef.current = false;
-    setAddFieldModeOn(false);
     setSelectedField(null);
     fieldOverridesRef.current = new Map();
     customFieldNamesRef.current = new Set();
@@ -628,31 +724,6 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pdfBytes]);
 
-  // Tape "+ Ajouter une case" : le prochain appui sur une page crée la case
-  // à cet endroit. Un seul gestionnaire, posé une fois sur le conteneur des
-  // pages (peu importe combien de pages ou combien de fois on redessine).
-  useEffect(() => {
-    const container = pagesContainerRef.current;
-    if (!container) return;
-    function handleClick(e: MouseEvent) {
-      if (!addFieldModeRef.current) return;
-      const target = e.target as HTMLElement;
-      const wrapper = target.closest<HTMLElement>("[data-page-number]");
-      if (!wrapper) return;
-      const entry = pagesRef.current.find((p) => p.wrapper === wrapper);
-      if (!entry) return;
-      const rect = wrapper.getBoundingClientRect();
-      const leftPercent = Math.max(0, Math.min(70, ((e.clientX - rect.left) / rect.width) * 100));
-      const topPercent = Math.max(0, Math.min(95, ((e.clientY - rect.top) / rect.height) * 100));
-      createCustomField(entry, leftPercent, topPercent);
-      addFieldModeRef.current = false;
-      setAddFieldModeOn(false);
-    }
-    container.addEventListener("click", handleClick);
-    return () => container.removeEventListener("click", handleClick);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // Zoom manuel (boutons − / + / réinitialiser) : jusqu'ici, aucun mécanisme
   // de zoom n'existait dans ce lecteur (contrairement à l'ancien affichage
   // en iframe, où le mini-lecteur du téléphone gérait le pincement-zoom
@@ -684,9 +755,48 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       // Rien à déplacer/ajouter : pas besoin de repasser par pdf-lib.
       if (fieldOverridesRef.current.size === 0) return baseBytes;
       try {
-        const { PDFDocument, rgb } = await import("pdf-lib");
+        const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
         const doc = await PDFDocument.load(baseBytes);
         const form = doc.getForm();
+        // Une seule police "grasse" embarquée pour tout le PDF, réutilisée
+        // pour chaque case en gras (voir plus bas) — inutile d'en embarquer
+        // une par case.
+        let boldFont: Awaited<ReturnType<typeof doc.embedFont>> | null = null;
+        async function getBoldFont() {
+          if (!boldFont) boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
+          return boldFont;
+        }
+        // Convertit "#rrggbb" en 0..1 (rgb() de pdf-lib) pour l'écrire dans
+        // la chaîne "DA" (apparence par défaut) de la case, au format PDF
+        // "r g b rg" — vérifié par un vrai test d'aller-retour (écrire,
+        // enregistrer, relire) avant d'écrire ce code : la couleur ET la
+        // police grasse ressortent bien telles quelles après enregistrement.
+        function hexToRgbOperator(hex: string): string {
+          const clean = hex.replace("#", "");
+          const r = parseInt(clean.slice(0, 2), 16) / 255;
+          const g = parseInt(clean.slice(2, 4), 16) / 255;
+          const b = parseInt(clean.slice(4, 6), 16) / 255;
+          return `${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg`;
+        }
+        // Applique couleur + gras à une case texte déjà positionnée/dont la
+        // taille de police est déjà posée (setFontSize doit être appelé
+        // AVANT, car il reconstruit une partie de la chaîne DA — voir
+        // PDFAcroField.setFontSize dans pdf-lib, qui garde heureusement tout
+        // ce qui suit "Tf", dont notre couleur, si on l'ajoute après).
+        async function applyColorAndBold(field: Awaited<ReturnType<typeof form.getTextField>>, override: FieldOverride) {
+          const da = field.acroField.getDefaultAppearance() ?? "";
+          const fontMatch = /\/(\S+)\s+([\d.]+)\s+Tf/.exec(da);
+          const fontName = fontMatch ? fontMatch[1] : "Helv";
+          const fontSize = fontMatch ? fontMatch[2] : String(Math.max(4, Math.round(override.fontSizePt)));
+          field.acroField.setDefaultAppearance(`/${fontName} ${fontSize} Tf ${hexToRgbOperator(override.color)}`);
+          if (override.bold) {
+            // updateAppearances() dessine tout de suite l'aperçu avec la
+            // police grasse ET marque la case "propre" : le passage générique
+            // form.updateFieldAppearances() plus bas ne la retouchera donc
+            // pas avec une police normale par-dessus (vérifié).
+            field.updateAppearances(await getBoldFont());
+          }
+        }
         for (const [fieldName, override] of fieldOverridesRef.current) {
           try {
             const page = doc.getPage(override.pageNumber - 1);
@@ -709,10 +819,12 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
               });
               field.setFontSize(Math.max(4, Math.round(override.fontSizePt)));
               if (value) field.setText(value);
+              await applyColorAndBold(field, override);
             } else {
               const field = form.getTextField(fieldName);
               field.acroField.getWidgets().forEach((widget) => widget.setRectangle({ x: xPt, y: yPt, width: widthPt, height: heightPt }));
               field.setFontSize(Math.max(4, Math.round(override.fontSizePt)));
+              await applyColorAndBold(field, override);
             }
           } catch {
             // Une case qu'on ne retrouve plus (nom introuvable...) ne doit
@@ -782,16 +894,33 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         {editModeOn && (
           <button
             type="button"
-            onClick={() => { addFieldModeRef.current = !addFieldModeRef.current; setAddFieldModeOn(addFieldModeRef.current); }}
-            style={{ ...zoomButtonStyle, width: "auto", padding: "0 12px", fontSize: 12, background: addFieldModeOn ? "#2563eb" : "#fff", color: addFieldModeOn ? "#fff" : "#111" }}
+            onClick={addFieldNow}
+            style={{ ...zoomButtonStyle, width: "auto", padding: "0 12px", fontSize: 12, background: "#fff", color: "#111" }}
           >
-            {addFieldModeOn ? "Touchez la page…" : "+ Ajouter une case"}
+            + Ajouter une case
           </button>
         )}
         {editModeOn && selectedField && (
-          <div style={{ display: "flex", gap: 6, background: "rgba(255,255,255,.96)", borderRadius: 8, padding: 6, boxShadow: "0 1px 6px rgba(0,0,0,.3)" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, background: "rgba(255,255,255,.96)", borderRadius: 8, padding: 6, boxShadow: "0 1px 6px rgba(0,0,0,.3)" }}>
+            {/* Taille de police : en points PDF réels, séparée du zoom — zoomer/dézoomer l'écran ne change jamais ce nombre. */}
             <button type="button" onClick={() => adjustSelectedFontSize(-FONT_SIZE_STEP_PT)} style={zoomButtonStyle} aria-label="Police plus petite">A−</button>
+            <span style={{ fontSize: 12, minWidth: 34, textAlign: "center", color: "#111" }}>{selectedFontSizePt}pt</span>
             <button type="button" onClick={() => adjustSelectedFontSize(FONT_SIZE_STEP_PT)} style={zoomButtonStyle} aria-label="Police plus grande">A+</button>
+            <button
+              type="button"
+              onClick={toggleSelectedBold}
+              style={{ ...zoomButtonStyle, width: "auto", padding: "0 10px", fontWeight: "bold", background: selectedBold ? "#2563eb" : "#fff", color: selectedBold ? "#fff" : "#111" }}
+              aria-label="Gras"
+            >
+              G
+            </button>
+            <input
+              type="color"
+              value={selectedColor}
+              onChange={(e) => setSelectedColorValue(e.target.value)}
+              aria-label="Couleur du texte"
+              style={{ width: 34, height: 34, padding: 0, border: "1px solid #d1d5db", borderRadius: 6, background: "#fff" }}
+            />
             {customFieldNamesRef.current.has(selectedField) && (
               <button type="button" onClick={removeSelectedCustomField} style={{ ...zoomButtonStyle, color: "#b91c1c" }} aria-label="Supprimer cette case">✕</button>
             )}
