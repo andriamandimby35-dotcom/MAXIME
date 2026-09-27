@@ -273,14 +273,17 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
   function ensureOverride(entry: PageEntry, section: HTMLElement, input: HTMLInputElement, fieldName: string): FieldOverride {
     const existing = fieldOverridesRef.current.get(fieldName);
     if (existing) return existing;
-    const fontMatch = /calc\(([\d.]+)px/.exec(input.style.fontSize || "");
+    // La taille de départ est TOUJOURS 11pt par défaut, même pour une case
+    // déjà présente dans le PDF d'origine (on ignore volontairement la
+    // taille que pdf.js affichait avant qu'on y touche) — 11pt par défaut
+    // partout, pas seulement pour les cases ajoutées à la main.
     const created: FieldOverride = {
       pageNumber: entry.pageNumber,
       leftPercent: parseFloat(section.style.left) || 0,
       topPercent: parseFloat(section.style.top) || 0,
       widthPercent: parseFloat(section.style.width) || 20,
       heightPercent: parseFloat(section.style.height) || 3,
-      fontSizePt: fontMatch ? parseFloat(fontMatch[1]) : 11,
+      fontSizePt: 11,
       bold: false,
       fontFamily: "times",
       color: "#000000",
