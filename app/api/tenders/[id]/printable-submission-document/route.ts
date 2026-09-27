@@ -4,7 +4,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import { createPrintableSubmissionPdf } from "@/lib/submission/printable-pdf";
 import { appendDaoPagesToPdf, appendExternalFileAsPages, createFilledDaoTemplatePdf, createFillableDaoTemplatePdf } from "@/lib/submission/dao-template-pdf";
 import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholders, locateTableCellPositions } from "@/lib/submission/locate-field-positions";
-import { findBestTitleMatch } from "@/lib/submission/title-match";
+import { findBestTitleMatch, titleSimilarity } from "@/lib/submission/title-match";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
 import { trimToRelevantStart, extractRelevantPageRange, locateTitleInFullDocument } from "@/lib/submission/trim-to-relevant-pages";
 import { daoSourcedGenericTitles, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
@@ -435,7 +435,22 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // pour cette pièce précise (c'est ce qui provoquait le texte mélangé et
   // les mots coupés à l'impression). Réutilise le PDF déjà mis en cache par
   // getDocumentBytes ci-dessus : jamais un second téléchargement du DAO.
-  if (analysis?.submission_items?.some((item) => item.template_origin === "dao" && (item.template_page_numbers?.length ?? 0) > 1)) {
+  // BUG corrigé : ce déclencheur ne regardait QUE template_page_numbers,
+  // sans jamais combiner les pages parfois notées seulement en texte dans
+  // source_reference ("Pages 16, 267-268") — déjà corrigé à l'affichage du
+  // dossier (page.tsx) et à la toute première génération (generate/route.ts)
+  // mais oublié ICI, la route qui fabrique VRAIMENT le PDF. Une pièce dont
+  // la page manquante n'était révélée QUE par ce texte (ex. "A2 :
+  // CAPACITES TECHNIQUES", pages réelles 14 ET 15, mais 15 seulement citée
+  // en texte) ne déclenchait donc jamais ce découpage ICI, même si le
+  // dossier affiché la montrait déjà bien séparée en "A2-a"/"A2-b" — cette
+  // route continuait alors de chercher son modèle dans l'ANCIENNE liste
+  // encore fusionnée, sans jamais trouver "A2-a Matériel" dedans, et
+  // retombait sur un mauvais rapprochement (voir findBestTitleMatch plus
+  // bas) qui mélangeait le contenu des deux pièces. Même correctif partout
+  // où cette détection existe, pour que les trois restent cohérentes.
+  if (analysis?.submission_items?.some((item) => item.template_origin === "dao"
+    && new Set([...(item.template_page_numbers ?? []), ...parsePageNumbersFromReference(item.source_reference)]).size > 1)) {
     try {
       const bytes = await getDocumentBytes();
       if (bytes) {
@@ -842,6 +857,14 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       // valeur", plutôt que de se perdre. Sans template_text du tout, formLines
       // (repli ci-dessous) couvre déjà ces informations : pas besoin de ce
       // garde-fou dans ce cas.
+      // Un tableau détecté par erreur pour une AUTRE pièce du dossier (même
+      // souci de fusion par l'IA) ne doit pas non plus apparaître ici.
+      const safeTemplateTables = templateTables.filter((table) => !containsOtherItemTitle(table.title, siblingTitlesForThisItem));
+      // Toutes les colonnes des tableaux qui vont vraiment s'afficher plus
+      // bas (ex. "Désignation", "Etat", "Date d'acquisition", "Statut") : un
+      // champ "restant" qui correspond en fait à L'UNE DE CES COLONNES ne
+      // doit jamais s'afficher une seconde fois en dessous du tableau.
+      const tableColumnLabels = safeTemplateTables.flatMap((table) => table.columns);
       const leftoverFieldLines = templateTextRaw ? (() => {
         const referencedKeys = new Set(Array.from(templateTextRaw.matchAll(/\{\{([a-z0-9_]+)\}\}/gi), (match) => match[1].toLowerCase()));
         return fields
@@ -859,13 +882,26 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           // en fait le titre/la consigne d'une AUTRE pièce du dossier (l'IA a
           // mélangé les deux pièces lors de l'analyse) ne doit jamais
           // s'afficher ici — ni comme "Libellé :", ni comme valeur.
+          //
+          // BUG corrigé (signalé par Maxime sur "A2-a Matériel" : une section
+          // "Informations complémentaires" affichait "Matériel - état",
+          // "Matériel - date d'acquisition", "Matériel - statut" avec des
+          // valeurs de repli n'ayant AUCUN sens ici — ex. un numéro de
+          // téléphone de l'entreprise recopié comme "état du matériel").
+          // Cause : ces trois champs correspondent en fait aux colonnes DU
+          // TABLEAU affiché juste au-dessus (voir tableColumnLabels) — un
+          // "champ restant" qui désigne en réalité une colonne déjà présente
+          // dans un tableau n'est par définition JAMAIS une info manquante à
+          // rajouter à part, seulement un doublon d'une case déjà remplissable
+          // ligne par ligne dans ce même tableau. Générique par construction
+          // (titleSimilarity, déjà utilisée ailleurs pour ce genre de
+          // rapprochement) : s'applique à n'importe quel DAO/tableau, jamais
+          // un nom de colonne codé en dur.
           .filter((line): line is { label: string; value: string } => line !== null
             && !containsOtherItemTitle(line.label, siblingTitlesForThisItem)
-            && !containsOtherItemTitle(line.value, siblingTitlesForThisItem));
+            && !containsOtherItemTitle(line.value, siblingTitlesForThisItem)
+            && !tableColumnLabels.some((column) => titleSimilarity(line.label, column) >= 0.6));
       })() : undefined;
-      // Un tableau détecté par erreur pour une AUTRE pièce du dossier (même
-      // souci de fusion par l'IA) ne doit pas non plus apparaître ici.
-      const safeTemplateTables = templateTables.filter((table) => !containsOtherItemTitle(table.title, siblingTitlesForThisItem));
       const blocks = buildGeneratedDocumentBlocks({
         title: detectedTemplate?.title || title,
         templateText: templateTextRaw,
