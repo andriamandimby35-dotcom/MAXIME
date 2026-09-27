@@ -1,5 +1,6 @@
 import "@/lib/submission/pdfjs-worker-setup";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { significantWords } from "@/lib/submission/title-match";
 
 // Une plage de pages tirée d'une référence textuelle ("Pages 31-46, Partie
 // III") ou de numéros extraits par l'IA peut englober plusieurs documents à
@@ -26,6 +27,31 @@ function normalizeText(value: string) {
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "")
     .toLocaleLowerCase("fr-FR");
+}
+
+// Un intitulé de tableau connu (ex. "A2-a Matériel") n'est pas toujours écrit
+// MOT POUR MOT sur la page du DAO (ponctuation, espaces ou tirets
+// différents : "A2 - a) Matériel" par exemple) — une recherche de texte EXACTE
+// (includes()) ratait alors des pages pourtant correctes. On compare plutôt
+// les MOTS significatifs du titre (même méthode que findBestTitleMatch dans
+// title-match.ts, déjà utilisée ailleurs dans le projet pour ce genre de
+// rapprochement tolérant) à ceux réellement présents sur la page.
+function pageWords(pageText: string) {
+  return new Set(
+    pageText
+      .toLocaleLowerCase("fr-FR")
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((word) => word.length >= 3),
+  );
+}
+function pageLikelyContainsTitle(pageText: string, title: string, minRatio = 0.7) {
+  const titleWords = significantWords(title);
+  if (!titleWords.size) return false;
+  const wordsOnPage = pageWords(pageText);
+  let matched = 0;
+  for (const word of titleWords) if (wordsOnPage.has(word)) matched += 1;
+  return matched / titleWords.size >= minRatio;
 }
 
 /** Une ligne réellement en majuscules — sans lettre minuscule, au moins 4 lettres. */
@@ -563,30 +589,64 @@ export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: nu
     // Aucun titre de tableau n'est codé en dur ici : la liste vient toujours
     // de template_tables de la pièce elle-même.
     const tableBoundaryPages = new Map<number, string>();
+    const unmatchedTableTitles: string[] = [];
     for (const tableTitle of ownTableTitles ?? []) {
-      const normalizedTitle = normalizeText(tableTitle);
-      if (!normalizedTitle) continue;
+      if (!tableTitle.trim()) continue;
+      let found = false;
       for (const pageNumber of sortedPages) {
         if (pageNumber < 1 || pageNumber > doc.numPages) continue;
         try {
           const text = await normalizedPageText(doc, pageNumber);
-          if (text.includes(normalizedTitle)) { if (!tableBoundaryPages.has(pageNumber)) tableBoundaryPages.set(pageNumber, tableTitle); break; }
+          if (pageLikelyContainsTitle(text, tableTitle)) { if (!tableBoundaryPages.has(pageNumber)) tableBoundaryPages.set(pageNumber, tableTitle); found = true; break; }
         } catch {
           // Page illisible pour cette recherche : ignorée, sans bloquer les autres tableaux.
         }
       }
+      if (!found) unmatchedTableTitles.push(tableTitle);
     }
 
-    const segments: MergedItemSegment[] = [{ pages: [sortedPages[0]], title: "" }];
+    // RÈGLE GÉNÉRALE : l'IA compte parfois les pages d'une pièce en dessous
+    // de la réalité (ex. une seule page notée alors que le DAO en utilise
+    // deux, une par tableau) — un tableau connu de la pièce n'est alors
+    // trouvé sur AUCUNE des pages déclarées. On cherche ce tableau sur
+    // quelques pages juste après la dernière page déclarée (bornée, jamais
+    // tout le DAO), et s'il y est trouvé, cette page rejoint la plage de
+    // travail de la pièce, exactement comme si l'IA l'avait citée dès le
+    // départ.
+    const workingPages = new Set(sortedPages);
+    if (unmatchedTableTitles.length) {
+      const lastKnownPage = sortedPages[sortedPages.length - 1];
+      const EXTENSION_LIMIT = 6;
+      for (let offset = 1; offset <= EXTENSION_LIMIT && unmatchedTableTitles.length; offset += 1) {
+        const candidatePage = lastKnownPage + offset;
+        if (candidatePage > doc.numPages || workingPages.has(candidatePage)) continue;
+        let text = "";
+        try {
+          text = await normalizedPageText(doc, candidatePage);
+        } catch {
+          continue;
+        }
+        for (let index = unmatchedTableTitles.length - 1; index >= 0; index -= 1) {
+          if (pageLikelyContainsTitle(text, unmatchedTableTitles[index])) {
+            tableBoundaryPages.set(candidatePage, unmatchedTableTitles[index]);
+            workingPages.add(candidatePage);
+            unmatchedTableTitles.splice(index, 1);
+          }
+        }
+      }
+    }
+    const workingSortedPages = [...workingPages].sort((a, b) => a - b);
+
+    const segments: MergedItemSegment[] = [{ pages: [workingSortedPages[0]], title: "" }];
     let referenceHeading = "";
     try {
-      const first = await pageHeadingLine(doc, sortedPages[0]);
+      const first = await pageHeadingLine(doc, workingSortedPages[0]);
       if (first.titleLine) { segments[0].title = first.titleLine; referenceHeading = first.heading; }
     } catch {
       // Première page illisible : segment de départ gardé sans titre connu.
     }
-    for (let index = 1; index < sortedPages.length; index += 1) {
-      const pageNumber = sortedPages[index];
+    for (let index = 1; index < workingSortedPages.length; index += 1) {
+      const pageNumber = workingSortedPages[index];
       const currentSegment = segments[segments.length - 1];
       if (pageNumber < 1 || pageNumber > doc.numPages) { currentSegment.pages.push(pageNumber); continue; }
       try {
@@ -620,21 +680,21 @@ export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: nu
   }
 }
 
-// Les pages sur lesquelles le texte donné (recherche littérale, insensible
-// aux accents/à la casse) apparaît réellement — sert à rattacher un tableau
-// déjà connu (son intitulé) au bon segment après un découpage, sans dépendre
-// d'aucune mise en forme (un intitulé de tableau n'est pas toujours en
-// gras/majuscules, contrairement à un vrai titre de pièce).
+// Les pages sur lesquelles le texte donné apparaît réellement (comparaison
+// par mots significatifs, tolérante à la ponctuation/mise en forme — voir
+// pageLikelyContainsTitle plus haut) — sert à rattacher un tableau déjà connu
+// (son intitulé) au bon segment après un découpage, sans dépendre d'aucune
+// mise en forme (un intitulé de tableau n'est pas toujours en gras/
+// majuscules, contrairement à un vrai titre de pièce).
 export async function pagesContainingText(pdfBytes: Uint8Array, pages: number[], needle: string): Promise<Set<number>> {
-  const normalizedNeedle = normalizeText(needle);
   const matches = new Set<number>();
-  if (!normalizedNeedle || !pages.length) return matches;
+  if (!needle.trim() || !pages.length) return matches;
   try {
     const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
     for (const pageNumber of pages) {
       if (pageNumber < 1 || pageNumber > doc.numPages) continue;
       const text = await normalizedPageText(doc, pageNumber);
-      if (text.includes(normalizedNeedle)) matches.add(pageNumber);
+      if (pageLikelyContainsTitle(text, needle)) matches.add(pageNumber);
     }
     return matches;
   } catch {

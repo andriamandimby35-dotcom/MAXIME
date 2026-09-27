@@ -190,6 +190,23 @@
   }
 }
 
+/* Demandé par Maxime : sur ordinateur (au-dessus de 760px), le menu de
+   gauche ne doit JAMAIS défiler avec la page de droite, il doit rester
+   immobile. La règle .sidebar plus haut le fixe déjà (position: fixed), mais
+   on la renforce ici avec un sélecteur plus précis et !important — comme
+   pour le menu mobile ci-dessus — pour être sûr qu'aucune autre règle ne
+   puisse annuler ce comportement par erreur. Rien ne change sur téléphone
+   (uniquement au-dessus de 760px, jamais en dessous). */
+@media (min-width: 761px) {
+  .dashboardLayout .sidebar {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    bottom: 0 !important;
+    height: 100vh !important;
+  }
+}
+
 
 
 .brand {

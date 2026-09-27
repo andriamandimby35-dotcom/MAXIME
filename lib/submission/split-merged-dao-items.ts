@@ -28,10 +28,15 @@ export async function splitMergedDaoItems<T extends TemplateDetectedItem>(items:
   const result: T[] = [];
   for (const item of items) {
     const pages = item.template_page_numbers ?? [];
-    // Un item qui ne vient pas d'une vraie page du DAO, ou qui ne tient que
-    // sur une seule page, ne peut par définition pas avoir fusionné deux
-    // pièces différentes : rien à vérifier, on le laisse tel quel.
-    if (item.template_origin !== "dao" || pages.length < 2) { result.push(item); continue; }
+    // Un item qui ne vient pas d'une vraie page du DAO ne peut par définition
+    // pas avoir fusionné deux pièces différentes : rien à vérifier. Une seule
+    // page déclarée ne suffit PAS à elle seule à l'exclure : l'IA compte
+    // parfois les pages en dessous de la réalité (une seule page notée alors
+    // que le DAO en utilise deux, une par tableau) — quand la pièce a
+    // PLUSIEURS tableaux, on laisse une chance à splitPagesByOwnTitle de
+    // retrouver la vraie page manquante (voir son extension de recherche).
+    const hasMultipleTables = (item.template_tables?.length ?? 0) > 1;
+    if (item.template_origin !== "dao" || (pages.length < 2 && !hasMultipleTables)) { result.push(item); continue; }
     const sortedPages = [...new Set(pages)].sort((a, b) => a - b);
     // Les intitulés des tableaux déjà connus de CETTE pièce (jamais codés en
     // dur) aident à repérer une limite de page même sans titre stylé détecté
