@@ -1119,7 +1119,24 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     <div
       ref={scrollContainerRef}
       className="fillable-pdf-viewer"
-      style={{ position: "relative", width: "100%", height: "100%", overflow: "auto", background: "#f3f4f6", borderRadius: "10px" }}
+      // BUG corrigé (généralisé à TOUT document ouvert dans ce lecteur,
+      // signalé sur "A5 - Litiges" mais pas spécifique à cette pièce) :
+      // "texte à moitié caché", ascenseur horizontal en trop, alors que la
+      // page elle-même n'est pourtant pas plus large que prévu. Cause :
+      // containerWidth (voir plus bas, "pagesContainer.clientWidth") est
+      // mesuré AVANT que les pages ne soient ajoutées à ce conteneur — donc
+      // avant que l'ascenseur VERTICAL (qui n'apparaît qu'une fois tout le
+      // contenu ajouté, si le document est assez long/a plusieurs tableaux)
+      // ne réserve sa place. Le zoom "Ajuster" calculé à ce moment-là est
+      // donc systématiquement un peu trop large dès qu'un document a besoin
+      // de défiler verticalement — l'ascenseur vertical grignote alors
+      // cette largeur après coup, sans que le zoom ne soit recalculé,
+      // coupant le bord droit de la page. scrollbarGutter:"stable" réserve
+      // TOUJOURS cette place à l'avance (que l'ascenseur soit affiché ou
+      // non), donc la largeur mesurée est toujours la bonne, sur n'importe
+      // quel document, dans toute l'application (ce lecteur est le seul
+      // utilisé partout où "Ouvrir" est cliqué).
+      style={{ position: "relative", width: "100%", height: "100%", overflow: "auto", scrollbarGutter: "stable", background: "#f3f4f6", borderRadius: "10px" }}
     >
       {loading && !errorMessage && <p style={{ padding: 16, margin: 0, textAlign: "center" }}>Chargement du PDF…</p>}
       {errorMessage && <p style={{ padding: 16, margin: 0, textAlign: "center", color: "#b91c1c" }}>{errorMessage}</p>}
