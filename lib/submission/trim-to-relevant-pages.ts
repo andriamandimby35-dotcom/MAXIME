@@ -544,10 +544,39 @@ export async function extractRelevantPageRange(
 // quel DAO.
 export type MergedItemSegment = { pages: number[]; title: string };
 
-export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: number[]): Promise<MergedItemSegment[]> {
+export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: number[], ownTableTitles?: string[]): Promise<MergedItemSegment[]> {
   if (!sortedPages.length) return [];
   try {
     const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+
+    // RÈGLE GÉNÉRALE (demandée après un cas réel, mais valable pour n'importe
+    // quel DAO) : quand le DAO original demande deux tableaux sur DEUX PAGES
+    // DIFFÉRENTES d'une même pièce fusionnée à tort par l'IA, il faut les
+    // séparer en deux pièces distinctes — même quand la seconde page n'a pas
+    // de titre visuellement distinct (gras/majuscules). Se fier UNIQUEMENT à
+    // la mise en forme du titre a laissé des tableaux mal rattachés (ex. un
+    // tableau "Litiges" retrouvé collé à une pièce qui n'est pas la sienne).
+    // On repère donc, pour chaque tableau déjà connu de cette pièce, la toute
+    // première page (parmi les pages de la pièce, dans l'ordre) où son
+    // intitulé apparaît réellement dans le texte — cette page devient aussi
+    // une limite de segment, en plus des titres détectés par mise en forme.
+    // Aucun titre de tableau n'est codé en dur ici : la liste vient toujours
+    // de template_tables de la pièce elle-même.
+    const tableBoundaryPages = new Map<number, string>();
+    for (const tableTitle of ownTableTitles ?? []) {
+      const normalizedTitle = normalizeText(tableTitle);
+      if (!normalizedTitle) continue;
+      for (const pageNumber of sortedPages) {
+        if (pageNumber < 1 || pageNumber > doc.numPages) continue;
+        try {
+          const text = await normalizedPageText(doc, pageNumber);
+          if (text.includes(normalizedTitle)) { if (!tableBoundaryPages.has(pageNumber)) tableBoundaryPages.set(pageNumber, tableTitle); break; }
+        } catch {
+          // Page illisible pour cette recherche : ignorée, sans bloquer les autres tableaux.
+        }
+      }
+    }
+
     const segments: MergedItemSegment[] = [{ pages: [sortedPages[0]], title: "" }];
     let referenceHeading = "";
     try {
@@ -566,9 +595,18 @@ export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: nu
         // pièce commence ici, jamais une simple continuation (même règle que
         // isStopBoundary plus haut, sans comparaison à un titre demandé —
         // ici on compare seulement les titres trouvés entre eux).
-        if (titleLine && heading !== referenceHeading) {
-          segments.push({ pages: [pageNumber], title: titleLine });
-          referenceHeading = heading;
+        const newStyledTitle = Boolean(titleLine) && heading !== referenceHeading;
+        // Même sans titre stylé détecté : un tableau de cette pièce démarre
+        // justement sur cette page (voir tableBoundaryPages plus haut), donc
+        // le DAO original les a mis sur des pages séparées — l'extraction
+        // doit faire pareil.
+        const newTableBoundary = !newStyledTitle && tableBoundaryPages.has(pageNumber);
+        if (newStyledTitle || newTableBoundary) {
+          // Sans titre stylé détecté, on nomme le segment d'après le tableau
+          // qui a déclenché cette limite : bien plus utile qu'un titre vide
+          // pour distinguer les pièces séparées à l'affichage.
+          segments.push({ pages: [pageNumber], title: newStyledTitle ? (titleLine ?? "") : (tableBoundaryPages.get(pageNumber) ?? "") });
+          if (newStyledTitle) referenceHeading = heading;
         } else {
           currentSegment.pages.push(pageNumber);
         }

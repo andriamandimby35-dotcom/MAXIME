@@ -179,9 +179,13 @@ export async function splitMergedDaoItems<T extends TemplateDetectedItem>(items:
     // pièces différentes : rien à vérifier, on le laisse tel quel.
     if (item.template_origin !== "dao" || pages.length < 2) { result.push(item); continue; }
     const sortedPages = [...new Set(pages)].sort((a, b) => a - b);
+    // Les intitulés des tableaux déjà connus de CETTE pièce (jamais codés en
+    // dur) aident à repérer une limite de page même sans titre stylé détecté
+    // — voir le commentaire dans splitPagesByOwnTitle.
+    const ownTableTitles = (item.template_tables ?? []).map((table) => table.title);
     let segments: Awaited<ReturnType<typeof splitPagesByOwnTitle>> = [];
     try {
-      segments = await splitPagesByOwnTitle(pdfBytes, sortedPages);
+      segments = await splitPagesByOwnTitle(pdfBytes, sortedPages, ownTableTitles);
     } catch {
       segments = [];
     }
