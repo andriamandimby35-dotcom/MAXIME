@@ -7,7 +7,8 @@ import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholde
 import { findBestTitleMatch } from "@/lib/submission/title-match";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
 import { trimToRelevantStart, extractRelevantPageRange, locateTitleInFullDocument } from "@/lib/submission/trim-to-relevant-pages";
-import { daoSourcedGenericTitles, splitMergedDaoItems, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
+import { daoSourcedGenericTitles, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
+import { splitMergedDaoItems } from "@/lib/submission/split-merged-dao-items";
 import { renderGeneratedDocumentPdf } from "@/lib/submission/generated-document-pdf";
 import { buildGeneratedDocumentBlocks } from "@/lib/submission/generated-document-blocks";
 import { resolveKnownFieldValue, normalizeIdentifier, isGuaranteeBankIdentityTitle } from "@/lib/submission/resolve-known-field-value";

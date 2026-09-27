@@ -2,7 +2,8 @@ import { notFound } from "next/navigation";
 import SubmissionDossierManager from "@/components/tenders/SubmissionDossierManager";
 import { GenerateSubmissionDossierButton } from "@/components/tenders/GenerateSubmissionDossierButton";
 import { getContext } from "@/lib/organization";
-import { buildMasterDetectedItems, splitMergedDaoItems, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
+import { buildMasterDetectedItems, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
+import { splitMergedDaoItems } from "@/lib/submission/split-merged-dao-items";
 
 export default async function SubmissionPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ estimateId?: string }> }) {
   const { id } = await params;

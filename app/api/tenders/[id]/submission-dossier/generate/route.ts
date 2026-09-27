@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { buildMasterDetectedItems, buildDossierRecordsForInsert, splitMergedDaoItems, type MasterAnalysis, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
+import { buildMasterDetectedItems, buildDossierRecordsForInsert, type MasterAnalysis, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
+import { splitMergedDaoItems } from "@/lib/submission/split-merged-dao-items";
 
 function migrationError(error: { code?: string; message?: string } | null) {
   return error?.code === "42P01" || error?.message?.includes("does not exist");
