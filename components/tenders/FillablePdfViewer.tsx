@@ -311,6 +311,13 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     const found = findFieldElements(fieldName);
     if (!found) return;
     const override = ensureOverride(found.entry, found.section, found.input, fieldName);
+    // Réapplique aussi le VISUEL (pas seulement les valeurs affichées dans
+    // la barre d'outils) : sans ça, une case pas encore touchée cette
+    // session (donc pas encore repassée par applyOverride dans afterDraw)
+    // pouvait afficher "11" dans les réglages tout en restant à sa taille
+    // d'origine à l'écran tant qu'on n'y touchait pas pour de vrai — l'écran
+    // et les réglages désaccordés l'un de l'autre.
+    applyOverride(found.section, found.input, override);
     setSelectedFontSizePt(override.fontSizePt);
     setSelectedBold(override.bold);
     setSelectedColor(override.color);
@@ -915,7 +922,16 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
             const page = doc.getPage(override.pageNumber - 1);
             const { width: pageWidth, height: pageHeight } = page.getSize();
             const widthPt = (override.widthPercent / 100) * pageWidth;
-            const heightPt = (override.heightPercent / 100) * pageHeight;
+            const fontSizePt = Math.max(4, Math.round(override.fontSizePt));
+            // Une case trop basse pour la taille de police demandée se fait
+            // "rétrécir" visuellement par pdf.js à la RÉOUVERTURE (même si
+            // la case DA garde bien la bonne taille), ce qui donnait
+            // l'impression que la taille choisie (11pt) ne se réappliquait
+            // pas tant qu'on ne la changeait pas puis remettait à la main —
+            // même filet de sécurité déjà utilisé côté serveur pour les
+            // nouvelles cases cliquables (voir addTextField dans
+            // dao-template-pdf.ts, "Math.max(rect.height, fontSize * 1.3)").
+            const heightPt = Math.max((override.heightPercent / 100) * pageHeight, fontSizePt * 1.3);
             const xPt = (override.leftPercent / 100) * pageWidth;
             // top% est mesuré depuis le HAUT (convention CSS) ; /Rect PDF
             // mesure y depuis le BAS de la page — même conversion que
@@ -930,13 +946,13 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
                 x: xPt, y: yPt, width: widthPt, height: heightPt,
                 borderWidth: 1, borderColor: rgb(0.15, 0.39, 0.92), backgroundColor: rgb(1, 1, 1),
               });
-              field.setFontSize(Math.max(4, Math.round(override.fontSizePt)));
+              field.setFontSize(fontSizePt);
               if (value) field.setText(value);
               await applyTextStyle(field, override);
             } else {
               const field = form.getTextField(fieldName);
               field.acroField.getWidgets().forEach((widget) => widget.setRectangle({ x: xPt, y: yPt, width: widthPt, height: heightPt }));
-              field.setFontSize(Math.max(4, Math.round(override.fontSizePt)));
+              field.setFontSize(fontSizePt);
               await applyTextStyle(field, override);
             }
           } catch {
