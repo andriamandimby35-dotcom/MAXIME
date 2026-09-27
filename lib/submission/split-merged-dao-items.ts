@@ -21,7 +21,7 @@
 // construire). N'importer ce fichier QUE depuis du code serveur (pages,
 // routes API) — jamais depuis un composant "use client".
 import { splitPagesByOwnTitle, pagesContainingText } from "@/lib/submission/trim-to-relevant-pages";
-import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
+import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
 import type { Field, TemplateDetectedItem, TemplateTable } from "@/lib/submission/build-dossier-items";
 
 export async function splitMergedDaoItems<T extends TemplateDetectedItem>(items: T[], pdfBytes: Uint8Array | null): Promise<T[]> {
@@ -38,12 +38,10 @@ export async function splitMergedDaoItems<T extends TemplateDetectedItem>(items:
     // corrigé ailleurs (route.ts, "detectedTemplateKnownPages") mais pas
     // encore ici : cette pièce ne voyait donc jamais sa page 267/268, et le
     // découpage ci-dessous ne pouvait jamais la détecter comme une pièce
-    // séparée. On combine donc toujours les deux sources, exactement comme
-    // route.ts le fait déjà pour la génération du PDF.
-    const pages = [...new Set([
-      ...(item.template_page_numbers ?? []),
-      ...parsePageNumbersFromReference(item.source_reference),
-    ])];
+    // séparée. On combine donc toujours les deux sources via
+    // knownPagesForItem (fonction partagée, voir parse-page-reference.ts) —
+    // jamais une union réécrite à la main ici.
+    const pages = knownPagesForItem(item);
     // Un item qui ne vient pas d'une vraie page du DAO ne peut par définition
     // pas avoir fusionné deux pièces différentes : rien à vérifier. Une seule
     // page déclarée ne suffit PAS à elle seule à l'exclure : l'IA compte

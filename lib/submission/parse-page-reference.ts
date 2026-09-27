@@ -28,3 +28,20 @@ export function parsePageNumbersFromReference(reference: string | undefined | nu
   }
   return [...pages].sort((a, b) => a - b);
 }
+
+// RÈGLE GÉNÉRALE PARTAGÉE (demandée après avoir dû répéter ce même correctif
+// à plusieurs endroits — page.tsx, generate/route.ts,
+// printable-submission-document/route.ts, split-merged-dao-items.ts — sans
+// jamais tous les mettre à jour d'un coup) : "quelles sont les VRAIES pages
+// connues de cette pièce" combine TOUJOURS template_page_numbers (ce que
+// l'IA a noté formellement) et les pages seulement citées en texte dans
+// source_reference (ex. "Pages 16, 267-268") — une page manquante d'un
+// côté peut très bien exister de l'autre. Toute nouvelle vérification "cette
+// pièce s'étale-t-elle sur plusieurs pages ?" doit passer par CETTE seule
+// fonction plutôt que réécrire l'union à la main : un futur correctif de
+// cette règle (ex. un nouveau format de référence à reconnaître) se
+// répercute alors automatiquement PARTOUT où elle est utilisée, sans avoir
+// besoin de le refaire un par un à chaque endroit.
+export function knownPagesForItem(item: { template_page_numbers?: number[]; source_reference?: string | null }): number[] {
+  return [...new Set([...(item.template_page_numbers ?? []), ...parsePageNumbersFromReference(item.source_reference)])].sort((a, b) => a - b);
+}

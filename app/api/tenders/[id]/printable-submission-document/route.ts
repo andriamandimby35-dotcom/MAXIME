@@ -5,7 +5,7 @@ import { createPrintableSubmissionPdf } from "@/lib/submission/printable-pdf";
 import { appendDaoPagesToPdf, appendExternalFileAsPages, createFilledDaoTemplatePdf, createFillableDaoTemplatePdf } from "@/lib/submission/dao-template-pdf";
 import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholders, locateTableCellPositions } from "@/lib/submission/locate-field-positions";
 import { findBestTitleMatch, titleSimilarity } from "@/lib/submission/title-match";
-import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
+import { parsePageNumbersFromReference, knownPagesForItem } from "@/lib/submission/parse-page-reference";
 import { trimToRelevantStart, extractRelevantPageRange, locateTitleInFullDocument } from "@/lib/submission/trim-to-relevant-pages";
 import { daoSourcedGenericTitles, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
 import { splitMergedDaoItems } from "@/lib/submission/split-merged-dao-items";
@@ -447,10 +447,13 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // route continuait alors de chercher son modèle dans l'ANCIENNE liste
   // encore fusionnée, sans jamais trouver "A2-a Matériel" dedans, et
   // retombait sur un mauvais rapprochement (voir findBestTitleMatch plus
-  // bas) qui mélangeait le contenu des deux pièces. Même correctif partout
-  // où cette détection existe, pour que les trois restent cohérentes.
+  // bas) qui mélangeait le contenu des deux pièces. Toujours via
+  // knownPagesForItem désormais (fonction partagée, voir
+  // parse-page-reference.ts) : un futur ajustement de cette règle se
+  // répercute alors automatiquement partout, sans avoir à le refaire à la
+  // main à chaque endroit qui en a besoin.
   if (analysis?.submission_items?.some((item) => item.template_origin === "dao"
-    && new Set([...(item.template_page_numbers ?? []), ...parsePageNumbersFromReference(item.source_reference)]).size > 1)) {
+    && knownPagesForItem(item).length > 1)) {
     try {
       const bytes = await getDocumentBytes();
       if (bytes) {
@@ -756,11 +759,10 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // ça a longtemps fait passer à tort une pièce pourtant bien identifiée pour
   // "aucune page connue", et tomber sur le générateur générique tout en bas
   // au lieu d'utiliser la vraie page du DAO. On combine donc toujours les
-  // deux sources ici, avant même de décider d'entrer dans cette branche.
-  const detectedTemplateKnownPages = [...new Set([
-    ...(detectedTemplate?.template_page_numbers ?? []),
-    ...parsePageNumbersFromReference(detectedTemplate?.source_reference),
-  ])].sort((left, right) => left - right);
+  // deux sources ici, avant même de décider d'entrer dans cette branche —
+  // via knownPagesForItem, la même fonction partagée utilisée partout
+  // ailleurs pour cette même vérification (voir parse-page-reference.ts).
+  const detectedTemplateKnownPages = detectedTemplate ? knownPagesForItem(detectedTemplate) : [];
   // NOUVELLE méthode (vraie page + cases cliquables, voir
   // createFillableDaoTemplatePdf) demandée par Maxime pour remplacer le texte
   // recomposé à la main : réservée à une pièce avec un jeu de champs FIXE et

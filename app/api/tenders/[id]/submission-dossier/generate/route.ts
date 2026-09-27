@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { buildMasterDetectedItems, buildDossierRecordsForInsert, type MasterAnalysis, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
 import { splitMergedDaoItems } from "@/lib/submission/split-merged-dao-items";
-import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
+import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
 
 function migrationError(error: { code?: string; message?: string } | null) {
   return error?.code === "42P01" || error?.message?.includes("does not exist");
@@ -67,12 +67,11 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
   // seulement à l'affichage. Ne retélécharge le DAO que si vraiment
   // nécessaire (au moins une pièce sur plusieurs vraies pages).
   const rawItems = (analysis?.submission_items ?? []) as TemplateDetectedItem[];
-  // Même correctif que app/(dashboard)/tenders/[id]/submission/page.tsx : une
-  // page réelle notée seulement en texte dans source_reference doit aussi
-  // compter ici, sinon cette pièce ne tente jamais le découpage dès sa toute
-  // première génération.
+  // knownPagesForItem (fonction partagée, voir parse-page-reference.ts) :
+  // même vérification que partout ailleurs (page.tsx,
+  // printable-submission-document/route.ts), jamais réécrite à la main ici.
   const mightHaveMergedItems = rawItems.some((item) => item.template_origin === "dao"
-    && new Set([...(item.template_page_numbers ?? []), ...parsePageNumbersFromReference(item.source_reference)]).size > 1);
+    && knownPagesForItem(item).length > 1);
   if (mightHaveMergedItems && tender.document_url) {
     try {
       const response = await fetch(tender.document_url);

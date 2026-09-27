@@ -4,7 +4,7 @@ import { GenerateSubmissionDossierButton } from "@/components/tenders/GenerateSu
 import { getContext } from "@/lib/organization";
 import { buildMasterDetectedItems, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
 import { splitMergedDaoItems } from "@/lib/submission/split-merged-dao-items";
-import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
+import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
 
 export default async function SubmissionPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ estimateId?: string }> }) {
   const { id } = await params;
@@ -64,14 +64,13 @@ export default async function SubmissionPage({ params, searchParams }: { params:
   // temporairement injoignable ne doit jamais empêcher d'afficher le
   // dossier : on continue alors simplement avec la liste non corrigée.
   const rawItems = analysis?.submission_items ?? [];
-  // Une page réelle notée SEULEMENT dans source_reference ("Pages 16,
-  // 267-268"), sans être aussi dans template_page_numbers, ne doit pas
-  // empêcher de détecter qu'une pièce s'étale peut-être sur plusieurs pages
-  // (voir le même correctif dans splitMergedDaoItems) — sinon ce
+  // knownPagesForItem (fonction partagée, voir parse-page-reference.ts)
+  // combine template_page_numbers ET les pages notées seulement en texte
+  // dans source_reference — jamais template_page_numbers seul ici, sinon ce
   // télédéchargement du DAO, nécessaire au découpage, n'est même jamais
-  // tenté pour une telle pièce.
+  // tenté pour une pièce dont la page manquante n'est révélée qu'en texte.
   const mightHaveMergedItems = rawItems.some((item) => item.template_origin === "dao"
-    && new Set([...(item.template_page_numbers ?? []), ...parsePageNumbersFromReference(item.source_reference)]).size > 1);
+    && knownPagesForItem(item).length > 1);
   if (mightHaveMergedItems && tender.document_url) {
     try {
       const response = await fetch(tender.document_url);
