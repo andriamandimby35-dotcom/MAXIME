@@ -88,6 +88,16 @@ type Props = {
   // morceaux, en-têtes personnalisés...) plus rarement testé sur Safari/iOS
   // que le fetch() tout simple déjà utilisé et déjà fiable ailleurs.
   pdfBytes: Uint8Array;
+  // true quand pdfBytes vient d'une version DÉJÀ remplie et enregistrée par
+  // la personne (voir __filledPdfPath côté SubmissionDossierManager),
+  // jamais du modèle vierge. Dans ce cas, la case démarre avec sa VRAIE
+  // taille/couleur/gras déjà enregistrés (on les relit sur la case telle
+  // que pdf.js vient de la dessiner), au lieu du réglage par défaut (11pt,
+  // Times, noir, normal) qui ne convient qu'à une case jamais encore
+  // personnalisée — sinon rouvrir un document déjà rempli et juste TOUCHER
+  // une case (même sans rien changer) réécrivait sa taille/couleur d'origine
+  // avec les valeurs par défaut au prochain Enregistrer.
+  restoreSavedStyle?: boolean;
   onReady?: () => void;
   onError?: (message: string) => void;
 };
@@ -193,7 +203,7 @@ type FieldOverride = {
 };
 
 const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function FillablePdfViewer(
-  { pdfBytes, onReady, onError },
+  { pdfBytes, restoreSavedStyle, onReady, onError },
   ref,
 ) {
   // Conteneur qui défile (overflow:auto) — sert aussi de "root" pour
@@ -270,23 +280,49 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
 
   // --- Applique/retient la position, taille et police d'une case --------
 
+  // Convertit ce que pdf.js a posé comme couleur inline sur la case
+  // ("rgb(r, g, b)", ou déjà "#rrggbb") en "#rrggbb" — pour pouvoir relire
+  // fidèlement la couleur DÉJÀ enregistrée d'une case (voir restoreSavedStyle
+  // dans ensureOverride), au lieu de toujours repartir du noir par défaut.
+  function cssColorToHex(value: string): string | null {
+    const rgbMatch = /^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/.exec(value.trim());
+    if (rgbMatch) {
+      return `#${[rgbMatch[1], rgbMatch[2], rgbMatch[3]].map((part) => Number(part).toString(16).padStart(2, "0")).join("")}`;
+    }
+    if (/^#[0-9a-fA-F]{6}$/.test(value.trim())) return value.trim();
+    return null;
+  }
+
   function ensureOverride(entry: PageEntry, section: HTMLElement, input: HTMLInputElement, fieldName: string): FieldOverride {
     const existing = fieldOverridesRef.current.get(fieldName);
     if (existing) return existing;
-    // La taille de départ est TOUJOURS 11pt par défaut, même pour une case
-    // déjà présente dans le PDF d'origine (on ignore volontairement la
-    // taille que pdf.js affichait avant qu'on y touche) — 11pt par défaut
-    // partout, pas seulement pour les cases ajoutées à la main.
+    // Une case qui vient d'une version DÉJÀ remplie et enregistrée doit
+    // repartir de ce qui a VRAIMENT été enregistré (taille, gras, couleur),
+    // pas d'un réglage par défaut — sinon simplement toucher une case après
+    // réouverture, sans rien changer, remplaçait discrètement sa taille/
+    // couleur d'origine par 11pt/noir/normal au prochain Enregistrer. Une
+    // case jamais encore personnalisée (modèle vierge, ou nouvelle case
+    // ajoutée à la main) n'a rien à "restaurer" : elle garde le réglage par
+    // défaut demandé par Maxime (11pt, Times, noir, normal).
+    const fontMatch = restoreSavedStyle ? /calc\(([\d.]+)px/.exec(input.style.fontSize || "") : null;
+    const restoredColor = restoreSavedStyle ? cssColorToHex(input.style.color || "") : null;
     const created: FieldOverride = {
       pageNumber: entry.pageNumber,
       leftPercent: parseFloat(section.style.left) || 0,
       topPercent: parseFloat(section.style.top) || 0,
       widthPercent: parseFloat(section.style.width) || 20,
       heightPercent: parseFloat(section.style.height) || 3,
-      fontSizePt: 11,
-      bold: false,
+      fontSizePt: fontMatch ? parseFloat(fontMatch[1]) : 11,
+      bold: restoreSavedStyle ? input.style.fontWeight === "bold" || input.style.fontWeight === "700" : false,
+      // La police exacte (Times/DejaVu/Machine à écrire...) n'est pas
+      // relisible de façon fiable depuis le rendu pdf.js (elle mappe le nom
+      // de police du PDF vers sa propre police d'écran, pas vers une de nos
+      // 4 options) : elle reste "times" par défaut même en restauration —
+      // seul le VISUEL affiché reste fidèle (vraie police déjà incrustée
+      // dans le PDF), un futur changement de taille/couleur réappliquera
+      // alors Times si la police d'origine était différente.
       fontFamily: "times",
-      color: "#000000",
+      color: restoredColor ?? "#000000",
     };
     fieldOverridesRef.current.set(fieldName, created);
     return created;

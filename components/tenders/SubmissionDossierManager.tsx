@@ -1333,6 +1333,12 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
           key={index}
           ref={fillablePdfViewerRef}
           pdfBytes={fillablePdfBytes}
+          // true seulement quand fillablePdfBytes vient de la version DÉJÀ
+          // remplie et enregistrée (voir l'effet plus haut) : le lecteur sait
+          // alors qu'il doit repartir de ce qui est VRAIMENT enregistré
+          // (taille/couleur/gras de chaque case) plutôt que du réglage par
+          // défaut prévu pour une case jamais encore personnalisée.
+          restoreSavedStyle={hasFilledVersion(item)}
           onError={(message) => { setFillableViewerFailed(true); setFillableViewerError(message); console.error("FillablePdfViewer a échoué :", message); }}
         />}
         {!fillableViewerFailed && !fillablePdfBytes && <p>Préparation…</p>}
