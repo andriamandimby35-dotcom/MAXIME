@@ -36,6 +36,38 @@ function normalizeText(value: string) {
 // les MOTS significatifs du titre (même méthode que findBestTitleMatch dans
 // title-match.ts, déjà utilisée ailleurs dans le projet pour ce genre de
 // rapprochement tolérant) à ceux réellement présents sur la page.
+// BUG corrigé (signalé par Maxime sur "Annexe 6/7/8" — Andraikitry ny
+// Ministera / Fifanarahana Fanamorana...) : un DAO malgache contient souvent
+// une convention/annexe rédigée en malgache, où CHAQUE article a son propre
+// titre en gras/majuscules (mise en forme tout à fait normale d'un document
+// juridique à plusieurs articles) — pageHeadingLine (détection par simple
+// mise en forme, voir plus bas) prenait alors CHACUN de ces titres d'article
+// pour le début d'une toute nouvelle pièce à part entière, fragmentant un
+// seul document en une dizaine de petites pièces inutilisables, toutes en
+// malgache alors que Maxime veut du français. Générique par construction
+// (une liste de mots grammaticaux propres au malgache — jamais des mots
+// français — pas un titre ni un numéro codé en dur) : s'applique pareil à
+// N'IMPORTE QUEL DAO malgache, pas seulement celui-ci. On exige au moins
+// DEUX marqueurs distincts pour rester prudent (un seul mot court pourrait
+// coïncider par hasard).
+const MALAGASY_MARKERS = new Set([
+  "ny", "sy", "ary", "amin", "tsy", "dia", "izay", "eo", "ao", "ho", "na",
+  "sady", "satria", "raha", "mba", "araka", "kanefa", "fa", "tamin", "ireo",
+  "ilay", "aza", "andraikitra", "andraikitry", "fanamorana", "fitanterana",
+  "tompon", "mpahazo", "tombotsoa", "fotoana", "hanatanterahana",
+  "fifanarahana", "fitantanana", "fitaovana", "akora",
+]);
+function looksMalagasy(text: string) {
+  const words = text
+    .toLocaleLowerCase("fr-FR")
+    .replace(/['’]/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  let hits = 0;
+  for (const word of words) if (MALAGASY_MARKERS.has(word)) hits += 1;
+  return hits >= 2;
+}
 function pageWords(pageText: string) {
   return new Set(
     pageText
@@ -641,7 +673,7 @@ export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: nu
     let referenceHeading = "";
     try {
       const first = await pageHeadingLine(doc, workingSortedPages[0]);
-      if (first.titleLine) { segments[0].title = first.titleLine; referenceHeading = first.heading; }
+      if (first.titleLine && !looksMalagasy(first.titleLine)) { segments[0].title = first.titleLine; referenceHeading = first.heading; }
     } catch {
       // Première page illisible : segment de départ gardé sans titre connu.
     }
@@ -655,7 +687,7 @@ export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: nu
         // pièce commence ici, jamais une simple continuation (même règle que
         // isStopBoundary plus haut, sans comparaison à un titre demandé —
         // ici on compare seulement les titres trouvés entre eux).
-        const newStyledTitle = Boolean(titleLine) && heading !== referenceHeading;
+        const newStyledTitle = Boolean(titleLine) && heading !== referenceHeading && !looksMalagasy(titleLine ?? "");
         // Même sans titre stylé détecté : un tableau de cette pièce démarre
         // justement sur cette page (voir tableBoundaryPages plus haut), donc
         // le DAO original les a mis sur des pages séparées — l'extraction
