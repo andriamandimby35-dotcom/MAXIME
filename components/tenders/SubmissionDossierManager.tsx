@@ -9,6 +9,7 @@ import { buildDossierRecordsForInsert, type TemplateTable } from "@/lib/submissi
 import { toFriendlyPdfError } from "@/lib/submission/friendly-pdf-error";
 import { isPhoneDevice } from "@/lib/is-phone-device";
 import FillablePdfViewer, { type FillablePdfViewerHandle } from "@/components/tenders/FillablePdfViewer";
+import { resolveKnownFieldValue, isGuaranteeBankIdentityTitle } from "@/lib/submission/resolve-known-field-value";
 
 type Field = { key: string; label: string; required: boolean; description: string };
 type Item = {
@@ -89,7 +90,7 @@ function isBankAgencyAddress(item: Item, field: Field) {
 // émet la garantie), jamais la propre banque de l'entreprise soumissionnaire :
 // ces champs ne doivent donc jamais être préremplis avec le compte de l'entreprise.
 function isGuaranteeBankIdentity(item: Item) {
-  return /garantiebancaire|cautionbancaire|cautionpersonnelle/.test(normalize(item.title));
+  return isGuaranteeBankIdentityTitle(item.title);
 }
 
 function clearCompanyAddressFromBankFields(item: Item, companyAddress: string) {
@@ -345,7 +346,22 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     const item = items[actionsForIndex];
     if (!item) return;
     let cancelled = false;
-    fetchAndValidatePdf(printableDocumentUrl(item)).then(async (pdf) => {
+    const filledPath = typeof item.form_data.__filledPdfPath === "string" ? item.form_data.__filledPdfPath : null;
+    // Si une version déjà remplie a été enregistrée pour cette pièce
+    // (bouton Enregistrer, voir uploadFilledPdf), on rouvre CETTE version-là
+    // — avec tout ce que la personne a déjà tapé — jamais le modèle vierge.
+    // Avant ce correctif, on retéléchargeait toujours le modèle vierge via
+    // printableDocumentUrl : le fichier rempli restait bien dans le
+    // stockage (le message "Version remplie déjà enregistrée" au-dessus du
+    // lecteur le prouvait), mais n'était jamais rechargé à l'écran — tout ce
+    // qui avait été tapé semblait avoir disparu en rouvrant.
+    const loadPdf: Promise<Blob> = filledPath
+      ? supabase.storage.from("btp-documents").download(filledPath).then((result: { data: Blob | null; error: Error | null }) => {
+        if (result.error || !result.data) throw result.error instanceof Error ? result.error : new Error("La version déjà enregistrée est introuvable dans le stockage.");
+        return result.data;
+      })
+      : fetchAndValidatePdf(printableDocumentUrl(item));
+    loadPdf.then(async (pdf) => {
       if (cancelled) return;
       setFillablePdfBytes(new Uint8Array(await pdf.arrayBuffer()));
     }).catch((error) => {
@@ -788,98 +804,21 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     }
     const direct = item.form_data[field.key] ?? profile[field.key];
     if (direct?.trim()) return direct;
-    // Un champ qui demande le NOM ET l'ADRESSE de l'entreprise en même temps
-    // (ex. "Nom et adresse de l'Entrepreneur") ne doit jamais s'arrêter à un
-    // seul des deux, sinon la raison sociale disparaît derrière la seule
-    // adresse (ou l'inverse) : c'était le bug vu à l'écran, où seule
-    // l'adresse apparaissait. "Entrepreneur" et "candidat" désignent ici
-    // l'entreprise candidate elle-même (vocabulaire courant des DAO
-    // malgaches), jamais un tiers.
-    if (/soumissionnaire|entreprise|entrepreneur|raisonsociale|nomentreprise|legalname|candidat/.test(identifier)
-        && /nom/.test(identifier) && /adresse|address/.test(identifier)) {
-      const companyName = profile.legal_name || profile.trade_name || "";
-      return [companyName, profile.address ?? ""].filter((part) => part.trim()).join(", ");
-    }
-    // Les règles d'IDENTITÉ (nom/fonction du signataire) doivent passer AVANT
-    // les cas génériques ci-dessous (adresse, contrat/référence, date...),
-    // sinon un champ qui mentionne aussi "contrat" ou "adresse" en passant
-    // dans sa description tombe dans la mauvaise règle générique (bugs vus à
-    // l'écran : "Titre/capacité juridique" affichait un nom, "Nom, Prénom et
-    // Signature" affichait un numéro de contrat).
-    // "Titre / capacité juridique (du signataire)" : demande la FONCTION,
-    // jamais le nom.
-    if (/juridique/.test(identifier) && /titre|capacite|qualite/.test(identifier)) return profile.representative_role ?? "";
-    // "Nom, prénom, fonction" (ou "Nom et qualité") du signataire veut
-    // l'identité ET la fonction ensemble — sinon on n'affiche que "Gérant"
-    // sans dire de qui il s'agit, comme vu à l'écran. Cette règle ne dépend
-    // plus du mot "signataire"/"représentant" pour s'appliquer : un champ qui
-    // demande simplement "nom" + "fonction" ensemble suffit.
-    if (/nom|prenom|identite/.test(identifier) && /fonction|qualite|qualification/.test(identifier)) {
-      return [profile.representative_name, profile.representative_role].filter((part) => (part ?? "").trim()).join(", ");
-    }
-    if (/fonction.*signataire|fonction.*representant|qualite.*signataire|qualite.*representant|representativerole/.test(identifier)) return profile.representative_role ?? "";
-    if (/signataire|representant/.test(identifier)) return profile.representative_name ?? "";
-    // L'adresse et le numéro DE LA BANQUE de l'entreprise (RIB) sont
-    // distincts de l'adresse de l'entreprise elle-même : à vérifier avant le
-    // cas générique "adresse" ci-dessous, sinon ce dernier gagnerait toujours.
-    if (!isGuaranteeBankIdentity(item) && /banque/.test(identifier) && /adresse|address/.test(identifier)) return profile.bank_address ?? "";
-    if (!isGuaranteeBankIdentity(item) && /banque/.test(identifier) && /telephone|tel|phone/.test(identifier)) return profile.bank_phone ?? "";
-    // "Adresse électronique" est le terme administratif pour "e-mail" — sans
-    // ce cas, le mot "adresse" qu'il contient aussi le faisait tomber dans la
-    // règle générique juste en dessous, qui renvoie l'adresse POSTALE de
-    // l'entreprise à la place d'un e-mail.
-    if (/electronique/.test(identifier) && /adresse|address/.test(identifier)) return profile.email ?? "";
-    if (/adresse|address/.test(identifier)) return profile.address ?? "";
-    if (/nif/.test(identifier)) return profile.nif ?? "";
-    if (/stat/.test(identifier)) return profile.stat ?? "";
-    // "Registre du commerce" contient "du" entre les deux mots : après
-    // normalisation (espaces supprimés) cela donne "registreducommerce",
-    // que l'ancien test "registrecommerce" (sans "du") ne reconnaissait pas
-    // — la valeur déjà connue du profil restait donc invisible.
-    if (/rcs|registre[a-z]*commerce/.test(identifier)) return profile.rcs ?? "";
-    if (/formejuridique/.test(identifier)) return profile.legal_form ?? "";
-    if (/telephone|phone/.test(identifier)) return profile.phone ?? "";
-    if (/email/.test(identifier)) return profile.email ?? "";
-    // Les coordonnées bancaires de l'entreprise (RIB, Fiche A1-A5...)
-    // reviennent dans plusieurs pièces : elles sont réutilisables comme le
-    // reste du profil, sauf sur une pièce de garantie/caution où "banque" et
-    // "agence" désignent un tiers différent (voir isGuaranteeBankIdentity).
-    if (!isGuaranteeBankIdentity(item)) {
-      if (/banque/.test(identifier)) return profile.bank_name ?? "";
-      if (/agence/.test(identifier)) return profile.bank_agency ?? "";
-      if (/compte|iban/.test(identifier)) return profile.bank_account ?? "";
-    }
-    // Le "bénéficiaire" d'une garantie/caution est l'autorité contractante du
-    // DAO (le maître d'ouvrage), jamais l'entreprise candidate elle-même.
-    if (/beneficiaire|autoritecontractante|maitreouvrage|maitredouvrage|autoritedelamarche|clientname|nomduclient/.test(identifier)) return tenderClientName;
-    // Le délai d'exécution des travaux est déjà fixé par le DAO (extrait dans
-    // execution_period_days) : à ne pas confondre avec un délai de validité
-    // de l'offre, qui est une notion différente.
-    if (/delai.*execution|dureedestravaux|delaicontractuel|delaidexecution/.test(identifier) && tenderExecutionPeriodDays != null) return `${tenderExecutionPeriodDays} jours`;
-    // Le montant ESTIMÉ du marché est saisi une fois à la création de l'appel
-    // d'offres ; ne jamais l'utiliser pour le montant d'UNE GARANTIE (qui est
-    // un pourcentage calculé, une valeur différente), seulement pour un champ
-    // qui demande explicitement le montant estimé/prévisionnel du marché.
-    if (/montantestime|montantdumarche|montantprevisionnel|montantducontrat|montantdeloffre/.test(identifier) && tenderEstimatedAmount != null) return `${tenderEstimatedAmount.toLocaleString("fr-FR")} Ar`;
-    if (/contrat|reference|marche/.test(identifier)) return tenderReference;
-    // "Lieu DU chantier" / "Site DU chantier" : même souci que "registre du
-    // commerce" plus haut, le mot de liaison ("du") empêchait la
-    // correspondance exacte.
-    if (/localisation|lieu[a-z]*chantier|site[a-z]*chantier|emplacement[a-z]*chantier/.test(identifier)) return tenderLocation;
-    // La date du jour ne convient qu'à une VRAIE date de signature ("Fait à
-    // ..., le ..."). Un champ "date" qui désigne en réalité un fait précis du
-    // DAO (date du récépissé d'achat, date de lancement de l'AOL, date
-    // limite, date de publication...) a sa propre date, différente
-    // d'aujourd'hui : la deviner comme si elle était déjà connue induirait le
-    // candidat en erreur. On laisse alors le champ vide, à compléter à la
-    // main avec la vraie date lue sur le DAO.
-    const isNonSignatureDate = /recepisse|lancement|limite|echeance|publication|ouverture|cloture|depot|validite|achat|livraison|remise/.test(identifier);
-    if (/date|signaturedate/.test(identifier) && !isNonSignatureDate) return today;
-    // (Les règles d'identité du signataire — nom+fonction, titre/capacité
-    // juridique, signataire seul — sont vérifiées PLUS HAUT, avant les cas
-    // génériques adresse/contrat/date : voir le commentaire à cet endroit.)
-    if (/soumissionnaire|entreprise|entrepreneur|raisonsociale|nomentreprise|legalname|candidat/.test(identifier)) return profile.legal_name || profile.trade_name || "";
-    return "";
+    // Toutes les autres règles générales (nom+adresse, signataire, adresse,
+    // NIF/STAT/RCS, banque, bénéficiaire, montant, date...) vivent maintenant
+    // dans resolve-known-field-value.ts, PARTAGÉES avec le préremplissage des
+    // vraies cases cliquables côté serveur (printable-submission-document) —
+    // un seul jeu de règles à tenir à jour, pas une copie qui peut diverger.
+    return resolveKnownFieldValue(identifier, {
+      profile,
+      tenderReference,
+      tenderClientName,
+      tenderLocation,
+      tenderExecutionPeriodDays,
+      tenderEstimatedAmount,
+      today,
+      isGuaranteeBankIdentity: isGuaranteeBankIdentity(item),
+    });
   }
 
   // Dans ce DAO l'Annexe 3 p.233 est la seule liste de personnel chantier.
@@ -1105,7 +1044,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     // Imprimer, demandé par Maxime pour remplacer les différents boutons
     // "Ouvrir le PDF..." dispersés dans chaque carte — voir le modal
     // actionsForIndex plus bas, tout en bas du fichier.
-    const openButton = <button type="button" className="tenderButton acknowledgeButton" onClick={() => setActionsForIndex(index)}>Ouvrir{ready ? " ✓" : ""}</button>;
+    const openButton = <button type="button" className={`tenderButton ${ready ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => setActionsForIndex(index)}>Ouvrir{ready ? " ✓" : ""}</button>;
     if (isAiGenerated(item)) {
       return <article key={`${item.kind}-${normalize(item.title)}-${index}`} className="simpleCard">
         <strong>{item.title}</strong>

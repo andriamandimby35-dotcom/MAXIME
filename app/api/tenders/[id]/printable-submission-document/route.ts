@@ -10,6 +10,7 @@ import { trimToRelevantStart, extractRelevantPageRange, locateTitleInFullDocumen
 import { daoSourcedGenericTitles } from "@/lib/submission/build-dossier-items";
 import { renderGeneratedDocumentPdf } from "@/lib/submission/generated-document-pdf";
 import { buildGeneratedDocumentBlocks } from "@/lib/submission/generated-document-blocks";
+import { resolveKnownFieldValue, normalizeIdentifier, isGuaranteeBankIdentityTitle } from "@/lib/submission/resolve-known-field-value";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -165,7 +166,7 @@ function buildExecutionPlanningTable(items: PlanningWorkItem[], executionDays: n
 // main dans Supabase, et sans avoir besoin de relancer une analyse du DAO
 // (qui ne sert \u00e0 rien ici : le souci vient du fichier PDF d\u00e9j\u00e0 g\u00e9n\u00e9r\u00e9, jamais
 // de l'analyse elle-m\u00eame).
-const GENERATED_PDF_VERSION = "v2";
+const GENERATED_PDF_VERSION = "v3";
 function pdfStorageName(title: string, kind: string, workerIndex: number) {
   const normalized = title.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 96) || "document";
   return `${kind === "form_to_complete" ? "formulaire" : "piece"}-${normalized}-${workerIndex + 1}-${GENERATED_PDF_VERSION}.pdf`;
@@ -380,6 +381,45 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   } | null;
   templateValues.worksite_location = analysis?.worksite_location || "";
   templateValues.chantier_location = analysis?.worksite_location || "";
+  // Préremplit une case dont la clé donnée par l'IA d'analyse ne correspond à
+  // AUCUNE clé connue de templateValues (ex. "representant_nom_prenom_fonction"
+  // au lieu de "representative_name") en reconnaissant, à partir du libellé/de
+  // la description du champ, à quelle information du profil entreprise (ou du
+  // marché) il correspond — mêmes règles que celles déjà utilisées côté
+  // dossier pour les formulaires "un champ à la fois" (voir
+  // resolve-known-field-value.ts). Ne touche jamais une clé déjà connue
+  // (formData/profil/infos du marché prioritaires, déjà dans templateValues) :
+  // ne fait que combler les cases qui seraient sinon restées vides à tort.
+  function withKnownFieldFallbacks<T extends { key?: string; field_key?: string; label?: string; description?: string }>(
+    fieldList: T[],
+    values: Record<string, string>,
+  ): Record<string, string> {
+    const enriched = { ...values };
+    const isGuaranteeBank = isGuaranteeBankIdentityTitle(title);
+    for (const field of fieldList) {
+      const key = field.key ?? field.field_key;
+      if (!key || enriched[key]?.trim()) continue;
+      const identifier = normalizeIdentifier(`${key} ${field.label ?? ""} ${field.description ?? ""}`);
+      const resolved = resolveKnownFieldValue(identifier, {
+        profile: profileData,
+        // tender.reference / tender.client_name (déjà capturés dans
+        // templateValues) plutôt que tender.X directement : TypeScript ne
+        // garde pas le souvenir, à l'intérieur d'une fonction imbriquée
+        // comme celle-ci, que "tender" a déjà été vérifié non-nul plus haut
+        // (même limite déjà contournée ailleurs dans ce fichier, voir le
+        // commentaire sur getDocumentBytes/documentUrl).
+        tenderReference: templateValues.tender_reference,
+        tenderClientName: templateValues.client_name,
+        tenderLocation: templateValues.worksite_location,
+        tenderExecutionPeriodDays: analysisForValues?.execution_period_days ?? null,
+        tenderEstimatedAmount: estimatedAmount,
+        today: templateValues.signature_date,
+        isGuaranteeBankIdentity: isGuaranteeBank,
+      });
+      if (resolved) enriched[key] = resolved;
+    }
+    return enriched;
+  }
   const workItems = (analysis?.work_items ?? []).filter((item) => item.row_type === "item");
   const executionPlan = (analysis?.execution_plan ?? []).sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0));
   const isExecutionPlanning = /planning.*ex.cution/i.test(title);
@@ -827,15 +867,16 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             // plutôt que de faire échouer toute la génération — jamais
             // l'inverse : la nouvelle méthode reste toujours prioritaire tant
             // qu'elle réussit.
+            const valuesWithFallbacks = withKnownFieldFallbacks(templateFields, { ...templateValues, ...tableCellValues });
             if (preferFillablePage) {
               try {
-                pdf = await createFillableDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], redactions, { ...templateValues, ...tableCellValues }, verifiedTitle);
+                pdf = await createFillableDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], redactions, valuesWithFallbacks, verifiedTitle);
               } catch (fillableError) {
                 console.error("Fillable real-page submission PDF failed, falling back", fillableError);
-                pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
+                pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], valuesWithFallbacks, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
               }
             } else {
-              pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], { ...templateValues, ...tableCellValues }, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
+              pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, [...positions, ...tablePositions], valuesWithFallbacks, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
             }
           }
           // La page fabriquée ci-dessous ne sert plus qu'en dernier recours :
@@ -892,6 +933,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     const fieldTargets = (detectedTemplate?.fields?.length ? detectedTemplate.fields : fields)
       .map((field) => ({ field_key: field.key, label: field.label, description: (field as { description?: string }).description }))
       .filter((field): field is { field_key: string; label: string; description: string | undefined } => Boolean(field.field_key && field.label));
+    const valuesWithFallbacks = withKnownFieldFallbacks(fieldTargets, templateValues);
     const referencedPages = parsePageNumbersFromReference(clientSourceReference);
     const notClaimedByOthers = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], title, referencedPages);
     if (notClaimedByOthers.length) {
@@ -920,13 +962,13 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           let pdf: Buffer;
           if (shouldPreferFillable) {
             try {
-              pdf = await createFillableDaoTemplatePdf(bytes, verifiedPages, positions, redactions, templateValues, verifiedTitle);
+              pdf = await createFillableDaoTemplatePdf(bytes, verifiedPages, positions, redactions, valuesWithFallbacks, verifiedTitle);
             } catch (fillableError) {
               console.error("Fillable real-page submission PDF failed (source-reference branch), falling back", fillableError);
-              pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, templateValues, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
+              pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, valuesWithFallbacks, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
             }
           } else {
-            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, templateValues, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
+            pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, valuesWithFallbacks, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
           }
           return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
         }
@@ -958,13 +1000,13 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             let pdf: Buffer;
             if (shouldPreferFillable) {
               try {
-                pdf = await createFillableDaoTemplatePdf(bytes, locatedPages, positions, redactions, templateValues, blindSearchResult.title);
+                pdf = await createFillableDaoTemplatePdf(bytes, locatedPages, positions, redactions, valuesWithFallbacks, blindSearchResult.title);
               } catch (fillableError) {
                 console.error("Fillable real-page submission PDF failed (blind title search branch), falling back", fillableError);
-                pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, positions, templateValues, redactions, blindSearchResult.title, { rebuildAsText: !isGraphicOnlyDocument });
+                pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, positions, valuesWithFallbacks, redactions, blindSearchResult.title, { rebuildAsText: !isGraphicOnlyDocument });
               }
             } else {
-              pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, positions, templateValues, redactions, blindSearchResult.title, { rebuildAsText: !isGraphicOnlyDocument });
+              pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, positions, valuesWithFallbacks, redactions, blindSearchResult.title, { rebuildAsText: !isGraphicOnlyDocument });
             }
             return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
           }
