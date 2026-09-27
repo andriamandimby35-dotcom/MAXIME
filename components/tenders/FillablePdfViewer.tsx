@@ -512,8 +512,17 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       if (!input || !input.name) return;
       const fieldName = input.name;
       disableAutofillHeuristics(input);
-      const override = fieldOverridesRef.current.get(fieldName);
-      if (override) applyOverride(section, input, override);
+      // ensureOverride (pas seulement une lecture du Map) : sinon une case
+      // JAMAIS encore touchée par l'utilisateur restait affichée avec le
+      // rendu natif de pdf.js (police par défaut du PDF, ou taille rétrécie
+      // par pdf.js si la case est petite — voir le commentaire n°4bis) tant
+      // que personne n'avait cliqué dessus au moins une fois. Maxime devait
+      // alors passer en mode "Ajuster" et toucher chaque case pour forcer
+      // l'affichage correct (11pt par défaut, ou la vraie taille/couleur
+      // enregistrée) — ça doit être automatique dès l'ouverture, sans aucun
+      // clic.
+      const override = ensureOverride(entry, section, input, fieldName);
+      applyOverride(section, input, override);
       attachFieldEditing(entry, section, input, fieldName);
     });
   }
