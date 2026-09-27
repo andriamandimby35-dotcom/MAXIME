@@ -134,6 +134,18 @@ export async function createPrintableSubmissionPdf(title: string, company: Recor
         // méthode que dans generated-document-pdf.ts (drawTable) — pour que
         // Maxime puisse corriger une valeur directement dans le lecteur PDF
         // intégré, sans devoir tout refaire depuis le dossier.
+        //
+        // PAS de enableMultiline() ici : la ligne garde toujours la même
+        // hauteur fixe (ROW_HEIGHT, une seule ligne de texte — la police est
+        // déjà réduite juste au-dessus pour rentrer sur cette seule ligne).
+        // Une case "multi-lignes" dans une hauteur d'UNE seule ligne se
+        // rendait chez pdf.js comme un <textarea> DÉFILANT : dès que le texte
+        // dépassait un peu, un ascenseur avec ses petites flèches haut/bas
+        // apparaissait par-dessus le texte (le "chevauchement à double
+        // bizarre" signalé) — jamais vu sur les cases normales (un simple
+        // <input>, jamais de <textarea>). En restant sur une case à une
+        // seule ligne, comme TOUTES les autres cases de l'application, ce
+        // défilement ne peut plus jamais apparaître.
         if (!isHeader) {
           fieldCounter.current += 1;
           const field = form.createTextField(`case_roster_${fieldCounter.current}`);
@@ -146,7 +158,6 @@ export async function createPrintableSubmissionPdf(title: string, company: Recor
             textColor: rgb(0, 0, 0),
             font,
           });
-          field.enableMultiline();
           field.setFontSize(fontSize);
           field.setText(text);
           return;

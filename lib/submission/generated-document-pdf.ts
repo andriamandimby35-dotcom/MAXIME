@@ -222,6 +222,16 @@ function drawTable(doc: PDFDocument, cursor: Cursor, block: TableBlock, font: PD
           font: cellFont,
         });
         field.enableMultiline();
+        // disableScrolling() : ici la case est bien réglée à la hauteur du
+        // texte d'origine (rowHeight tient compte de rowLineCount plus haut),
+        // mais si Maxime tape ensuite un texte plus long dans le lecteur PDF,
+        // une case "multi-lignes" qui déborde de sa hauteur se rend chez
+        // pdf.js comme un <textarea> DÉFILANT, avec un ascenseur et ses
+        // petites flèches haut/bas par-dessus le texte (voir le même souci,
+        // corrigé autrement, dans printable-pdf.ts/drawRow). disableScrolling
+        // masque cet ascenseur (texte simplement coupé s'il déborde) plutôt
+        // que de laisser ces flèches apparaître par-dessus.
+        field.disableScrolling();
         field.setFontSize(TABLE_FONT_SIZE);
         field.setText(rawValue);
       } else {

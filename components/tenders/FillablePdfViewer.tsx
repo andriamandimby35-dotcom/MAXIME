@@ -1131,35 +1131,32 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     {!loading && !errorMessage && (
       <div style={{ position: "absolute", bottom: 12 + keyboardInsetPx, left: 12, right: 12, display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 8 }}>
         {editModeOn && (
-          <button
-            type="button"
-            onClick={addFieldNow}
-            style={{ ...zoomButtonStyle, width: "auto", padding: "0 12px", fontSize: 12, background: "#fff", color: "#111" }}
-          >
+          <button type="button" onClick={addFieldNow} className="tenderButton tenderButtonPrimary" style={{ fontSize: 13 }}>
             + Ajouter une case
           </button>
         )}
         {editModeOn && selectedField && (
-          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, background: "rgba(255,255,255,.96)", borderRadius: 8, padding: 6, boxShadow: "0 1px 6px rgba(0,0,0,.3)" }}>
+          <div style={toolbarCardStyle}>
             {/* Style de police (la police elle-même, pas sa taille) — 3 choix standards, suffisants pour ne pas ajouter de fichier de police au projet. */}
             <select
               value={selectedFontFamily}
               onChange={(e) => setSelectedFontFamilyValue(e.target.value as FontFamilyKey)}
               aria-label="Style de police"
-              style={{ height: 34, borderRadius: 6, border: "1px solid #d1d5db", background: "#fff", color: "#111", fontSize: 12, padding: "0 4px" }}
+              style={selectStyle}
             >
               {(Object.keys(FONT_FAMILIES) as FontFamilyKey[]).map((key) => (
                 <option key={key} value={key}>{FONT_FAMILIES[key].label}</option>
               ))}
             </select>
             {/* Taille de police : en points PDF réels, séparée du zoom — zoomer/dézoomer l'écran ne change jamais ce nombre. */}
-            <button type="button" onClick={() => adjustSelectedFontSize(-FONT_SIZE_STEP_PT)} style={zoomButtonStyle} aria-label="Police plus petite">A−</button>
-            <span style={{ fontSize: 12, minWidth: 34, textAlign: "center", color: "#111" }}>{selectedFontSizePt}pt</span>
-            <button type="button" onClick={() => adjustSelectedFontSize(FONT_SIZE_STEP_PT)} style={zoomButtonStyle} aria-label="Police plus grande">A+</button>
+            <button type="button" onClick={() => adjustSelectedFontSize(-FONT_SIZE_STEP_PT)} className="tenderButton" style={compactButtonStyle} aria-label="Police plus petite">A−</button>
+            <span style={{ fontSize: 12, minWidth: 34, textAlign: "center", color: "#153f2b", fontWeight: 750 }}>{selectedFontSizePt}pt</span>
+            <button type="button" onClick={() => adjustSelectedFontSize(FONT_SIZE_STEP_PT)} className="tenderButton" style={compactButtonStyle} aria-label="Police plus grande">A+</button>
             <button
               type="button"
               onClick={toggleSelectedBold}
-              style={{ ...zoomButtonStyle, width: "auto", padding: "0 10px", fontWeight: "bold", background: selectedBold ? "#2563eb" : "#fff", color: selectedBold ? "#fff" : "#111" }}
+              className={`tenderButton${selectedBold ? " tenderButtonPrimary" : ""}`}
+              style={{ ...compactButtonStyle, width: "auto", padding: "0 12px", fontWeight: 800 }}
               aria-label="Gras"
             >
               G
@@ -1169,43 +1166,75 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
               value={selectedColor}
               onChange={(e) => setSelectedColorValue(e.target.value)}
               aria-label="Couleur du texte"
-              style={{ width: 34, height: 34, padding: 0, border: "1px solid #d1d5db", borderRadius: 6, background: "#fff" }}
+              style={{ width: 34, height: 34, padding: 0, border: "1px solid #b8c9bd", borderRadius: 8, background: "#fff", cursor: "pointer" }}
             />
             {customFieldNamesRef.current.has(selectedField) && (
-              <button type="button" onClick={removeSelectedCustomField} style={{ ...zoomButtonStyle, color: "#b91c1c" }} aria-label="Supprimer cette case">✕</button>
+              <button type="button" onClick={removeSelectedCustomField} className="tenderButton tenderButtonDanger" style={{ ...compactButtonStyle, width: "auto", padding: "0 12px" }} aria-label="Supprimer cette case">✕</button>
             )}
-            <button type="button" onClick={() => setSelectedField(null)} style={zoomButtonStyle} aria-label="Fermer">OK</button>
+            <button type="button" onClick={() => setSelectedField(null)} className="tenderButton" style={{ ...compactButtonStyle, width: "auto", padding: "0 14px" }} aria-label="Fermer">OK</button>
           </div>
         )}
-        <div style={{ display: "flex", gap: 6, background: "rgba(255,255,255,.96)", borderRadius: 8, padding: 6, boxShadow: "0 1px 6px rgba(0,0,0,.3)" }}>
+        <div style={toolbarCardStyle}>
           <button
             type="button"
             onClick={toggleEditMode}
-            style={{ ...zoomButtonStyle, width: "auto", padding: "0 12px", fontSize: 12, background: editModeOn ? "#2563eb" : "#fff", color: editModeOn ? "#fff" : "#111" }}
+            className={`tenderButton${editModeOn ? " tenderButtonPrimary" : ""}`}
+            style={{ fontSize: 13 }}
           >
             {editModeOn ? "Terminé" : "Ajuster"}
           </button>
-          <button type="button" onClick={() => applyZoom(zoomRef.current - ZOOM_STEP)} style={zoomButtonStyle} aria-label="Zoom arrière">−</button>
-          <span style={{ alignSelf: "center", fontSize: 13, minWidth: 42, textAlign: "center", color: "#111" }}>
+          <button type="button" onClick={() => applyZoom(zoomRef.current - ZOOM_STEP)} className="tenderButton" style={compactButtonStyle} aria-label="Zoom arrière">−</button>
+          <span style={{ alignSelf: "center", fontSize: 13, minWidth: 42, textAlign: "center", color: "#153f2b", fontWeight: 750 }}>
             {Math.round(zoomDisplay * 100)}%
           </span>
-          <button type="button" onClick={() => applyZoom(zoomRef.current + ZOOM_STEP)} style={zoomButtonStyle} aria-label="Zoom avant">+</button>
-          <button type="button" onClick={() => applyZoom(1)} style={{ ...zoomButtonStyle, fontSize: 12 }} aria-label="Taille normale">100%</button>
+          <button type="button" onClick={() => applyZoom(zoomRef.current + ZOOM_STEP)} className="tenderButton" style={compactButtonStyle} aria-label="Zoom avant">+</button>
+          <button type="button" onClick={() => applyZoom(1)} className="tenderButton" style={{ ...compactButtonStyle, width: "auto", padding: "0 12px", fontSize: 12 }} aria-label="Taille normale">100%</button>
         </div>
       </div>
     )}
   </div>;
 });
 
-const zoomButtonStyle: CSSProperties = {
+// Habillage repris tel quel du reste de l'application (voir app/globals.css :
+// .tenderButton/.tenderButtonPrimary/.tenderButtonDanger — pilule blanche à
+// bordure verte pâle, remplissage vert dégradé pour l'action principale/l'état
+// "activé", rouge pour une action destructive) plutôt que les carrés gris
+// génériques d'avant : cette barre d'outils flottante doit avoir le même
+// habillage que "+ Ajouter une ligne"/"Ouvrir"/etc. ailleurs dans l'appli, pas
+// un style qui lui est propre.
+const toolbarCardStyle: CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  alignItems: "center",
+  gap: 6,
+  background: "rgba(255,255,255,.97)",
+  border: "1px solid #e2e8e3",
+  borderRadius: 14,
+  padding: 8,
+  boxShadow: "0 6px 16px rgba(11,58,38,.12)",
+};
+
+// Variante compacte de .tenderButton pour les boutons "icône seule" (A−, A+,
+// zoom −/+) : garde la forme/couleur/bordure de .tenderButton (définies dans
+// la classe CSS), ajuste seulement la taille pour un bouton carré plutôt
+// qu'une pilule large.
+const compactButtonStyle: CSSProperties = {
   width: 34,
   height: 34,
-  borderRadius: 6,
-  border: "1px solid #d1d5db",
-  background: "#fff",
-  color: "#111",
-  fontSize: 18,
+  padding: 0,
+  fontSize: 16,
   lineHeight: 1,
+};
+
+const selectStyle: CSSProperties = {
+  height: 36,
+  borderRadius: 10,
+  border: "1px solid #b8c9bd",
+  background: "#fff",
+  color: "#153f2b",
+  fontSize: 12,
+  fontWeight: 750,
+  padding: "0 6px",
   cursor: "pointer",
 };
 
