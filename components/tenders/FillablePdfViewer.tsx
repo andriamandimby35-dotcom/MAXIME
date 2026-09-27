@@ -47,10 +47,34 @@ import "pdfjs-dist/legacy/web/pdf_viewer.css";
 // elle s'approche de l'écran, grâce à IntersectionObserver — la même
 // technique que le vrai lecteur PDF de pdf.js utilise pour les documents
 // longs.
+//
+// Détail technique important n°4 (mode "Ajuster", déplacer/redimensionner/
+// changer la police d'une case, et ajouter une case oubliée) : pdf.js
+// positionne chaque case avec un pourcentage (left/top/width/height en %,
+// relatif à la page) — ce qui tombe bien, car ça permet de suivre le zoom
+// automatiquement sans aucun calcul supplémentaire. On déplace/redimensionne
+// donc directement ces pourcentages à la souris/au doigt, et on retient
+// chaque changement dans fieldOverridesRef (indépendant du zoom). Attention
+// : pdf.js RECONSTRUIT entièrement la case (nouvel élément DOM) à chaque
+// redessin (changement de zoom) — nos changements doivent donc être
+// réappliqués après CHAQUE dessin, pas seulement au premier (voir afterDraw).
+// Autre point vérifié par un vrai test (avant de construire cette
+// fonctionnalité) : pdf.js lui-même ne sait PAS enregistrer une case
+// déplacée dans le PDF (saveDocument() ignore silencieusement un "rect"
+// modifié dans annotationStorage — testé, confirmé) : la position/taille/
+// police finales sont donc réappliquées nous-mêmes avec pdf-lib (déjà
+// utilisé côté serveur dans ce projet) juste avant de renvoyer les octets
+// finaux, par-dessus ce que saveDocument() a déjà rempli comme valeurs.
+// Une case "ajoutée" (bouton "+ Ajouter une case", pour un endroit oublié
+// par le repérage automatique) n'existe que dans le navigateur pendant la
+// modification (un simple <input> par-dessus la page, pas une vraie case
+// pdf.js) : elle ne devient une vraie case du PDF qu'au moment d'Enregistrer,
+// avec form.createTextField() (même méthode que dao-template-pdf.ts).
 
 export type FillablePdfViewerHandle = {
-  /** Octets du PDF avec les cases telles que remplies à l'instant (via
-   * saveDocument() de pdf.js). Lève une erreur si rien n'est encore chargé. */
+  /** Octets du PDF avec les cases telles que remplies, déplacées,
+   * redimensionnées et ajoutées à l'instant. Lève une erreur si rien n'est
+   * encore chargé. */
   getFilledPdfBytes: () => Promise<Uint8Array>;
 };
 
@@ -75,6 +99,9 @@ const ZOOM_STEP = 0.25;
 // ou en dessous) est dessinée en avance, pour qu'on ne voie jamais de trou
 // vide pendant un défilement normal.
 const PRELOAD_MARGIN = "900px 0px 900px 0px";
+const MIN_FONT_SIZE_PT = 6;
+const MAX_FONT_SIZE_PT = 24;
+const FONT_SIZE_STEP_PT = 1;
 
 type PdfPageProxy = import("pdfjs-dist").PDFPageProxy;
 type PageViewport = ReturnType<PdfPageProxy["getViewport"]>;
@@ -89,6 +116,20 @@ type PageEntry = {
   // Échelle "ajustée à l'écran" calculée une seule fois à l'ouverture
   // (avant tout zoom manuel) : le zoom se multiplie ensuite par-dessus.
   autoFitScale: number;
+};
+
+// Position/taille (en % de la page, comme pdf.js lui-même — voir le
+// commentaire n°4) et taille de police (en points PDF, indépendante du
+// zoom) d'une case, une fois que la personne l'a déplacée/redimensionnée/
+// changé sa police au moins une fois. Sert aussi bien pour une case déjà
+// présente sur le modèle que pour une case ajoutée à la main.
+type FieldOverride = {
+  pageNumber: number;
+  leftPercent: number;
+  topPercent: number;
+  widthPercent: number;
+  heightPercent: number;
+  fontSizePt: number;
 };
 
 const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function FillablePdfViewer(
@@ -119,12 +160,317 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [zoomDisplay, setZoomDisplay] = useState(1);
 
+  // Mode "Ajuster" (déplacer/redimensionner/police) et mode "Ajouter une
+  // case" — des refs (lues dans des gestionnaires DOM directs, hors du cycle
+  // React) doublées d'un state (pour redessiner la barre d'outils).
+  const editModeRef = useRef(false);
+  const [editModeOn, setEditModeOn] = useState(false);
+  const addFieldModeRef = useRef(false);
+  const [addFieldModeOn, setAddFieldModeOn] = useState(false);
+  const [selectedField, setSelectedField] = useState<string | null>(null);
+  // Quand le clavier du téléphone est ouvert (pour taper dans une case),
+  // Safari iOS réduit la zone visible SANS redimensionner la fenêtre : notre
+  // barre d'outils "Ajuster"/"+ Ajouter une case", positionnée en bas de la
+  // fenêtre entière, se retrouvait alors cachée DERRIÈRE le clavier —
+  // invisible et impossible à toucher tant que le clavier restait ouvert.
+  // window.visualViewport donne la vraie zone visible ; on décale la barre
+  // d'autant que le clavier prend de place.
+  const [keyboardInsetPx, setKeyboardInsetPx] = useState(0);
+
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    function update() {
+      const vv = window.visualViewport;
+      if (!vv) return;
+      const inset = window.innerHeight - vv.height - vv.offsetTop;
+      setKeyboardInsetPx(Math.max(0, Math.round(inset)));
+    }
+    update();
+    viewport.addEventListener("resize", update);
+    viewport.addEventListener("scroll", update);
+    return () => {
+      viewport.removeEventListener("resize", update);
+      viewport.removeEventListener("scroll", update);
+    };
+  }, []);
+  const fieldOverridesRef = useRef<Map<string, FieldOverride>>(new Map());
+  // Cases ajoutées à la main : elles n'existent que dans le navigateur (pas
+  // encore de vraie case pdf.js/PDF) tant qu'on n'a pas Enregistré.
+  const customFieldNamesRef = useRef<Set<string>>(new Set());
+  const customFieldValuesRef = useRef<Map<string, string>>(new Map());
+  const customFieldCounterRef = useRef(0);
+
+  // --- Applique/retient la position, taille et police d'une case --------
+
+  function ensureOverride(entry: PageEntry, section: HTMLElement, input: HTMLInputElement, fieldName: string): FieldOverride {
+    const existing = fieldOverridesRef.current.get(fieldName);
+    if (existing) return existing;
+    const fontMatch = /calc\(([\d.]+)px/.exec(input.style.fontSize || "");
+    const created: FieldOverride = {
+      pageNumber: entry.pageNumber,
+      leftPercent: parseFloat(section.style.left) || 0,
+      topPercent: parseFloat(section.style.top) || 0,
+      widthPercent: parseFloat(section.style.width) || 20,
+      heightPercent: parseFloat(section.style.height) || 3,
+      fontSizePt: fontMatch ? parseFloat(fontMatch[1]) : 10,
+    };
+    fieldOverridesRef.current.set(fieldName, created);
+    return created;
+  }
+
+  // Empêche Safari/iOS de proposer sa propre suggestion "Préremplir le
+  // contact" (nom, société, adresse, tél...) au-dessus du clavier pour ces
+  // cases : ce n'est pas notre code qui l'affiche (rien dans ce composant ne
+  // le déclenche), c'est une fonctionnalité automatique du navigateur basée
+  // sur le nom/type de la case — autocomplete="off" est la façon officielle
+  // de la désactiver, sans toucher au nom de la case (dont on a besoin par
+  // ailleurs pour la retrouver).
+  function disableAutofillHeuristics(input: HTMLInputElement) {
+    input.setAttribute("autocomplete", "off");
+    input.setAttribute("autocorrect", "off");
+    input.setAttribute("autocapitalize", "off");
+    input.setAttribute("spellcheck", "false");
+  }
+
+  function applyOverride(section: HTMLElement, input: HTMLInputElement, override: FieldOverride) {
+    section.style.left = `${override.leftPercent}%`;
+    section.style.top = `${override.topPercent}%`;
+    section.style.width = `${override.widthPercent}%`;
+    section.style.height = `${override.heightPercent}%`;
+    input.style.fontSize = `calc(${override.fontSizePt}px * var(--total-scale-factor))`;
+  }
+
+  function applyEditVisual(section: HTMLElement, input: HTMLInputElement, handle: HTMLElement | null, on: boolean) {
+    section.style.outline = on ? "1px dashed #2563eb" : "";
+    section.style.cursor = on ? "move" : "";
+    input.style.pointerEvents = on ? "none" : "";
+    // touch-action: "none" est INDISPENSABLE sur téléphone : sans ça, Safari
+    // iOS interprète un glisser du doigt sur la case comme un geste de
+    // défilement de la page (elle scrolle au lieu de bouger la case, et le
+    // geste de glissement est parfois carrément annulé en cours de route) —
+    // trouvé en cherchant pourquoi "pas de déplacement" pouvait arriver même
+    // avec des gestionnaires pointerdown/pointermove tout à fait corrects.
+    section.style.touchAction = on ? "none" : "";
+    if (handle) {
+      handle.style.pointerEvents = on ? "auto" : "none";
+      handle.style.display = on ? "block" : "none";
+      handle.style.touchAction = "none";
+    }
+  }
+
+  // Ajoute (une seule fois par élément — un nouvel élément est créé par
+  // pdf.js à chaque redessin, voir le commentaire n°4) la poignée de
+  // redimensionnement et les gestionnaires de glisser/déposer.
+  function attachFieldEditing(entry: PageEntry, section: HTMLElement, input: HTMLInputElement, fieldName: string) {
+    let handle = section.querySelector<HTMLDivElement>(".field-resize-handle");
+    if (!handle) {
+      handle = document.createElement("div");
+      handle.className = "field-resize-handle";
+      handle.style.position = "absolute";
+      handle.style.right = "-7px";
+      handle.style.bottom = "-7px";
+      handle.style.width = "16px";
+      handle.style.height = "16px";
+      handle.style.background = "#2563eb";
+      handle.style.border = "2px solid #fff";
+      handle.style.borderRadius = "3px";
+      handle.style.cursor = "nwse-resize";
+      handle.style.zIndex = "10";
+      section.appendChild(handle);
+    }
+    applyEditVisual(section, input, handle, editModeRef.current);
+
+    type DragState = {
+      mode: "move" | "resize";
+      pointerId: number;
+      startX: number;
+      startY: number;
+      startLeft: number;
+      startTop: number;
+      startWidth: number;
+      startHeight: number;
+      moved: boolean;
+    };
+    let dragState: DragState | null = null;
+
+    function begin(e: PointerEvent, mode: "move" | "resize") {
+      if (!editModeRef.current || addFieldModeRef.current) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const wrapperRect = entry.wrapper.getBoundingClientRect();
+      const sectionRect = section.getBoundingClientRect();
+      dragState = {
+        mode,
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        startLeft: sectionRect.left - wrapperRect.left,
+        startTop: sectionRect.top - wrapperRect.top,
+        startWidth: sectionRect.width,
+        startHeight: sectionRect.height,
+        moved: false,
+      };
+      (mode === "move" ? section : handle!).setPointerCapture(e.pointerId);
+    }
+
+    function move(e: PointerEvent) {
+      if (!dragState || dragState.pointerId !== e.pointerId) return;
+      const dx = e.clientX - dragState.startX;
+      const dy = e.clientY - dragState.startY;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragState.moved = true;
+      const wrapperRect = entry.wrapper.getBoundingClientRect();
+      if (dragState.mode === "move") {
+        const newLeft = Math.max(0, Math.min(wrapperRect.width - dragState.startWidth, dragState.startLeft + dx));
+        const newTop = Math.max(0, Math.min(wrapperRect.height - dragState.startHeight, dragState.startTop + dy));
+        section.style.left = `${(newLeft / wrapperRect.width) * 100}%`;
+        section.style.top = `${(newTop / wrapperRect.height) * 100}%`;
+      } else {
+        const newWidth = Math.max(24, dragState.startWidth + dx);
+        const newHeight = Math.max(14, dragState.startHeight + dy);
+        section.style.width = `${(newWidth / wrapperRect.width) * 100}%`;
+        section.style.height = `${(newHeight / wrapperRect.height) * 100}%`;
+      }
+    }
+
+    function end(e: PointerEvent) {
+      if (!dragState || dragState.pointerId !== e.pointerId) return;
+      const wasMoved = dragState.moved;
+      dragState = null;
+      const override = ensureOverride(entry, section, input, fieldName);
+      override.leftPercent = parseFloat(section.style.left) || override.leftPercent;
+      override.topPercent = parseFloat(section.style.top) || override.topPercent;
+      override.widthPercent = parseFloat(section.style.width) || override.widthPercent;
+      override.heightPercent = parseFloat(section.style.height) || override.heightPercent;
+      if (!wasMoved) setSelectedField(fieldName);
+    }
+
+    section.onpointerdown = (e) => begin(e, "move");
+    section.onpointermove = move;
+    section.onpointerup = end;
+    section.onpointercancel = end;
+    handle.onpointerdown = (e) => begin(e, "resize");
+    handle.onpointermove = move;
+    handle.onpointerup = end;
+    handle.onpointercancel = end;
+  }
+
+  // Réapplique les cases déjà déplacées/redimensionnées/changées de police,
+  // et (ré)installe les gestionnaires de glisser/déposer — à appeler après
+  // CHAQUE dessin d'une page (premier dessin, ou redessin dû au zoom).
+  function afterDraw(entry: PageEntry) {
+    const sections = entry.wrapper.querySelectorAll<HTMLElement>(".textWidgetAnnotation");
+    sections.forEach((section) => {
+      const input = section.querySelector<HTMLInputElement>("input, textarea");
+      if (!input || !input.name) return;
+      const fieldName = input.name;
+      disableAutofillHeuristics(input);
+      const override = fieldOverridesRef.current.get(fieldName);
+      if (override) applyOverride(section, input, override);
+      attachFieldEditing(entry, section, input, fieldName);
+    });
+  }
+
+  // Crée une nouvelle case (bouton "+ Ajouter une case") à l'endroit touché
+  // — un simple <input> par-dessus la page tant que ce n'est pas enregistré
+  // (voir le commentaire n°4 en haut du fichier).
+  function createCustomField(entry: PageEntry, leftPercent: number, topPercent: number) {
+    customFieldCounterRef.current += 1;
+    const fieldName = `custom_field_${customFieldCounterRef.current}`;
+    const widthPercent = 30;
+    const heightPercent = 3;
+    const fontSizePt = 10;
+
+    const section = document.createElement("section");
+    section.className = "textWidgetAnnotation customField";
+    section.style.position = "absolute";
+    section.style.left = `${leftPercent}%`;
+    section.style.top = `${topPercent}%`;
+    section.style.width = `${widthPercent}%`;
+    section.style.height = `${heightPercent}%`;
+    section.style.zIndex = "2";
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.name = fieldName;
+    input.style.width = "100%";
+    input.style.height = "100%";
+    input.style.boxSizing = "border-box";
+    input.style.border = "1px solid #2563eb";
+    input.style.background = "#fff";
+    input.style.padding = "0 2px";
+    input.style.fontSize = `calc(${fontSizePt}px * var(--total-scale-factor))`;
+    disableAutofillHeuristics(input);
+    input.addEventListener("input", () => {
+      customFieldValuesRef.current.set(fieldName, input.value);
+    });
+    section.appendChild(input);
+    entry.wrapper.appendChild(section);
+
+    fieldOverridesRef.current.set(fieldName, { pageNumber: entry.pageNumber, leftPercent, topPercent, widthPercent, heightPercent, fontSizePt });
+    customFieldNamesRef.current.add(fieldName);
+    attachFieldEditing(entry, section, input, fieldName);
+    applyEditVisual(section, input, section.querySelector<HTMLElement>(".field-resize-handle"), editModeRef.current);
+    setSelectedField(fieldName);
+  }
+
+  function removeSelectedCustomField() {
+    if (!selectedField || !customFieldNamesRef.current.has(selectedField)) return;
+    for (const entry of pagesRef.current) {
+      const input = entry.wrapper.querySelector<HTMLInputElement>(`input[name="${CSS.escape(selectedField)}"]`);
+      input?.closest(".customField")?.remove();
+    }
+    fieldOverridesRef.current.delete(selectedField);
+    customFieldNamesRef.current.delete(selectedField);
+    customFieldValuesRef.current.delete(selectedField);
+    setSelectedField(null);
+  }
+
+  function toggleEditMode() {
+    const next = !editModeRef.current;
+    editModeRef.current = next;
+    setEditModeOn(next);
+    if (!next) {
+      addFieldModeRef.current = false;
+      setAddFieldModeOn(false);
+      setSelectedField(null);
+    }
+    const container = pagesContainerRef.current;
+    if (!container) return;
+    container.querySelectorAll<HTMLElement>(".textWidgetAnnotation").forEach((section) => {
+      const input = section.querySelector<HTMLInputElement>("input, textarea");
+      const handle = section.querySelector<HTMLElement>(".field-resize-handle");
+      if (input) applyEditVisual(section, input, handle, next);
+    });
+  }
+
+  function adjustSelectedFontSize(deltaPt: number) {
+    if (!selectedField) return;
+    for (const entry of pagesRef.current) {
+      const input = entry.wrapper.querySelector<HTMLInputElement>(`input[name="${CSS.escape(selectedField)}"]`);
+      const section = input?.closest<HTMLElement>(".textWidgetAnnotation");
+      if (!input || !section) continue;
+      const override = ensureOverride(entry, section, input, selectedField);
+      override.fontSizePt = Math.max(MIN_FONT_SIZE_PT, Math.min(MAX_FONT_SIZE_PT, override.fontSizePt + deltaPt));
+      applyOverride(section, input, override);
+      break;
+    }
+  }
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setErrorMessage(null);
     zoomRef.current = 1;
     setZoomDisplay(1);
+    editModeRef.current = false;
+    setEditModeOn(false);
+    addFieldModeRef.current = false;
+    setAddFieldModeOn(false);
+    setSelectedField(null);
+    fieldOverridesRef.current = new Map();
+    customFieldNamesRef.current = new Set();
+    customFieldValuesRef.current = new Map();
 
     async function renderAllPages() {
       const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
@@ -171,6 +517,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
           // pdfDocument.annotationStorage, pas dans la page elle-même.
           entry.pageView.update({ scale });
           await entry.pageView.draw();
+          afterDraw(entry);
           return;
         }
         const pageViewOptions = {
@@ -205,6 +552,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         entry.pageView = pageView;
         pageView.setPdfPage(entry.page);
         await pageView.draw();
+        afterDraw(entry);
       }
 
       const entries: PageEntry[] = [];
@@ -220,6 +568,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         const viewport = page.getViewport({ scale: autoFitScale });
 
         const pageWrapper = document.createElement("div");
+        pageWrapper.dataset.pageNumber = String(pageNumber);
         pageWrapper.style.position = "relative";
         pageWrapper.style.margin = pageNumber === 1 ? "0 auto 12px auto" : "12px auto";
         pageWrapper.style.width = `${viewport.width}px`;
@@ -279,6 +628,31 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pdfBytes]);
 
+  // Tape "+ Ajouter une case" : le prochain appui sur une page crée la case
+  // à cet endroit. Un seul gestionnaire, posé une fois sur le conteneur des
+  // pages (peu importe combien de pages ou combien de fois on redessine).
+  useEffect(() => {
+    const container = pagesContainerRef.current;
+    if (!container) return;
+    function handleClick(e: MouseEvent) {
+      if (!addFieldModeRef.current) return;
+      const target = e.target as HTMLElement;
+      const wrapper = target.closest<HTMLElement>("[data-page-number]");
+      if (!wrapper) return;
+      const entry = pagesRef.current.find((p) => p.wrapper === wrapper);
+      if (!entry) return;
+      const rect = wrapper.getBoundingClientRect();
+      const leftPercent = Math.max(0, Math.min(70, ((e.clientX - rect.left) / rect.width) * 100));
+      const topPercent = Math.max(0, Math.min(95, ((e.clientY - rect.top) / rect.height) * 100));
+      createCustomField(entry, leftPercent, topPercent);
+      addFieldModeRef.current = false;
+      setAddFieldModeOn(false);
+    }
+    container.addEventListener("click", handleClick);
+    return () => container.removeEventListener("click", handleClick);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Zoom manuel (boutons − / + / réinitialiser) : jusqu'ici, aucun mécanisme
   // de zoom n'existait dans ce lecteur (contrairement à l'ancien affichage
   // en iframe, où le mini-lecteur du téléphone gérait le pincement-zoom
@@ -298,7 +672,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       entry.wrapper.style.height = `${viewport.height}px`;
       if (entry.pageView) {
         entry.pageView.update({ scale });
-        entry.pageView.draw().catch(() => {});
+        entry.pageView.draw().then(() => afterDraw(entry)).catch(() => {});
       }
     });
   }
@@ -306,13 +680,94 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
   useImperativeHandle(ref, () => ({
     async getFilledPdfBytes() {
       if (!pdfDocumentRef.current) throw new Error("Le PDF n’est pas encore chargé.");
-      return await pdfDocumentRef.current.saveDocument();
+      const baseBytes = await pdfDocumentRef.current.saveDocument();
+      // Rien à déplacer/ajouter : pas besoin de repasser par pdf-lib.
+      if (fieldOverridesRef.current.size === 0) return baseBytes;
+      try {
+        const { PDFDocument, rgb } = await import("pdf-lib");
+        const doc = await PDFDocument.load(baseBytes);
+        const form = doc.getForm();
+        for (const [fieldName, override] of fieldOverridesRef.current) {
+          try {
+            const page = doc.getPage(override.pageNumber - 1);
+            const { width: pageWidth, height: pageHeight } = page.getSize();
+            const widthPt = (override.widthPercent / 100) * pageWidth;
+            const heightPt = (override.heightPercent / 100) * pageHeight;
+            const xPt = (override.leftPercent / 100) * pageWidth;
+            // top% est mesuré depuis le HAUT (convention CSS) ; /Rect PDF
+            // mesure y depuis le BAS de la page — même conversion que
+            // positionRect côté serveur (dao-template-pdf.ts).
+            const yPt = pageHeight - (override.topPercent / 100) * pageHeight - heightPt;
+            if (customFieldNamesRef.current.has(fieldName)) {
+              const value = customFieldValuesRef.current.get(fieldName) ?? "";
+              const field = form.createTextField(fieldName);
+              // ORDRE IMPORTANT (déjà vérifié ailleurs dans ce projet) :
+              // addToPage() avant setFontSize()/setText().
+              field.addToPage(page, {
+                x: xPt, y: yPt, width: widthPt, height: heightPt,
+                borderWidth: 1, borderColor: rgb(0.15, 0.39, 0.92), backgroundColor: rgb(1, 1, 1),
+              });
+              field.setFontSize(Math.max(4, Math.round(override.fontSizePt)));
+              if (value) field.setText(value);
+            } else {
+              const field = form.getTextField(fieldName);
+              field.acroField.getWidgets().forEach((widget) => widget.setRectangle({ x: xPt, y: yPt, width: widthPt, height: heightPt }));
+              field.setFontSize(Math.max(4, Math.round(override.fontSizePt)));
+            }
+          } catch {
+            // Une case qu'on ne retrouve plus (nom introuvable...) ne doit
+            // jamais faire échouer tout l'enregistrement : on passe celle-là.
+          }
+        }
+        try {
+          form.updateFieldAppearances();
+        } catch {
+          // Repli silencieux : la position/le texte restent quand même
+          // enregistrés même si la régénération de l'aperçu échoue.
+        }
+        return await doc.save();
+      } catch {
+        // Si pdf-lib échoue ici pour une raison quelconque, on renvoie quand
+        // même les valeurs déjà tapées (baseBytes) plutôt que de faire
+        // échouer complètement l'enregistrement à cause du repositionnement.
+        return baseBytes;
+      }
     },
   }), []);
 
   return <div style={{ position: "relative", width: "100%", height: "100%" }}>
+    {/* pdf.js teinte par défaut (en bleu clair, via une image de fond CSS)
+        toute case encore vide, pour aider à les repérer dans son propre
+        lecteur complet — un réglage qu'il n'expose nulle part pour notre
+        usage (juste ce composant, sans sa barre d'outils). Nos cases ont
+        déjà un fond blanc bien à elles (voir dao-template-pdf.ts /
+        generated-document-pdf.ts, backgroundColor blanc à la création) :
+        cette teinte s'affichait PAR-DESSUS, donnant l'impression d'une
+        couleur différente de la page. On neutralise ici uniquement cette
+        teinte par défaut (jamais touché ailleurs dans pdf_viewer.css), et on
+        force en plus un fond blanc directement sur chaque case affichée. */}
+    <style>{`
+      .fillable-pdf-viewer .annotationLayer {
+        --annotation-unfocused-field-background: none !important;
+        --annotation-unfocused-field-filter: none !important;
+      }
+      .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea) {
+        background-color: #fff !important;
+      }
+      /* Le "blob" bleu/mauve arrondi qui apparaissait au toucher sur iPhone
+         (visible sur la capture d'écran envoyée) n'est ni la teinte pdf.js
+         ci-dessus (déjà neutralisée) ni une case mal positionnée : c'est le
+         reflet de surbrillance que Safari affiche par défaut sur tout
+         élément touché (-webkit-tap-highlight-color), ici en plus déformé
+         car il se superpose sur la case ET sur le champ texte à l'intérieur.
+         On le désactive uniquement dans ce lecteur. */
+      .fillable-pdf-viewer, .fillable-pdf-viewer * {
+        -webkit-tap-highlight-color: transparent;
+      }
+    `}</style>
     <div
       ref={scrollContainerRef}
+      className="fillable-pdf-viewer"
       style={{ position: "relative", width: "100%", height: "100%", overflow: "auto", background: "#f3f4f6", borderRadius: "10px" }}
     >
       {loading && !errorMessage && <p style={{ padding: 16, margin: 0, textAlign: "center" }}>Chargement du PDF…</p>}
@@ -323,36 +778,45 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       <div ref={pagesContainerRef} className="pdfViewer" style={{ width: "100%", padding: "8px 0", position: "relative" }} />
     </div>
     {!loading && !errorMessage && (
-      <div style={zoomToolbarStyle}>
-        <button type="button" onClick={() => applyZoom(zoomRef.current - ZOOM_STEP)} style={zoomButtonStyle} aria-label="Zoom arrière">
-          −
-        </button>
-        <span style={{ alignSelf: "center", fontSize: 13, minWidth: 42, textAlign: "center", color: "#111" }}>
-          {Math.round(zoomDisplay * 100)}%
-        </span>
-        <button type="button" onClick={() => applyZoom(zoomRef.current + ZOOM_STEP)} style={zoomButtonStyle} aria-label="Zoom avant">
-          +
-        </button>
-        <button type="button" onClick={() => applyZoom(1)} style={{ ...zoomButtonStyle, fontSize: 12 }} aria-label="Taille normale">
-          100%
-        </button>
+      <div style={{ position: "absolute", bottom: 12 + keyboardInsetPx, left: 12, right: 12, display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 8 }}>
+        {editModeOn && (
+          <button
+            type="button"
+            onClick={() => { addFieldModeRef.current = !addFieldModeRef.current; setAddFieldModeOn(addFieldModeRef.current); }}
+            style={{ ...zoomButtonStyle, width: "auto", padding: "0 12px", fontSize: 12, background: addFieldModeOn ? "#2563eb" : "#fff", color: addFieldModeOn ? "#fff" : "#111" }}
+          >
+            {addFieldModeOn ? "Touchez la page…" : "+ Ajouter une case"}
+          </button>
+        )}
+        {editModeOn && selectedField && (
+          <div style={{ display: "flex", gap: 6, background: "rgba(255,255,255,.96)", borderRadius: 8, padding: 6, boxShadow: "0 1px 6px rgba(0,0,0,.3)" }}>
+            <button type="button" onClick={() => adjustSelectedFontSize(-FONT_SIZE_STEP_PT)} style={zoomButtonStyle} aria-label="Police plus petite">A−</button>
+            <button type="button" onClick={() => adjustSelectedFontSize(FONT_SIZE_STEP_PT)} style={zoomButtonStyle} aria-label="Police plus grande">A+</button>
+            {customFieldNamesRef.current.has(selectedField) && (
+              <button type="button" onClick={removeSelectedCustomField} style={{ ...zoomButtonStyle, color: "#b91c1c" }} aria-label="Supprimer cette case">✕</button>
+            )}
+            <button type="button" onClick={() => setSelectedField(null)} style={zoomButtonStyle} aria-label="Fermer">OK</button>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 6, background: "rgba(255,255,255,.96)", borderRadius: 8, padding: 6, boxShadow: "0 1px 6px rgba(0,0,0,.3)" }}>
+          <button
+            type="button"
+            onClick={toggleEditMode}
+            style={{ ...zoomButtonStyle, width: "auto", padding: "0 12px", fontSize: 12, background: editModeOn ? "#2563eb" : "#fff", color: editModeOn ? "#fff" : "#111" }}
+          >
+            {editModeOn ? "Terminé" : "Ajuster"}
+          </button>
+          <button type="button" onClick={() => applyZoom(zoomRef.current - ZOOM_STEP)} style={zoomButtonStyle} aria-label="Zoom arrière">−</button>
+          <span style={{ alignSelf: "center", fontSize: 13, minWidth: 42, textAlign: "center", color: "#111" }}>
+            {Math.round(zoomDisplay * 100)}%
+          </span>
+          <button type="button" onClick={() => applyZoom(zoomRef.current + ZOOM_STEP)} style={zoomButtonStyle} aria-label="Zoom avant">+</button>
+          <button type="button" onClick={() => applyZoom(1)} style={{ ...zoomButtonStyle, fontSize: 12 }} aria-label="Taille normale">100%</button>
+        </div>
       </div>
     )}
   </div>;
 });
-
-const zoomToolbarStyle: CSSProperties = {
-  position: "absolute",
-  bottom: 12,
-  right: 12,
-  display: "flex",
-  gap: 6,
-  background: "rgba(255,255,255,.96)",
-  borderRadius: 8,
-  padding: 6,
-  boxShadow: "0 1px 6px rgba(0,0,0,.3)",
-  zIndex: 5,
-};
 
 const zoomButtonStyle: CSSProperties = {
   width: 34,
