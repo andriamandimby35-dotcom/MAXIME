@@ -531,3 +531,75 @@ export async function extractRelevantPageRange(
     return { pages: candidatePages, title: null };
   }
 }
+
+// Repère, à l'intérieur des pages qu'un MÊME submission_item revendique
+// (déjà connues, contrairement à extractRelevantPageRange plus haut qui les
+// cherche depuis un titre), si plusieurs de ces pages affichent CHACUNE leur
+// propre vrai titre de document — signe que l'IA a fusionné à tort plusieurs
+// pièces distinctes en un seul item (voir splitMergedDaoItems dans
+// build-dossier-items.ts, qui utilise ce découpage). Générique par
+// construction : réutilise exactement le même signal de mise en forme
+// (majuscules + gras, voir pageHeadingLine plus haut) que le reste de ce
+// fichier, aucun mot ni numéro codé en dur — fonctionne pareil sur n'importe
+// quel DAO.
+export type MergedItemSegment = { pages: number[]; title: string };
+
+export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: number[]): Promise<MergedItemSegment[]> {
+  if (!sortedPages.length) return [];
+  try {
+    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const segments: MergedItemSegment[] = [{ pages: [sortedPages[0]], title: "" }];
+    let referenceHeading = "";
+    try {
+      const first = await pageHeadingLine(doc, sortedPages[0]);
+      if (first.titleLine) { segments[0].title = first.titleLine; referenceHeading = first.heading; }
+    } catch {
+      // Première page illisible : segment de départ gardé sans titre connu.
+    }
+    for (let index = 1; index < sortedPages.length; index += 1) {
+      const pageNumber = sortedPages[index];
+      const currentSegment = segments[segments.length - 1];
+      if (pageNumber < 1 || pageNumber > doc.numPages) { currentSegment.pages.push(pageNumber); continue; }
+      try {
+        const { heading, titleLine } = await pageHeadingLine(doc, pageNumber);
+        // Un titre trouvé, différent du titre déjà en cours : une AUTRE
+        // pièce commence ici, jamais une simple continuation (même règle que
+        // isStopBoundary plus haut, sans comparaison à un titre demandé —
+        // ici on compare seulement les titres trouvés entre eux).
+        if (titleLine && heading !== referenceHeading) {
+          segments.push({ pages: [pageNumber], title: titleLine });
+          referenceHeading = heading;
+        } else {
+          currentSegment.pages.push(pageNumber);
+        }
+      } catch {
+        currentSegment.pages.push(pageNumber); // Page illisible : gardée dans le segment en cours, par prudence.
+      }
+    }
+    return segments;
+  } catch {
+    return [];
+  }
+}
+
+// Les pages sur lesquelles le texte donné (recherche littérale, insensible
+// aux accents/à la casse) apparaît réellement — sert à rattacher un tableau
+// déjà connu (son intitulé) au bon segment après un découpage, sans dépendre
+// d'aucune mise en forme (un intitulé de tableau n'est pas toujours en
+// gras/majuscules, contrairement à un vrai titre de pièce).
+export async function pagesContainingText(pdfBytes: Uint8Array, pages: number[], needle: string): Promise<Set<number>> {
+  const normalizedNeedle = normalizeText(needle);
+  const matches = new Set<number>();
+  if (!normalizedNeedle || !pages.length) return matches;
+  try {
+    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    for (const pageNumber of pages) {
+      if (pageNumber < 1 || pageNumber > doc.numPages) continue;
+      const text = await normalizedPageText(doc, pageNumber);
+      if (text.includes(normalizedNeedle)) matches.add(pageNumber);
+    }
+    return matches;
+  } catch {
+    return matches;
+  }
+}

@@ -9,6 +9,7 @@
 // liste de pièces.
 import { findBestTitleMatch } from "@/lib/submission/title-match";
 import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-reference";
+import { splitPagesByOwnTitle, pagesContainingText } from "@/lib/submission/trim-to-relevant-pages";
 
 export type Field = { key: string; label: string; required: boolean; description: string };
 
@@ -32,10 +33,18 @@ export type DetectedItem = {
 
 export type TemplateTable = { title: string; columns: string[]; rows: string[][]; organization_column_indexes?: number[]; repeatable?: boolean };
 
+// Position d'UN champ sur UNE page réelle du DAO (page 1-indexée, x/y/largeur
+// en pourcentage depuis le coin supérieur gauche) — déjà renvoyée par l'IA
+// (voir le schéma dans analyze-dao/route.ts) ; sert ici uniquement à savoir,
+// après un découpage (voir splitMergedDaoItems plus bas), à QUEL morceau
+// rattacher chaque champ.
+export type TemplateFillPosition = { page: number; field_key: string; x_percent: number; y_percent: number; width_percent: number };
+
 export type TemplateDetectedItem = DetectedItem & {
   prefilled_values?: Array<{ key: string; value: string }>;
   template_origin?: "dao" | "internet" | "generated" | "none";
   template_page_numbers?: number[];
+  template_fill_positions?: TemplateFillPosition[];
   // Transmis tel quel jusqu'au dossier affiché côté client, uniquement pour
   // qu'un éditeur à lignes ("+ Ajouter une ligne") puisse repérer les
   // tableaux marqués repeatable (voir le prompt d'analyse) et laisser
@@ -141,6 +150,80 @@ export const standardSubmissionItems: DetectedItem[] = [...companyStandardItems,
 
 const hasAppComputedContent = (title: string) => /planning.*ex.cution/i.test(title)
   || /mat.riaux.*transport/i.test(title) || /\bplans?\b/i.test(title) || /personnel/i.test(title);
+
+// Corrige après coup une erreur d'analyse IA déjà observée (le prompt
+// d'analyse-dao.ts interdit pourtant déjà explicitement de fusionner
+// plusieurs pages ayant chacune leur propre titre en un seul submission_item
+// — typiquement des fiches A1, A2, A3, A4, A5... — mais une analyse déjà
+// faite peut avoir ignoré cette consigne). Générique par construction :
+// AUCUN titre ni numéro n'est codé en dur ici, seule la MISE EN FORME de
+// chaque page réelle du DAO est regardée (voir splitPagesByOwnTitle, qui
+// réutilise le même signal majuscules+gras que le reste de l'application) —
+// s'applique donc pareil à n'importe quel DAO. Tourne à chaque ouverture du
+// dossier (jamais un nouvel appel IA, donc jamais de coût supplémentaire), ce
+// qui corrige aussi bien un DAO déjà analysé dans le passé qu'un DAO analysé
+// demain, sans jamais avoir besoin d'une correction manuelle au cas par cas.
+export async function splitMergedDaoItems<T extends TemplateDetectedItem>(items: T[], pdfBytes: Uint8Array | null): Promise<T[]> {
+  if (!pdfBytes) return items;
+  const result: T[] = [];
+  for (const item of items) {
+    const pages = item.template_page_numbers ?? [];
+    // Un item qui ne vient pas d'une vraie page du DAO, ou qui ne tient que
+    // sur une seule page, ne peut par définition pas avoir fusionné deux
+    // pièces différentes : rien à vérifier, on le laisse tel quel.
+    if (item.template_origin !== "dao" || pages.length < 2) { result.push(item); continue; }
+    const sortedPages = [...new Set(pages)].sort((a, b) => a - b);
+    let segments: Awaited<ReturnType<typeof splitPagesByOwnTitle>> = [];
+    try {
+      segments = await splitPagesByOwnTitle(pdfBytes, sortedPages);
+    } catch {
+      segments = [];
+    }
+    // Un seul segment trouvé : aucune autre pièce détectée dans cette plage,
+    // l'item d'origine reste inchangé (cas normal, largement majoritaire).
+    if (segments.length < 2) { result.push(item); continue; }
+
+    // Répartit chaque champ connu (fields) vers le bon segment, grâce à la
+    // page où l'IA avait situé sa position (template_fill_positions). Un
+    // champ sans position connue (rare) reste sur le TOUT PREMIER segment
+    // plutôt que de disparaître silencieusement.
+    const positions = item.template_fill_positions ?? [];
+    const fieldsBySegment: Field[][] = segments.map(() => []);
+    for (const field of item.fields) {
+      const matchingPositions = positions.filter((position) => position.field_key === field.key);
+      const segmentIndex = matchingPositions.length
+        ? segments.findIndex((segment) => matchingPositions.some((position) => segment.pages.includes(position.page)))
+        : -1;
+      fieldsBySegment[segmentIndex === -1 ? 0 : segmentIndex].push(field);
+    }
+
+    // Même principe pour les tableaux : on cherche sur quelles pages du
+    // segment le TEXTE de son intitulé apparaît réellement (aucun tableau
+    // n'a de numéro de page stocké directement). Un tableau qu'aucun segment
+    // ne revendique reste lui aussi sur le premier segment, jamais perdu.
+    const tablesBySegment: TemplateTable[][] = segments.map(() => []);
+    for (const table of item.template_tables ?? []) {
+      let placedIndex = -1;
+      for (let index = 0; index < segments.length; index += 1) {
+        const matches = await pagesContainingText(pdfBytes, segments[index].pages, table.title);
+        if (matches.size > 0) { placedIndex = index; break; }
+      }
+      tablesBySegment[placedIndex === -1 ? 0 : placedIndex].push(table);
+    }
+
+    segments.forEach((segment, index) => {
+      result.push({
+        ...item,
+        title: segment.title || item.title,
+        template_page_numbers: segment.pages,
+        source_reference: `Pages ${segment.pages.join(", ")}`,
+        fields: fieldsBySegment[index],
+        template_tables: tablesBySegment[index],
+      });
+    });
+  }
+  return result;
+}
 
 // Reproduit exactement la logique de app/(dashboard)/tenders/[id]/submission/
 // page.tsx : un élément générique de la liste type ne s'affiche que si l'IA

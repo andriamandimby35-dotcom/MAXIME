@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import SubmissionDossierManager from "@/components/tenders/SubmissionDossierManager";
 import { GenerateSubmissionDossierButton } from "@/components/tenders/GenerateSubmissionDossierButton";
 import { getContext } from "@/lib/organization";
-import { buildMasterDetectedItems, type DetectedItem } from "@/lib/submission/build-dossier-items";
+import { buildMasterDetectedItems, splitMergedDaoItems, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
 
 export default async function SubmissionPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ estimateId?: string }> }) {
   const { id } = await params;
@@ -46,7 +46,7 @@ export default async function SubmissionPage({ params, searchParams }: { params:
     }
   }
 
-  type TenderAnalysis = { submission_items?: DetectedItem[]; submission_checklist?: Array<{ title: string; sequence: number; source_reference?: string; level?: number }>; worksite_location?: string; execution_period_days?: number | null };
+  type TenderAnalysis = { submission_items?: TemplateDetectedItem[]; submission_checklist?: Array<{ title: string; sequence: number; source_reference?: string; level?: number }>; worksite_location?: string; execution_period_days?: number | null };
   let analysis: TenderAnalysis | null = null;
   try {
     analysis = typeof tender.ai_analysis === "string"
@@ -54,6 +54,27 @@ export default async function SubmissionPage({ params, searchParams }: { params:
       : tender.ai_analysis as TenderAnalysis | null;
   } catch {
     analysis = null;
+  }
+  // Corrige après coup une pièce que l'IA a fusionnée à tort (voir
+  // splitMergedDaoItems) : ne retélécharge le DAO original QUE si au moins
+  // une pièce s'étale sur plusieurs vraies pages du DAO (le cas normal,
+  // largement majoritaire, n'a donc jamais ce coût supplémentaire). Un DAO
+  // temporairement injoignable ne doit jamais empêcher d'afficher le
+  // dossier : on continue alors simplement avec la liste non corrigée.
+  const rawItems = analysis?.submission_items ?? [];
+  const mightHaveMergedItems = rawItems.some((item) => item.template_origin === "dao" && (item.template_page_numbers?.length ?? 0) > 1);
+  if (mightHaveMergedItems && tender.document_url) {
+    try {
+      const response = await fetch(tender.document_url);
+      if (response.ok) {
+        const pdfBytes = new Uint8Array(await response.arrayBuffer());
+        const splitItems = await splitMergedDaoItems(rawItems, pdfBytes);
+        if (analysis) analysis = { ...analysis, submission_items: splitItems };
+      }
+    } catch {
+      // DAO original temporairement inaccessible : on continue avec la
+      // liste telle quelle plutôt que de bloquer toute la page.
+    }
   }
   const detectedItems = buildMasterDetectedItems(analysis);
 

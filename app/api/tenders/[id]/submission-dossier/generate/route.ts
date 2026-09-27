@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { buildMasterDetectedItems, buildDossierRecordsForInsert, type MasterAnalysis } from "@/lib/submission/build-dossier-items";
+import { buildMasterDetectedItems, buildDossierRecordsForInsert, splitMergedDaoItems, type MasterAnalysis, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
 
 function migrationError(error: { code?: string; message?: string } | null) {
   return error?.code === "42P01" || error?.message?.includes("does not exist");
@@ -30,7 +30,7 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
 
   const { data: tender } = await supabase
     .from("tenders")
-    .select("id,ai_analysis")
+    .select("id,ai_analysis,document_url")
     .eq("id", id)
     .eq("organization_id", organizationId)
     .maybeSingle();
@@ -57,6 +57,27 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     analysis = typeof tender.ai_analysis === "string" ? JSON.parse(tender.ai_analysis) : tender.ai_analysis as MasterAnalysis;
   } catch {
     analysis = null;
+  }
+
+  // Même correctif après coup que app/(dashboard)/tenders/[id]/submission/
+  // page.tsx (voir splitMergedDaoItems) : une pièce déjà fusionnée à tort par
+  // l'IA doit être séparée dès la toute première génération du dossier, pas
+  // seulement à l'affichage. Ne retélécharge le DAO que si vraiment
+  // nécessaire (au moins une pièce sur plusieurs vraies pages).
+  const rawItems = (analysis?.submission_items ?? []) as TemplateDetectedItem[];
+  const mightHaveMergedItems = rawItems.some((item) => item.template_origin === "dao" && (item.template_page_numbers?.length ?? 0) > 1);
+  if (mightHaveMergedItems && tender.document_url) {
+    try {
+      const response = await fetch(tender.document_url);
+      if (response.ok) {
+        const pdfBytes = new Uint8Array(await response.arrayBuffer());
+        const splitItems = await splitMergedDaoItems(rawItems, pdfBytes);
+        if (analysis) analysis = { ...analysis, submission_items: splitItems };
+      }
+    } catch {
+      // DAO original temporairement inaccessible : on continue avec la
+      // liste non corrigée plutôt que de bloquer la génération du dossier.
+    }
   }
 
   const detectedItems = buildMasterDetectedItems(analysis);
