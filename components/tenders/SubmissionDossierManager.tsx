@@ -771,6 +771,45 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     }
   }
 
+  // Bouton "Régénérer" (voir la fenêtre Ouvrir plus bas) : force une VRAIE
+  // nouvelle fabrication du document, en ignorant à la fois la version déjà
+  // enregistrée par la personne (Enregistrer, __filledPdfPath — sinon la
+  // prochaine réouverture retélécharge cette même ancienne version au lieu
+  // d'aller chercher la nouvelle) ET le fichier déjà mis en cache côté
+  // serveur (voir printable-submission-document/route.ts, "cachedPath" et
+  // ?regenerate=1). Le numéro de version côté serveur (GENERATED_PDF_VERSION)
+  // fait normalement déjà cette régénération tout seul après un correctif,
+  // mais garder ce bouton évite d'avoir à attendre un nouveau déploiement la
+  // prochaine fois qu'un document doit être refabriqué (ex. après avoir
+  // modifié les informations de l'entreprise). On ne supprime rien dans
+  // Supabase Storage — seulement le pointeur __filledPdfPath — par prudence.
+  async function regenerateFilledPdf(index: number, item: Item) {
+    const key = `regenerate:${index}`;
+    setPendingAction(key);
+    setMessage("Régénération du document…");
+    setFillableViewerFailed(false);
+    setFillableViewerError(null);
+    try {
+      if (item.form_data.__filledPdfPath) {
+        const nextFormData = { ...item.form_data };
+        delete nextFormData.__filledPdfPath;
+        delete nextFormData.__filledPdfName;
+        updateItem(index, { form_data: nextFormData });
+      }
+      const query = new URLSearchParams({ title: item.title, kind: item.kind, sourceReference: item.source_reference || "", regenerate: "1" });
+      if (estimateId) query.set("estimateId", estimateId);
+      const pdf = await fetchAndValidatePdf(`/api/tenders/${tenderId}/printable-submission-document?${query}`);
+      setFillablePdfBytes(new Uint8Array(await pdf.arrayBuffer()));
+      setMessage("Document régénéré avec la dernière version du modèle.");
+    } catch (error) {
+      setFillableViewerFailed(true);
+      setFillableViewerError(error instanceof Error ? error.message : "Régénération impossible.");
+      setMessage(error instanceof Error ? error.message : "Régénération impossible.");
+    } finally {
+      setPendingAction((current) => current === key ? null : current);
+    }
+  }
+
   async function openReadingDocument() {
     if (!daoUrl) return;
     const key = "read";
@@ -1318,12 +1357,14 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     // rouge/vert, juste un texte différent pour rester clair pour Maxime.
     const readingOnly = item.kind === "document_to_provide" && isReadingOnly(item);
     const saving = pendingAction === `save:${index}`;
+    const regenerating = pendingAction === `regenerate:${index}`;
     return <div className="modalBackdrop" onClick={() => setActionsForIndex(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(900px,95vw)", height: "88vh", display: "flex", flexDirection: "column" }}>
       <div style={{ flex: "0 0 auto", display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
         <h2 style={{ margin: 0, fontWeight: 800, fontSize: "1.125rem", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "1 1 auto" }}>{item.title}</h2>
         <div style={{ display: "flex", gap: 8, flex: "0 0 auto", flexWrap: "wrap" }}>
           {!fillableViewerFailed && <button type="button" className="tenderButton tenderButtonPrimary" disabled={saving} onClick={() => void saveFilledPdfFromViewer(index, item)}><ButtonLabel loading={saving} label="Enregistrer" loadingLabel="Envoi…" /></button>}
           {showPrint && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Imprimer" /></button>}
+          <button type="button" className="tenderButton" disabled={regenerating} title="Refabrique ce document depuis le DAO, en ignorant toute version déjà enregistrée (utile si le contenu affiché semble périmé)." onClick={() => void regenerateFilledPdf(index, item)}><ButtonLabel loading={regenerating} label="Régénérer" loadingLabel="Régénération…" /></button>
           <button type="button" className="tenderButton" onClick={() => setActionsForIndex(null)}>Fermer</button>
         </div>
       </div>

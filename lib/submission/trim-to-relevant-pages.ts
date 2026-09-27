@@ -266,8 +266,8 @@ async function pageHeadingLine(doc: Awaited<ReturnType<typeof getDocument>["prom
 // visible (voir printable-submission-document/route.ts).
 export type RelevantPageRange = { pages: number[]; title: string | null };
 
-export async function trimToRelevantStart(pdfBytes: Uint8Array, candidatePages: number[], title: string, claimedByOtherPages?: Set<number>): Promise<RelevantPageRange> {
-  return extractRelevantPageRange(pdfBytes, candidatePages, title, { claimedByOtherPages });
+export async function trimToRelevantStart(pdfBytes: Uint8Array, candidatePages: number[], title: string, claimedByOtherPages?: Set<number>, siblingTitles?: string[]): Promise<RelevantPageRange> {
+  return extractRelevantPageRange(pdfBytes, candidatePages, title, { claimedByOtherPages, siblingTitles });
 }
 
 // Dernier recours quand l'IA n'a retrouvé AUCUNE page pour une pièce
@@ -278,11 +278,11 @@ export async function trimToRelevantStart(pdfBytes: Uint8Array, candidatePages: 
 // plage connue — sauf qu'ici la "plage de départ" est le DAO entier.
 // Générique par construction (le titre cherché est un paramètre) : sert
 // n'importe quelle pièce, sur n'importe quel DAO, pas seulement le CCAP.
-export async function locateTitleInFullDocument(pdfBytes: Uint8Array, title: string, claimedByOtherPages?: Set<number>): Promise<RelevantPageRange> {
+export async function locateTitleInFullDocument(pdfBytes: Uint8Array, title: string, claimedByOtherPages?: Set<number>, siblingTitles?: string[]): Promise<RelevantPageRange> {
   try {
     const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
     const allPages = Array.from({ length: doc.numPages }, (_, index) => index + 1);
-    return await extractRelevantPageRange(pdfBytes, allPages, title, { returnEmptyIfNotFound: true, claimedByOtherPages });
+    return await extractRelevantPageRange(pdfBytes, allPages, title, { returnEmptyIfNotFound: true, claimedByOtherPages, siblingTitles });
   } catch {
     return { pages: [], title: null };
   }
@@ -350,6 +350,27 @@ function isStopBoundary(titleLine: string | null, heading: string, referenceHead
   return !matchesTitle(heading, keywords);
 }
 
+// Cherche le titre EXACT (mot pour mot, déjà connu) d'une autre pièce du
+// dossier n'importe où sur la page — pas seulement dans la zone de titre
+// repérée par pageHeadingLine, qui exige une mise en forme distincte
+// (majuscules/gras/couleur/taille) absente sur certains DAO. Un stockage
+// séparé du texte complet de la page évite de le retélécharger deux fois
+// (une fois ici, une fois dans pageHeadingLine) : l'appelant fournit déjà le
+// texte normalisé, calculé une seule fois par page.
+function pageContainsSiblingTitle(normalizedPageText: string, normalizedSiblingTitles: string[]) {
+  return normalizedSiblingTitles.some((otherTitle) => otherTitle.length >= 12 && normalizedPageText.includes(otherTitle));
+}
+
+async function normalizedPageText(doc: Awaited<ReturnType<typeof getDocument>["promise"]>, pageNumber: number): Promise<string> {
+  try {
+    const page = await doc.getPage(pageNumber);
+    const content = await page.getTextContent();
+    return normalizeText(content.items.map((item) => ("str" in item ? (item as { str?: string }).str ?? "" : "")).join(" "));
+  } catch {
+    return "";
+  }
+}
+
 // Une fois la pièce trouvée, elle continue tant qu'aucun nouveau titre ne
 // prend le relais — MÊME au-delà des pages initialement données par l'IA ou
 // par le sommaire du DAO (celles-ci ne couvrent pas toujours tout le
@@ -381,11 +402,25 @@ export async function extractRelevantPageRange(
     // garde-fou pendant l'extension au-delà de candidatePages, pour ne
     // jamais avaler par erreur le début d'un autre document déjà repéré.
     claimedByOtherPages?: Set<number>;
+    // Titres des AUTRES pièces du même dossier (voir siblingTitlesFor côté
+    // appelant) : filet de sécurité complémentaire à isStopBoundary. Ce
+    // dernier ne repère un changement de document que si le NOUVEAU titre
+    // est bien écrit en majuscules ET en gras sur la page DAO (voir
+    // pageHeadingLine) — or certains DAO écrivent le titre d'une pièce
+    // suivante sans cette mise en forme distincte (constaté : le titre d'une
+    // pièce "Sécurité de soumission" avalé par erreur à la fin d'une pièce
+    // "Fiches de renseignements A1 à A5", les deux partageant la même page
+    // physique du DAO sans qu'aucune mise en forme ne trahisse le nouveau
+    // titre). Comme on connaît déjà, mot pour mot, le titre de CHAQUE autre
+    // pièce du dossier (déjà extrait par l'IA), on peut chercher directement
+    // ce texte précis sur la page, sans dépendre d'aucune mise en forme.
+    siblingTitles?: string[];
   } = {},
 ): Promise<RelevantPageRange> {
   if (!candidatePages.length) return { pages: candidatePages, title: null };
   const keywords = phraseWords(title);
   if (!keywords.length) return { pages: candidatePages, title: null };
+  const normalizedSiblingTitles = (options.siblingTitles ?? []).map((otherTitle) => normalizeText(otherTitle)).filter(Boolean);
   try {
     const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
     // La page citée par l'IA (ou par le sommaire du DAO) peut être décalée
@@ -440,6 +475,16 @@ export async function extractRelevantPageRange(
       const isIsolatedJump = pageNumber - previousPage > 1;
       try {
         const { heading, titleLine } = await pageHeadingLine(doc, pageNumber);
+        // Filet complémentaire (voir pageContainsSiblingTitle plus haut) :
+        // avant même de se fier à isStopBoundary (qui exige une mise en
+        // forme distincte), on vérifie si le titre EXACT d'une autre pièce
+        // du dossier apparaît quelque part sur cette page précise.
+        const siblingHit = normalizedSiblingTitles.length > 0 && pageContainsSiblingTitle(await normalizedPageText(doc, pageNumber), normalizedSiblingTitles);
+        if (siblingHit) {
+          if (isIsolatedJump) { previousPage = pageNumber; continue; } // Page isolée étrangère : simplement ignorée, comme d'habitude.
+          stoppedEarly = true;
+          break; // Une autre pièce déjà connue commence ici : on s'arrête net.
+        }
         if (isIsolatedJump) {
           const fullPageHeading = normalizeText((await (await doc.getPage(pageNumber)).getTextContent()).items.map((item) => ("str" in item ? item.str : "")).join(" ").slice(0, 400));
           if (!matchesTitle(fullPageHeading, keywords)) { previousPage = pageNumber; continue; }
@@ -470,7 +515,8 @@ export async function extractRelevantPageRange(
         if (options.claimedByOtherPages?.has(pageNumber)) break;
         try {
           const { heading, titleLine } = await pageHeadingLine(doc, pageNumber);
-          if (isStopBoundary(titleLine, heading, referenceHeading, keywords)) break;
+          const siblingHit = normalizedSiblingTitles.length > 0 && pageContainsSiblingTitle(await normalizedPageText(doc, pageNumber), normalizedSiblingTitles);
+          if (siblingHit || isStopBoundary(titleLine, heading, referenceHeading, keywords)) break;
           kept.push(pageNumber);
           if (titleLine) referenceHeading = heading;
         } catch {

@@ -213,7 +213,7 @@ function buildExecutionPlanningTable(items: PlanningWorkItem[], executionDays: n
 // main dans Supabase, et sans avoir besoin de relancer une analyse du DAO
 // (qui ne sert \u00e0 rien ici : le souci vient du fichier PDF d\u00e9j\u00e0 g\u00e9n\u00e9r\u00e9, jamais
 // de l'analyse elle-m\u00eame).
-const GENERATED_PDF_VERSION = "v6";
+const GENERATED_PDF_VERSION = "v7";
 function pdfStorageName(title: string, kind: string, workerIndex: number) {
   const normalized = title.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 96) || "document";
   return `${kind === "form_to_complete" ? "formulaire" : "piece"}-${normalized}-${workerIndex + 1}-${GENERATED_PDF_VERSION}.pdf`;
@@ -894,6 +894,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             ? { pages: await expandToContiguousPlanRange(title, candidatePages, analysis?.submission_items ?? [], documentPageCount), title: null as string | null }
             : await extractRelevantPageRange(bytes, candidatePages, detectedTemplate.title ?? title, {
               claimedByOtherPages: otherItemsClaimedPages(analysis?.submission_items ?? [], detectedTemplate.title ?? title),
+              siblingTitles: siblingTitlesForThisItem,
             });
           const templateFields = detectedTemplate.fields ?? [];
           let pdf: Buffer;
@@ -1029,7 +1030,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           // suite (ex. "Partie III" commence par l'acte d'engagement et la
           // localisation du site AVANT le CCAP) : on recadre sur la première
           // page qui mentionne vraiment le sujet demandé.
-          const { pages: verifiedPages, title: verifiedTitle } = await trimToRelevantStart(bytes, notClaimedByOthers, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title));
+          const { pages: verifiedPages, title: verifiedTitle } = await trimToRelevantStart(bytes, notClaimedByOthers, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title), siblingTitlesForThisItem);
           const [positions, redactions] = await Promise.all([
             locateFieldPositions(bytes, verifiedPages, fieldTargets),
             locateBracketPlaceholders(bytes, verifiedPages, fieldTargets),
@@ -1071,7 +1072,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       try {
         const bytes = await getDocumentBytes();
         if (bytes) {
-          const blindSearchResult = await locateTitleInFullDocument(bytes, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title));
+          const blindSearchResult = await locateTitleInFullDocument(bytes, title, otherItemsClaimedPages(analysis?.submission_items ?? [], title), siblingTitlesForThisItem);
           const locatedPages = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], title, blindSearchResult.pages);
           if (locatedPages.length) {
             const [positions, redactions] = await Promise.all([
