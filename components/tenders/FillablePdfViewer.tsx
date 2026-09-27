@@ -181,6 +181,13 @@ type PageEntry = {
   // Échelle "ajustée à l'écran" calculée une seule fois à l'ouverture
   // (avant tout zoom manuel) : le zoom se multiplie ensuite par-dessus.
   autoFitScale: number;
+  // Taille de police et couleur VRAIMENT enregistrées dans le PDF pour
+  // chaque case de cette page (lues une seule fois via page.getAnnotations(),
+  // voir le commentaire détaillé plus bas près de son remplissage) — null
+  // tant que restoreSavedStyle est faux (rien à restaurer). Sert de source
+  // fiable à ensureOverride, indépendante de la hauteur de la case (voir
+  // commentaire n°4bis).
+  savedFieldStyles: Map<string, { fontSizePt: number; color: string | null }> | null;
 };
 
 // Position/taille (en % de la page, comme pdf.js lui-même — voir le
@@ -280,19 +287,6 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
 
   // --- Applique/retient la position, taille et police d'une case --------
 
-  // Convertit ce que pdf.js a posé comme couleur inline sur la case
-  // ("rgb(r, g, b)", ou déjà "#rrggbb") en "#rrggbb" — pour pouvoir relire
-  // fidèlement la couleur DÉJÀ enregistrée d'une case (voir restoreSavedStyle
-  // dans ensureOverride), au lieu de toujours repartir du noir par défaut.
-  function cssColorToHex(value: string): string | null {
-    const rgbMatch = /^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/.exec(value.trim());
-    if (rgbMatch) {
-      return `#${[rgbMatch[1], rgbMatch[2], rgbMatch[3]].map((part) => Number(part).toString(16).padStart(2, "0")).join("")}`;
-    }
-    if (/^#[0-9a-fA-F]{6}$/.test(value.trim())) return value.trim();
-    return null;
-  }
-
   function ensureOverride(entry: PageEntry, section: HTMLElement, input: HTMLInputElement, fieldName: string): FieldOverride {
     const existing = fieldOverridesRef.current.get(fieldName);
     if (existing) return existing;
@@ -304,15 +298,21 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     // case jamais encore personnalisée (modèle vierge, ou nouvelle case
     // ajoutée à la main) n'a rien à "restaurer" : elle garde le réglage par
     // défaut demandé par Maxime (11pt, Times, noir, normal).
-    const fontMatch = restoreSavedStyle ? /calc\(([\d.]+)px/.exec(input.style.fontSize || "") : null;
-    const restoredColor = restoreSavedStyle ? cssColorToHex(input.style.color || "") : null;
+    //
+    // La taille de police et la couleur viennent de savedFieldStyles (lu
+    // depuis page.getAnnotations(), la VRAIE valeur du PDF) et non plus du
+    // DOM (input.style.fontSize/.color) — voir le commentaire n°4bis plus
+    // haut : le DOM peut afficher une taille RÉTRÉCIE par pdf.js si la case
+    // est plus petite que la police, alors que savedFieldStyles garde la
+    // valeur exacte enregistrée, quelle que soit la taille de la case.
+    const savedStyle = restoreSavedStyle ? entry.savedFieldStyles?.get(fieldName) : undefined;
     const created: FieldOverride = {
       pageNumber: entry.pageNumber,
       leftPercent: parseFloat(section.style.left) || 0,
       topPercent: parseFloat(section.style.top) || 0,
       widthPercent: parseFloat(section.style.width) || 20,
       heightPercent: parseFloat(section.style.height) || 3,
-      fontSizePt: fontMatch ? parseFloat(fontMatch[1]) : 11,
+      fontSizePt: savedStyle?.fontSizePt ?? 11,
       bold: restoreSavedStyle ? input.style.fontWeight === "bold" || input.style.fontWeight === "700" : false,
       // La police exacte (Times/DejaVu/Machine à écrire...) n'est pas
       // relisible de façon fiable depuis le rendu pdf.js (elle mappe le nom
@@ -322,7 +322,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       // dans le PDF), un futur changement de taille/couleur réappliquera
       // alors Times si la police d'origine était différente.
       fontFamily: "times",
-      color: restoredColor ?? "#000000",
+      color: savedStyle?.color ?? "#000000",
     };
     fieldOverridesRef.current.set(fieldName, created);
     return created;
@@ -772,6 +772,55 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         if (cancelled) return;
         const page = await pdfDocument.getPage(pageNumber);
         if (cancelled) return;
+        // Commentaire n°4bis — pourquoi ne PAS lire la taille de police dans
+        // le DOM (input.style.fontSize) : pdf.js RÉTRÉCIT toujours l'affichage
+        // à min(taille_déclarée, (hauteur_case - 2) / 1.35) (relu directement
+        // dans son code source, _setTextStyle) — donc si la case est plus
+        // petite que ce que la police demande, input.style.fontSize montre une
+        // taille plus PETITE que celle vraiment enregistrée dans le PDF. Comme
+        // Maxime a demandé de ne plus jamais faire grandir la case pour
+        // "loger" la police (aucune corrélation entre les deux), ce
+        // rétrécissement visuel devient courant — il ne faut donc plus du tout
+        // se fier au DOM pour restaurer la police/couleur. La VRAIE valeur
+        // enregistrée (celle du PDF, jamais rétrécie) vient de
+        // page.getAnnotations() : chaque annotation expose
+        // defaultAppearanceData.fontSize/fontColor, exactement ce que pdf.js
+        // lui-même lit avant de rétrécir l'affichage. On la lit une seule fois
+        // par page, ici, pendant le chargement (async), et on la garde en
+        // mémoire pour que ensureOverride (lui, synchrone) puisse s'en servir
+        // instantanément au moment où l'utilisateur touche une case.
+        let savedFieldStyles: PageEntry["savedFieldStyles"] = null;
+        if (restoreSavedStyle) {
+          try {
+            const annotations = await page.getAnnotations();
+            const map = new Map<string, { fontSizePt: number; color: string | null }>();
+            for (const annotation of annotations as Array<Record<string, unknown>>) {
+              const fieldName = typeof annotation.fieldName === "string" ? annotation.fieldName : null;
+              if (!fieldName) continue;
+              const da = annotation.defaultAppearanceData as
+                | { fontSize?: number; fontColor?: ArrayLike<number> }
+                | undefined;
+              if (!da) continue;
+              const fontSizePt = typeof da.fontSize === "number" && da.fontSize > 0 ? da.fontSize : null;
+              let color: string | null = null;
+              if (da.fontColor && da.fontColor.length >= 3) {
+                const toHex = (component: number) =>
+                  Math.max(0, Math.min(255, Math.round(component))).toString(16).padStart(2, "0");
+                color = `#${toHex(da.fontColor[0])}${toHex(da.fontColor[1])}${toHex(da.fontColor[2])}`;
+              }
+              if (fontSizePt != null || color != null) {
+                map.set(fieldName, { fontSizePt: fontSizePt ?? 11, color });
+              }
+            }
+            savedFieldStyles = map;
+          } catch {
+            // Si la lecture échoue pour une raison quelconque, ensureOverride
+            // retombe sur les valeurs par défaut (11pt/noir) — jamais pire
+            // qu'avant cette amélioration.
+            savedFieldStyles = null;
+          }
+        }
+        if (cancelled) return;
         const unscaledViewport = page.getViewport({ scale: 1 });
         // Limite haute à 2x pour rester net sans dessiner un canevas énorme
         // et inutilement lourd sur un vieux téléphone (le zoom manuel peut
@@ -789,7 +838,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         pageWrapper.style.boxShadow = "0 1px 4px rgba(0,0,0,.25)";
         pagesContainer.appendChild(pageWrapper);
 
-        entries.push({ pageNumber, page, wrapper: pageWrapper, pageView: null, autoFitScale });
+        entries.push({ pageNumber, page, wrapper: pageWrapper, pageView: null, autoFitScale, savedFieldStyles });
       }
       if (cancelled) return;
       pagesRef.current = entries;
@@ -959,17 +1008,15 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
             const { width: pageWidth, height: pageHeight } = page.getSize();
             const widthPt = (override.widthPercent / 100) * pageWidth;
             const fontSizePt = Math.max(4, Math.round(override.fontSizePt));
-            // Une case trop basse pour la taille de police demandée se fait
-            // "rétrécir" visuellement par pdf.js à la RÉOUVERTURE (même si
-            // la case DA garde bien la bonne taille) : pdf.js n'affiche
-            // JAMAIS plus grand que hauteur_case/1.35 (moins 2pt de bordure)
-            // — formule exacte relue dans son propre code source
-            // (_setTextStyle, LINE_FACTOR = 1.35) — donc SEULE une case
-            // d'au moins taille*1.35 + 2pt de haut garantit un réaffichage
-            // fidèle à la taille choisie. Le premier chiffre utilisé ici
-            // (fontSize * 1.3, sans le "+2") était trop juste et laissait
-            // encore rétrécir le texte à la réouverture.
-            const heightPt = Math.max((override.heightPercent / 100) * pageHeight, fontSizePt * 1.35 + 2);
+            // Pas de corrélation entre la hauteur de la case et la taille de
+            // police (demande explicite de Maxime) : la case garde EXACTEMENT
+            // la hauteur qu'il a réglée, même si pdf.js l'affichera alors plus
+            // petite à l'écran qu'elle n'est réellement enregistrée (voir le
+            // commentaire n°4bis plus haut, près de savedFieldStyles) — la
+            // restauration lit désormais la vraie valeur enregistrée via
+            // page.getAnnotations() plutôt que ce rendu visuel, donc ce
+            // rétrécissement à l'écran n'efface plus jamais la vraie taille.
+            const heightPt = (override.heightPercent / 100) * pageHeight;
             const xPt = (override.leftPercent / 100) * pageWidth;
             // top% est mesuré depuis le HAUT (convention CSS) ; /Rect PDF
             // mesure y depuis le BAS de la page — même conversion que

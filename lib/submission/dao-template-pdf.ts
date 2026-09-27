@@ -502,14 +502,16 @@ export async function createFillableDaoTemplatePdf(
       x: rect.x,
       y: rect.y,
       width: clampedWidth,
-      // pdf.js n'affiche jamais un champ texte plus grand que
-      // hauteur_case/1.35 (moins 2pt de bordure) — formule exacte relue
-      // dans son propre code source (_setTextStyle, LINE_FACTOR = 1.35) —
-      // donc une case trop juste se voit rétrécie visuellement à
-      // l'ouverture même si sa taille de police déclarée est correcte.
-      // "* 1.3" (sans le "+2") le garantissait presque, mais pas tout à
-      // fait : on reprend ici la marge exacte plutôt qu'approximative.
-      height: Math.max(rect.height, fontSize * 1.35 + 2),
+      // Pas de corrélation entre la hauteur de la case et la taille de
+      // police (demande explicite de Maxime, appliquée partout dans le
+      // projet) : la case garde exactement la hauteur détectée/estimée sur
+      // le modèle d'origine, même si pdf.js peut alors l'afficher plus
+      // petite à l'écran que la taille réellement enregistrée (formule
+      // _setTextStyle/LINE_FACTOR=1.35 de pdf.js). Ce n'est plus un problème
+      // depuis que la restauration (FillablePdfViewer, restoreSavedStyle)
+      // lit la vraie taille via page.getAnnotations() plutôt que ce rendu
+      // visuel rétréci.
+      height: rect.height,
       // Fond blanc : recouvre le pointillé/crochet déjà imprimé à cet
       // endroit précis sur la vraie page — même principe que le rectangle
       // blanc utilisé ailleurs avant d'écrire une valeur par-dessus.
