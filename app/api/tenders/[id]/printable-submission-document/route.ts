@@ -166,7 +166,7 @@ function buildExecutionPlanningTable(items: PlanningWorkItem[], executionDays: n
 // main dans Supabase, et sans avoir besoin de relancer une analyse du DAO
 // (qui ne sert \u00e0 rien ici : le souci vient du fichier PDF d\u00e9j\u00e0 g\u00e9n\u00e9r\u00e9, jamais
 // de l'analyse elle-m\u00eame).
-const GENERATED_PDF_VERSION = "v4";
+const GENERATED_PDF_VERSION = "v5";
 function pdfStorageName(title: string, kind: string, workerIndex: number) {
   const normalized = title.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 96) || "document";
   return `${kind === "form_to_complete" ? "formulaire" : "piece"}-${normalized}-${workerIndex + 1}-${GENERATED_PDF_VERSION}.pdf`;
@@ -613,11 +613,27 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     if (!isPersonnelRoster && !isMaterialRoster) return [];
     const key = isPersonnelRoster ? "__personnel" : "__materiel";
     try {
-      const rows = JSON.parse(formData[key] || "[]") as Array<{ name?: string; role?: string; qualification?: string; experience?: string }>;
+      const rows = JSON.parse(formData[key] || "[]") as Array<{ name?: string; role?: string; qualification?: string; experience?: string; identity?: string; address?: string; salary?: string }>;
+      // Une ligne de personnel (voir SubmissionDossierManager.tsx, le "+
+      // Ajouter un personnel" de ce dossier) ne demande JAMAIS "Diplôme /
+      // qualification" ni "Expérience" — ces deux champs n'existent que pour
+      // le matériel. Pour une personne, ce sont plutôt "N° CIN / identité",
+      // "Adresse" et "Rémunération / salaire" qui sont saisis. Ce tableau
+      // reprenait pourtant toujours les colonnes du MATÉRIEL même pour du
+      // personnel : les 2 colonnes affichées restaient vides (jamais
+      // demandées à l'utilisateur) alors que le CIN/l'adresse/la
+      // rémunération, eux, bien saisis, n'apparaissaient nulle part dans le
+      // document imprimé — Maxime perdait silencieusement ces 3
+      // informations. On reprend ici exactement les mêmes champs que le
+      // dossier collecte réellement pour chaque cas.
       return [{
         title,
-        columns: isPersonnelRoster ? ["Nom et prénoms", "Fonction", "Diplôme / qualification", "Expérience"] : ["Matériel / engin", "Fonction / usage", "État / capacité", "Quantité / disponibilité"],
-        rows: (rows.length ? rows : [{ name: "", role: "", qualification: "", experience: "" }]).map((row) => [row.name || "", row.role || "", row.qualification || "", row.experience || ""]),
+        columns: isPersonnelRoster
+          ? ["Nom et prénoms", "Poste sur chantier", "N° CIN / identité", "Adresse", "Rémunération / salaire"]
+          : ["Matériel / engin", "Fonction / usage", "État / capacité", "Quantité / disponibilité"],
+        rows: (rows.length ? rows : [{ name: "", role: "", qualification: "", experience: "", identity: "", address: "", salary: "" }]).map((row) => isPersonnelRoster
+          ? [row.name || "", row.role || "", row.identity || "", row.address || "", row.salary || ""]
+          : [row.name || "", row.role || "", row.qualification || "", row.experience || ""]),
       }];
     } catch { return []; }
   })();
