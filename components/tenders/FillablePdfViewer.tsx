@@ -233,6 +233,11 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
   const pagesRef = useRef<PageEntry[]>([]);
   const zoomRef = useRef(1);
   const observerRef = useRef<IntersectionObserver | null>(null);
+  // Dernière largeur de conteneur utilisée pour calculer autoFitScale (voir
+  // resizeObserverRef plus bas) — sert à ne recalculer/redessiner QUE quand
+  // cette largeur a vraiment changé, jamais à chaque minuscule variation.
+  const lastContainerWidthRef = useRef(0);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [zoomDisplay, setZoomDisplay] = useState(1);
@@ -722,6 +727,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       if (!pagesContainer || !scrollContainer) return;
       pagesContainer.innerHTML = "";
       const containerWidth = Math.max(280, pagesContainer.clientWidth || 680);
+      lastContainerWidthRef.current = containerWidth;
       const fieldObjectsPromise = pdfDocument.getFieldObjects();
       const hasJSActionsPromise = pdfDocument.hasJSActions();
 
@@ -864,6 +870,42 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       observerRef.current = observer;
       entries.forEach((entry) => observer.observe(entry.wrapper));
 
+      // BUG corrigé (généralisé à TOUT document, pas seulement "A5 -
+      // Litiges") : scrollbarGutter:"stable" (voir le style du conteneur
+      // plus bas) suffit sur les navigateurs qui le comprennent, mais ce
+      // réglage CSS n'est pas encore reconnu partout (Safari, en particulier,
+      // ne l'applique pas de façon fiable) — sur ces navigateurs, le même
+      // problème qu'avant revient : la largeur mesurée ICI (containerWidth,
+      // juste au-dessus) ne tient pas compte de l'ascenseur vertical qui
+      // n'apparaît qu'une fois toutes les pages ajoutées au DOM, et coupe
+      // alors le bord droit du tableau. Un ResizeObserver posé sur le
+      // conteneur des pages détecte ce rétrécissement APRÈS coup (quel que
+      // soit le navigateur, aucune dépendance à scrollbarGutter) et
+      // redessine chaque page déjà affichée à la bonne taille — filet de
+      // sécurité qui fonctionne même quand le CSS ci-dessus ne suffit pas.
+      function refit() {
+        const container = pagesContainerRef.current;
+        if (!container || cancelled) return;
+        const newWidth = Math.max(280, container.clientWidth || 680);
+        if (Math.abs(newWidth - lastContainerWidthRef.current) < 2) return;
+        lastContainerWidthRef.current = newWidth;
+        pagesRef.current.forEach((entry) => {
+          const unscaledViewport = entry.page.getViewport({ scale: 1 });
+          entry.autoFitScale = Math.min(2, Math.max(0.4, (newWidth - 4) / unscaledViewport.width));
+          const scale = entry.autoFitScale * zoomRef.current;
+          const viewport = entry.page.getViewport({ scale });
+          entry.wrapper.style.width = `${viewport.width}px`;
+          entry.wrapper.style.height = `${viewport.height}px`;
+          if (entry.pageView) {
+            entry.pageView.update({ scale });
+            entry.pageView.draw().then(() => afterDraw(entry)).catch(() => {});
+          }
+        });
+      }
+      const resizeObserver = new ResizeObserver(() => refit());
+      resizeObserverRef.current = resizeObserver;
+      resizeObserver.observe(pagesContainer);
+
       // La toute première page doit être visible tout de suite (avant même
       // que le navigateur ait eu le temps de déclencher l'observateur), pour
       // que l'ouverture du document ne montre jamais un cadre vide.
@@ -887,6 +929,8 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       cancelled = true;
       observerRef.current?.disconnect();
       observerRef.current = null;
+      resizeObserverRef.current?.disconnect();
+      resizeObserverRef.current = null;
       pagesRef.current = [];
       // loadingTask.destroy() (jamais pdfDocument.destroy(), qui n'existe pas
       // — voir le commentaire sur loadingTaskRef plus haut) libère aussi le
