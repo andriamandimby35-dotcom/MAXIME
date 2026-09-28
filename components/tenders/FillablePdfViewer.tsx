@@ -887,12 +887,14 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         // l'impression d'un texte coupé/manquant pile à cet endroit. On
         // agrandit l'espace entre chaque page et on renforce son ombre pour
         // que la limite entre deux pages soit toujours nette, quel que soit
-        // le document.
-        pageWrapper.style.margin = pageNumber === 1 ? "0 auto 28px auto" : "28px auto";
+        // le document. Écart encore augmenté (28px -> 48px, ombre plus
+        // marquée) suite au retour de Maxime : les pages restaient encore
+        // trop proches visuellement à 28px.
+        pageWrapper.style.margin = pageNumber === 1 ? "0 auto 48px auto" : "48px auto";
         pageWrapper.style.width = `${viewport.width}px`;
         pageWrapper.style.height = `${viewport.height}px`;
         pageWrapper.style.background = "#fff";
-        pageWrapper.style.boxShadow = "0 2px 10px rgba(0,0,0,.35)";
+        pageWrapper.style.boxShadow = "0 4px 16px rgba(0,0,0,.45)";
         pagesContainer.appendChild(pageWrapper);
 
         entries.push({ pageNumber, page, wrapper: pageWrapper, pageView: null, autoFitScale, savedFieldStyles });
