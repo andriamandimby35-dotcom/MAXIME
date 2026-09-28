@@ -731,7 +731,22 @@ async function extractAnnexeTableOfContents(doc: Awaited<ReturnType<typeof getDo
 // arrière vers une entrée déjà dépassée (donc, de fait, vers les doublons de
 // numéro des grandes parties déjà lues) : le numéro trouvé doit toujours
 // être strictement supérieur à celui de l'annexe en cours.
-function matchTocEntry(pageText: string, explicitNumber: number | null, toc: TocAnnexeEntry[], used: Set<number>, referenceNumber: number | null): TocAnnexeEntry | null {
+//
+// BUG corrigé (vérifié empiriquement sur un DAO réel : la pièce "B2 - Caution
+// personnelle et solidaire" — un cautionnement bancaire — s'est fait
+// renommer à tort en "Annexe 1 : Modèle de garantie bancaire de bonne
+// exécution", les deux textes partageant assez de vocabulaire commun
+// -garantie, bancaire, exécution- pour dépasser le seuil de correspondance
+// par TITRE SEUL, alors qu'aucun numéro d'annexe n'apparaît sur cette page).
+// Chercher par titre seul (sans aucun numéro trouvé sur la page) reste utile
+// pour ÉTENDRE une pièce déjà identifiée vers ses pages suivantes (voir
+// extendDaoItemPages plus bas, où un faux numéro trouvé ne fait au pire que
+// mal régler un repère interne, jamais un titre affiché à Maxime), mais est
+// TROP RISQUÉ pour RENOMMER une pièce déjà titrée par l'IA (voir la passe de
+// correction de titre dans split-merged-dao-items.ts, qui l'exclut donc
+// explicitement). allowTitleOnlyMatch (true par défaut, comme avant) laisse
+// chaque appelant choisir selon ce risque.
+function matchTocEntry(pageText: string, explicitNumber: number | null, toc: TocAnnexeEntry[], used: Set<number>, referenceNumber: number | null, allowTitleOnlyMatch = true): TocAnnexeEntry | null {
   if (explicitNumber !== null) {
     let bestIndex = -1;
     let bestScore = -1;
@@ -748,6 +763,7 @@ function matchTocEntry(pageText: string, explicitNumber: number | null, toc: Toc
     used.add(bestIndex);
     return toc[bestIndex];
   }
+  if (!allowTitleOnlyMatch) return null;
   const minNumber = referenceNumber ?? 0;
   for (let index = 0; index < toc.length; index += 1) {
     if (used.has(index) || toc[index].number <= minNumber) continue;
@@ -953,20 +969,102 @@ export type ResolvedAnnexeTitle = { number: number; title: string };
 // pièce par pièce lors du découpage. referenceNumber optionnel : permet
 // d'exclure les annexes déjà dépassées quand l'appelant les connaît (voir
 // son usage) ; laissé à null, seul le numéro/titre de CETTE page compte.
-export async function resolveAnnexeTitleForPage(pdfBytes: Uint8Array, pageNumber: number, referenceNumber: number | null = null): Promise<ResolvedAnnexeTitle | null> {
+// allowTitleOnlyMatch (true par défaut) : voir le commentaire dans
+// matchTocEntry plus haut — le passer à false pour un usage qui RENOMME une
+// pièce déjà titrée (jamais fiable sans numéro explicite trouvé sur la
+// page), true pour un usage interne (ex. amorcer extendDaoItemPages) où un
+// faux numéro ne fait au pire que mal régler un repère, jamais un titre
+// affiché à Maxime.
+export async function resolveAnnexeTitleForPage(pdfBytes: Uint8Array, pageNumber: number, referenceNumber: number | null = null, allowTitleOnlyMatch = true): Promise<ResolvedAnnexeTitle | null> {
   try {
     const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
     if (pageNumber < 1 || pageNumber > doc.numPages) return null;
     const pageText = await normalizedPageText(doc, pageNumber);
     const explicitNumber = annexeNumberAtPageStart(pageText);
     const toc = await extractAnnexeTableOfContents(doc);
-    const entry = matchTocEntry(pageText, explicitNumber, toc, new Set(), referenceNumber);
+    const entry = matchTocEntry(pageText, explicitNumber, toc, new Set(), referenceNumber, allowTitleOnlyMatch);
     if (entry) return { number: entry.number, title: entry.title };
     if (explicitNumber !== null) return { number: explicitNumber, title: "" };
     return null;
   } catch {
     return null;
   }
+}
+
+// BUG corrigé (Maxime, Annexe 6 tronquée à tort à la page 245 : sondage réel
+// de la base de données montrant "Pages 240-245" alors que la vraie Annexe 6
+// va jusqu'à la page 261) : l'IA a parfois retenu MOINS de pages qu'il n'en
+// faut vraiment pour une pièce DAO — ici, ses propres sous-annexes rédigées
+// en malgache (Tovana I, II, III) continuant jusqu'à la page 261, juste
+// avant le début réel de l'Annexe 7 — ces pages ne sont alors rattachées à
+// AUCUNE pièce et disparaissent purement et simplement, sans qu'aucune des
+// corrections ci-dessus (qui ne travaillent QUE sur les pages déjà connues
+// d'une pièce) ne puisse jamais les retrouver. On étend donc la plage
+// connue d'une pièce DAO vers les pages suivantes tant qu'elles ne sont
+// revendiquées par AUCUNE AUTRE pièce déjà identifiée (claimedPages) et
+// qu'aucune NOUVELLE annexe n'y commence (numéro explicite ou titre du
+// sommaire) — jamais au-delà. Générique par construction (aucune page ni
+// aucun titre codé en dur) : s'applique à n'importe quelle pièce DAO
+// tronquée par l'IA, pas seulement celle qui a révélé ce problème. Exporté
+// pour split-merged-dao-items.ts, qui l'appelle pour CHAQUE pièce DAO, mais
+// seulement APRÈS avoir décidé si un découpage (splitPagesByOwnTitle) est
+// nécessaire — et uniquement sur la toute DERNIÈRE pièce ainsi obtenue (voir
+// le commentaire dans split-merged-dao-items.ts : réutiliser ces pages
+// étendues, non vérifiées par l'IA, comme entrée de splitPagesByOwnTitle a
+// déjà provoqué une fragmentation en cascade sur un vrai DAO).
+//
+// BUG corrigé (vérifié empiriquement sur un DAO réel) : une première version
+// s'arrêtait AUSSI dès qu'un titre stylé (gras+majuscules) différent
+// apparaissait, comme le fait déjà splitPagesByOwnTitle — mais un simple
+// EN-TÊTE DE COLONNES DE TABLEAU ("MATERIAUX QUANTITE UNITE", plusieurs mots
+// donc jamais filtré par le garde-fou "un seul mot n'est pas un titre" de
+// pageHeadingLine) partage exactement cette même mise en forme sans être un
+// vrai changement de pièce, ce qui arrêtait l'extension dès la toute
+// première page suivante à chaque fois qu'un tableau s'y trouvait — modifier
+// pageHeadingLine lui-même casserait splitPagesByOwnTitle, qui a besoin de
+// ce signal pour DÉCOUPER une pièce déjà validée par l'IA. Ici, en revanche,
+// on avance en territoire que l'IA n'avait PAS validé du tout : seuls des
+// signaux fiables (numéro d'annexe explicite, titre du sommaire, ou une page
+// déjà revendiquée par une autre pièce) doivent arrêter l'extension — jamais
+// un simple style de texte, trop souvent partagé par un en-tête de tableau.
+//
+// BUG corrigé (vérifié empiriquement : une pièce "Liste des plans" notée par
+// l'IA "Page 119 et bloc plans 120-230" — une formulation que l'analyse de
+// texte ne reconnaît que comme la page 119 seule — s'arrêtait à tort à la
+// page 159, alors que la vraie limite (la page 231, déjà revendiquée par
+// l'annexe suivante) se trouve bien plus loin) : maxExtra=40 avait été choisi
+// en pensant au cas de l'Annexe 6 (21 pages de plus suffisaient), mais une
+// annexe de plans architecturaux peut légitimement s'étaler sur une centaine
+// de pages de plus. Ce plafond reste nécessaire (filet de sécurité si un DAO
+// est illisible de bout en bout, ou si aucune pièce suivante ne revendique
+// jamais la bonne page d'arrêt), mais 40 était trop bas pour ce cas réel —
+// 200 couvre largement ce genre d'annexe sans jamais empêcher claimedPages
+// ou un nouveau numéro d'annexe de s'arrêter bien avant si la vraie limite
+// est plus proche (cas normal, largement majoritaire).
+export async function extendDaoItemPages(pdfBytes: Uint8Array, lastKnownPage: number, claimedPages: Set<number>, referenceAnnexeNumber: number | null, maxExtra = 200): Promise<number[]> {
+  const extra: number[] = [];
+  try {
+    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const toc = await extractAnnexeTableOfContents(doc);
+    const used = new Set<number>();
+    const reference = referenceAnnexeNumber;
+    let pageNumber = lastKnownPage + 1;
+    let checked = 0;
+    while (pageNumber <= doc.numPages && checked < maxExtra) {
+      if (claimedPages.has(pageNumber)) break; // Déjà à une AUTRE pièce déjà connue : on s'arrête net.
+      const pageText = await normalizedPageText(doc, pageNumber);
+      const explicitNumber = annexeNumberAtPageStart(pageText);
+      const tocEntry = matchTocEntry(pageText, explicitNumber, toc, used, reference);
+      const resolvedNumber = tocEntry?.number ?? explicitNumber;
+      if (resolvedNumber !== null && resolvedNumber !== reference) break; // Nouvelle annexe : elle sera (ou est déjà) sa propre pièce.
+      extra.push(pageNumber);
+      pageNumber += 1;
+      checked += 1;
+    }
+  } catch {
+    // Erreur de lecture : on ne perd rien, la pièce garde simplement sa plage d'origine.
+  }
+  return extra;
 }
 
 // Cette page a-t-elle un vrai titre à elle (mise en forme distincte ET
