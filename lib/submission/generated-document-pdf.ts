@@ -248,41 +248,25 @@ function drawTable(doc: PDFDocument, cursor: Cursor, block: TableBlock, font: PD
           textColor: rgb(0, 0, 0),
           font: cellFont,
         });
-        // BUG corrigé (Maxime, sur "A5 - Litiges" mais généralisé à TOUT
-        // tableau généré par l'appli) : le texte tapé dans une case apparaît
-        // coupé par le HAUT, alors que la case elle-même a bien la bonne
-        // hauteur pour une ligne (rowHeight tient déjà compte de
-        // rowLineCount). Cause : le mode "multi-lignes" de pdf.js affiche son
-        // texte depuis le haut de la case avec son propre interligne interne
-        // (pensé pour un paragraphe qui peut déborder), un peu plus grand que
-        // ce que rowHeight prévoit pour UNE seule ligne — le haut des lettres
-        // se retrouve alors rogné par le bord de la case. Le mode
-        // "une seule ligne" de pdf.js, lui, centre verticalement son texte
-        // dans la case (pas de risque de rognage par le haut), mais ne permet
-        // pas au texte de continuer sur une deuxième ligne si Maxime tape
-        // ensuite quelque chose de plus long. On choisit donc le mode selon
-        // le nombre de lignes déjà prévu pour CETTE rangée précise
-        // (rowLineCount, calculé plus haut à partir du contenu réel du
-        // tableau) : une rangée qui ne prend qu'UNE ligne (le cas le plus
-        // courant, largement majoritaire) reste en mode "une seule ligne"
-        // (jamais rognée) ; une rangée qui a VRAIMENT besoin de plusieurs
-        // lignes garde le mode multi-lignes (et donc le même compromis déjà
-        // accepté ailleurs : un texte retapé encore plus long est simplement
-        // coupé s'il déborde, jamais une case agrandie pour le loger).
-        if (rowLineCount > 1) {
-          field.enableMultiline();
-          // disableScrolling() : ici la case est bien réglée à la hauteur du
-          // texte d'origine (rowHeight tient compte de rowLineCount plus
-          // haut), mais si Maxime tape ensuite un texte plus long dans le
-          // lecteur PDF, une case "multi-lignes" qui déborde de sa hauteur se
-          // rend chez pdf.js comme un <textarea> DÉFILANT, avec un ascenseur
-          // et ses petites flèches haut/bas par-dessus le texte (voir le même
-          // souci, corrigé autrement, dans printable-pdf.ts/drawRow).
-          // disableScrolling masque cet ascenseur (texte simplement coupé
-          // s'il déborde) plutôt que de laisser ces flèches apparaître
-          // par-dessus.
-          field.disableScrolling();
-        }
+        // RÈGLE GÉNÉRALE demandée par Maxime (après le bug déjà corrigé une
+        // fois ici avec un simple "if (rowLineCount > 1)", jugé encore trop
+        // lié à la longueur du texte d'origine) : AUCUNE case cliquable de
+        // toute l'application ne doit choisir son mode (une ligne / plusieurs
+        // lignes) en fonction du texte — ni le texte généré par l'IA au
+        // départ, ni celui retapé ensuite par Maxime. On ne calcule donc plus
+        // jamais rowLineCount pour décider d'un enableMultiline() : cette
+        // case, comme absolument toutes les autres cases générées par
+        // l'appli (voir printable-pdf.ts/drawRow, qui suit déjà cette règle),
+        // reste TOUJOURS en mode "une seule ligne" chez pdf.js — jamais de
+        // relation case/texte, jamais de <textarea> défilant avec son
+        // ascenseur par-dessus le texte. rowLineCount continue seulement à
+        // servir plus haut pour la HAUTEUR VISUELLE de la rangée (afficher
+        // proprement le texte d'origine sur plusieurs lignes dessinées en dur
+        // quand il y en a besoin) : ça ne concerne que le dessin, jamais la
+        // case remplissable elle-même. Si une case est trop petite pour ce
+        // que Maxime veut y taper, c'est à lui de l'agrandir manuellement
+        // (dans l'éditeur de mise en page) — l'appli ne doit plus jamais
+        // essayer de deviner à sa place.
         field.setFontSize(TABLE_FONT_SIZE);
         field.setText(rawValue);
       } else {
