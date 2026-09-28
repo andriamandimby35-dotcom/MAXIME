@@ -108,9 +108,22 @@ type FieldCounter = { current: number };
 // (rare en pratique — une valeur assez courte pour tenir sur une ligne reste
 // une seule case), acceptée pour ne pas complexifier tout le découpage de
 // lignes existant.
-function addInlineValueField(form: PDFForm, page: PDFPage, font: PDFFont, counter: FieldCounter, text: string, x: number, y: number, fontSize: number) {
+function addInlineValueField(form: PDFForm, page: PDFPage, font: PDFFont, counter: FieldCounter, text: string, x: number, y: number, fontSize: number, maxWidth: number) {
   counter.current += 1;
-  const width = Math.max(8, font.widthOfTextAtSize(text, fontSize) + 3);
+  // BUG corrigé (signalé par Maxime : une valeur retapée dans notre lecteur
+  // PDF intégré, plus longue que celle écrite ici par l'IA au départ,
+  // restait "à moitié cachée" — seul le DÉBUT du texte visible, le reste
+  // défilé hors du cadre). Cause : la largeur de cette case suivait
+  // EXACTEMENT la largeur du texte d'origine, sans aucune marge pour un
+  // texte différent (souvent plus long) tapé ensuite par la personne — un
+  // cadre remplissable doit toujours pouvoir accueillir autre chose que ce
+  // qui l'a rempli la première fois. On réserve donc une largeur
+  // confortable (le texte d'origine + de la place en plus), sans jamais
+  // dépasser maxWidth (calculé par drawWrappedLine : l'espace réellement
+  // libre avant la marge de page ou le morceau de texte suivant sur la même
+  // ligne, pour ne jamais chevaucher quoi que ce soit).
+  const comfortableWidth = font.widthOfTextAtSize(text, fontSize) + Math.max(40, fontSize * 6);
+  const width = Math.max(8, Math.min(comfortableWidth, Math.max(8, maxWidth)));
   const height = fontSize * 1.35;
   const field = form.createTextField(`valeur_generee_${counter.current}`);
   // ORDRE IMPORTANT (vérifié en testant les deux ordres, voir
@@ -130,14 +143,28 @@ function addInlineValueField(form: PDFForm, page: PDFPage, font: PDFFont, counte
 
 function drawWrappedLine(page: PDFPage, line: TextRun[], x: number, y: number, font: PDFFont, boldFont: PDFFont, fontSize: number, form: PDFForm, counter: FieldCounter) {
   let cursorX = x;
-  for (const run of line) {
+  const rightMargin = PAGE_WIDTH - MARGIN;
+  for (let index = 0; index < line.length; index += 1) {
+    const run = line[index];
     const activeFont = run.bold ? boldFont : font;
+    const textWidth = activeFont.widthOfTextAtSize(run.text, fontSize);
     if (run.field && run.text.trim()) {
-      addInlineValueField(form, page, activeFont, counter, run.text, cursorX, y, fontSize);
+      // Espace réellement libre après cette case, avant que le morceau de
+      // texte SUIVANT sur la même ligne (s'il y en a un) ne commence — ou
+      // jusqu'à la marge droite de la page si cette case termine la ligne.
+      // Sans ça, élargir la case (voir addInlineValueField) risquerait de la
+      // faire chevaucher le texte qui suit.
+      let widthAfter = 0;
+      for (let next = index + 1; next < line.length; next += 1) {
+        const laterFont = line[next].bold ? boldFont : font;
+        widthAfter += laterFont.widthOfTextAtSize(line[next].text, fontSize);
+      }
+      const maxWidth = rightMargin - cursorX - widthAfter;
+      addInlineValueField(form, page, activeFont, counter, run.text, cursorX, y, fontSize, maxWidth);
     } else {
       page.drawText(run.text, { x: cursorX, y, size: fontSize, font: activeFont, color: rgb(0, 0, 0) });
     }
-    cursorX += activeFont.widthOfTextAtSize(run.text, fontSize);
+    cursorX += textWidth;
   }
 }
 
@@ -221,17 +248,41 @@ function drawTable(doc: PDFDocument, cursor: Cursor, block: TableBlock, font: PD
           textColor: rgb(0, 0, 0),
           font: cellFont,
         });
-        field.enableMultiline();
-        // disableScrolling() : ici la case est bien réglée à la hauteur du
-        // texte d'origine (rowHeight tient compte de rowLineCount plus haut),
-        // mais si Maxime tape ensuite un texte plus long dans le lecteur PDF,
-        // une case "multi-lignes" qui déborde de sa hauteur se rend chez
-        // pdf.js comme un <textarea> DÉFILANT, avec un ascenseur et ses
-        // petites flèches haut/bas par-dessus le texte (voir le même souci,
-        // corrigé autrement, dans printable-pdf.ts/drawRow). disableScrolling
-        // masque cet ascenseur (texte simplement coupé s'il déborde) plutôt
-        // que de laisser ces flèches apparaître par-dessus.
-        field.disableScrolling();
+        // BUG corrigé (Maxime, sur "A5 - Litiges" mais généralisé à TOUT
+        // tableau généré par l'appli) : le texte tapé dans une case apparaît
+        // coupé par le HAUT, alors que la case elle-même a bien la bonne
+        // hauteur pour une ligne (rowHeight tient déjà compte de
+        // rowLineCount). Cause : le mode "multi-lignes" de pdf.js affiche son
+        // texte depuis le haut de la case avec son propre interligne interne
+        // (pensé pour un paragraphe qui peut déborder), un peu plus grand que
+        // ce que rowHeight prévoit pour UNE seule ligne — le haut des lettres
+        // se retrouve alors rogné par le bord de la case. Le mode
+        // "une seule ligne" de pdf.js, lui, centre verticalement son texte
+        // dans la case (pas de risque de rognage par le haut), mais ne permet
+        // pas au texte de continuer sur une deuxième ligne si Maxime tape
+        // ensuite quelque chose de plus long. On choisit donc le mode selon
+        // le nombre de lignes déjà prévu pour CETTE rangée précise
+        // (rowLineCount, calculé plus haut à partir du contenu réel du
+        // tableau) : une rangée qui ne prend qu'UNE ligne (le cas le plus
+        // courant, largement majoritaire) reste en mode "une seule ligne"
+        // (jamais rognée) ; une rangée qui a VRAIMENT besoin de plusieurs
+        // lignes garde le mode multi-lignes (et donc le même compromis déjà
+        // accepté ailleurs : un texte retapé encore plus long est simplement
+        // coupé s'il déborde, jamais une case agrandie pour le loger).
+        if (rowLineCount > 1) {
+          field.enableMultiline();
+          // disableScrolling() : ici la case est bien réglée à la hauteur du
+          // texte d'origine (rowHeight tient compte de rowLineCount plus
+          // haut), mais si Maxime tape ensuite un texte plus long dans le
+          // lecteur PDF, une case "multi-lignes" qui déborde de sa hauteur se
+          // rend chez pdf.js comme un <textarea> DÉFILANT, avec un ascenseur
+          // et ses petites flèches haut/bas par-dessus le texte (voir le même
+          // souci, corrigé autrement, dans printable-pdf.ts/drawRow).
+          // disableScrolling masque cet ascenseur (texte simplement coupé
+          // s'il déborde) plutôt que de laisser ces flèches apparaître
+          // par-dessus.
+          field.disableScrolling();
+        }
         field.setFontSize(TABLE_FONT_SIZE);
         field.setText(rawValue);
       } else {
