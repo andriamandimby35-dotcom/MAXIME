@@ -20,8 +20,9 @@
 // code Node dans le paquet envoyé au navigateur (ce que Vercel refuse de
 // construire). N'importer ce fichier QUE depuis du code serveur (pages,
 // routes API) — jamais depuis un composant "use client".
-import { splitPagesByOwnTitle, pagesContainingText } from "@/lib/submission/trim-to-relevant-pages";
+import { splitPagesByOwnTitle, pagesContainingText, firstPageAnnexeNumber, pageHasReliableOwnTitle } from "@/lib/submission/trim-to-relevant-pages";
 import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
+import { titleSimilarity } from "@/lib/submission/title-match";
 import type { Field, TemplateDetectedItem, TemplateTable } from "@/lib/submission/build-dossier-items";
 
 export async function splitMergedDaoItems<T extends TemplateDetectedItem>(items: T[], pdfBytes: Uint8Array | null): Promise<T[]> {
@@ -140,6 +141,74 @@ export async function splitMergedDaoItems<T extends TemplateDetectedItem>(items:
         template_text: textBySegment[index],
       });
     });
+  }
+
+  // PASSE FINALE (généralisée, pour n'importe quel DAO) : deux corrections
+  // après-coup supplémentaires sur la liste COMPLÈTE des pièces, une fois
+  // chaque pièce déjà fusionnée séparée ci-dessus — s'appliquent aussi à une
+  // pièce que l'IA avait DÉJÀ détectée comme une pièce à part entière (une
+  // seule page connue), jamais seulement aux pièces qui viennent d'être
+  // séparées plus haut.
+  //
+  // 1) Numéro d'annexe explicite mal repris comme titre (signalé par Maxime :
+  // une pièce "ANNEXE 7" affichée sous le titre du ministère qui apparaît
+  // juste en dessous sur la même page) : on corrige le titre affiché dès
+  // qu'un numéro d'annexe est détecté en tout début de la PROPRE première
+  // page connue de la pièce, quel que soit le titre que l'IA lui avait donné.
+  //
+  // 2) Fragment isolé sans titre propre fiable (signalé par Maxime : "COULEUR"
+  // affiché comme une pièce à part entière, avec EXACTEMENT les mêmes
+  // instructions que la pièce juste avant elle) : une pièce DAO d'une seule
+  // page qui suit IMMÉDIATEMENT la dernière page d'une AUTRE pièce déjà
+  // détectée, sans numéro d'annexe ni titre stylé fiable sur sa propre page
+  // (voir pageHasReliableOwnTitle, qui applique déjà le filtre "un mot seul
+  // n'est pas un titre" — voir pageHeadingLine), et dont les instructions
+  // sont identiques à celles de la pièce précédente, est en réalité un
+  // simple fragment de cette pièce précédente (une étiquette de champ, la
+  // fin d'un tableau...) — on la fusionne dans la pièce précédente plutôt que
+  // de l'afficher comme une pièce séparée.
+  if (pdfBytes) {
+    for (let index = 0; index < result.length; index += 1) {
+      const item = result[index];
+      if (item.template_origin !== "dao") continue;
+      const ownPages = knownPagesForItem(item);
+      if (!ownPages.length) continue;
+      try {
+        const annexeNumber = await firstPageAnnexeNumber(pdfBytes, ownPages[0]);
+        if (annexeNumber !== null) {
+          const canonicalTitle = `Annexe ${annexeNumber}`;
+          if (titleSimilarity(item.title, canonicalTitle) < 0.6) result[index] = { ...item, title: canonicalTitle };
+        }
+      } catch {
+        // Page illisible pour cette vérification : titre laissé tel quel.
+      }
+    }
+    for (let index = result.length - 1; index > 0; index -= 1) {
+      const current = result[index];
+      const previous = result[index - 1];
+      if (current.template_origin !== "dao" || previous.template_origin !== "dao") continue;
+      const currentPages = knownPagesForItem(current);
+      const previousPages = knownPagesForItem(previous);
+      if (currentPages.length !== 1 || !previousPages.length) continue;
+      if (currentPages[0] !== previousPages[previousPages.length - 1] + 1) continue;
+      if (current.instructions.trim() !== previous.instructions.trim()) continue;
+      try {
+        const hasOwnAnnexe = (await firstPageAnnexeNumber(pdfBytes, currentPages[0])) !== null;
+        const hasOwnTitle = await pageHasReliableOwnTitle(pdfBytes, currentPages[0]);
+        if (hasOwnAnnexe || hasOwnTitle) continue;
+      } catch {
+        continue; // Page illisible pour cette vérification : jamais fusionnée par prudence.
+      }
+      const mergedPages = [...previousPages, ...currentPages];
+      result[index - 1] = {
+        ...previous,
+        template_page_numbers: mergedPages,
+        source_reference: `Pages ${mergedPages.join(", ")}`,
+        fields: [...previous.fields, ...current.fields],
+        template_tables: [...(previous.template_tables ?? []), ...(current.template_tables ?? [])],
+      };
+      result.splice(index, 1);
+    }
   }
   return result;
 }

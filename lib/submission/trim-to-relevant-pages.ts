@@ -303,6 +303,11 @@ async function pageHeadingLine(doc: Awaited<ReturnType<typeof getDocument>["prom
     }
   }
   if (startIndex === -1) return { titleLine: null, heading: "" };
+  // Niveau de confiance le plus élevé (majuscules + gras + nettement plus
+  // grand que le corps) : gardé pour le garde-fou juste plus bas — un vrai
+  // titre court existe (rare, mais possible), et ce niveau, déjà confirmé par
+  // la TAILLE en plus du style, reste fiable même sur un seul mot.
+  const highConfidenceTier = enlargedBoldStartIndex !== -1;
   const runs = [zone[startIndex]];
   // Un titre de pièce colorée s'étale souvent sur deux paragraphes séparés
   // ("Annexe 1" puis "Modèle de garantie bancaire de soumission" juste en
@@ -315,6 +320,21 @@ async function pageHeadingLine(doc: Awaited<ReturnType<typeof getDocument>["prom
     runs.push(zone[index]);
   }
   const titleLine = runs.map((item) => (item.str ?? "").trim()).join(" ");
+  // BUG corrigé (Maxime, sur "COULEUR" pris à tort pour le titre d'une pièce
+  // à part entière, alors que c'est juste l'étiquette d'un champ à
+  // l'intérieur du modèle de panneau de chantier) : un vrai titre de pièce
+  // DAO fait TOUJOURS plusieurs mots ("ANNEXE 7 : Modèle de PANNEAU DE
+  // CHANTIER", "A2 : CAPACITES TECHNIQUES"...), jamais un seul mot isolé —
+  // un simple en-tête de colonne de tableau ou une étiquette de champ
+  // ("COULEUR", "DESIGNATION", "MONTANT"...) partage exactement la même mise
+  // en forme (gras + majuscules) sans jamais être un vrai titre de document.
+  // On applique ce garde-fou seulement aux niveaux de détection les MOINS
+  // fiables (jamais le niveau 1, déjà confirmé par la taille en plus du
+  // style, qui reste fiable même sur un titre court) pour ne pas perdre un
+  // DAO qui aurait vraiment un titre court et fiable.
+  if (!highConfidenceTier && titleLine && significantWords(titleLine).size < 2) {
+    return { titleLine: null, heading: "" };
+  }
   return { titleLine, heading: normalizeText(titleLine) };
 }
 
@@ -769,6 +789,42 @@ export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: nu
     return segments;
   } catch {
     return [];
+  }
+}
+
+// Numéro d'annexe explicite (voir annexeNumberAtPageStart plus haut) sur LA
+// PROPRE première page connue d'une pièce — exporté séparément de
+// splitPagesByOwnTitle (qui ne s'applique qu'aux pièces déjà fusionnées sur
+// PLUSIEURS pages) : sert aussi à corriger le TITRE affiché d'une pièce déjà
+// détectée par l'IA comme une pièce à PART ENTIÈRE (une seule page connue),
+// quand l'IA a retenu un autre texte de la page (souvent un en-tête, une
+// mention en passant) au lieu du vrai "ANNEXE N" qui l'introduit — voir
+// split-merged-dao-items.ts, passe finale de correction de titre.
+export async function firstPageAnnexeNumber(pdfBytes: Uint8Array, pageNumber: number): Promise<number | null> {
+  try {
+    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    if (pageNumber < 1 || pageNumber > doc.numPages) return null;
+    return annexeNumberAtPageStart(await normalizedPageText(doc, pageNumber));
+  } catch {
+    return null;
+  }
+}
+
+// Cette page a-t-elle un vrai titre à elle (mise en forme distincte ET
+// plusieurs mots, voir le garde-fou dans pageHeadingLine) ? Exporté pour
+// split-merged-dao-items.ts : sert à décider si une pièce DAO d'une seule
+// page, immédiatement collée à la dernière page d'une autre pièce déjà
+// détectée, est une VRAIE pièce à part (elle a son propre titre) ou juste un
+// fragment (étiquette de champ, fin de tableau...) à fusionner avec la
+// pièce précédente — voir la passe finale de fusion dans ce même fichier.
+export async function pageHasReliableOwnTitle(pdfBytes: Uint8Array, pageNumber: number): Promise<boolean> {
+  try {
+    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    if (pageNumber < 1 || pageNumber > doc.numPages) return false;
+    const { titleLine } = await pageHeadingLine(doc, pageNumber);
+    return Boolean(titleLine);
+  } catch {
+    return false;
   }
 }
 
