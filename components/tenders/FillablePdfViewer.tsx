@@ -1129,9 +1129,29 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       .fillable-pdf-viewer .annotationLayer {
         --annotation-unfocused-field-background: none !important;
         --annotation-unfocused-field-filter: none !important;
+        --input-hover-border-color: transparent !important;
       }
       .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea) {
         background-color: #fff !important;
+      }
+      /* BUG corrigé (généralisé à TOUTE case de TOUT document ouvert dans ce
+         lecteur — signalé sur un tableau de "A2 - Planning d'exécution des
+         travaux" mais pas spécifique à cette pièce ni aux tableaux) : "carré
+         noir" qui apparaît devant une case dès que la souris passe dessus
+         (ou au survol tactile), absent du DAO d'origine. Ce n'est pas notre
+         CSS ni un défaut de génération du PDF : c'est pdf.js qui dessine par
+         défaut un contour noir de 2px sur TOUTE case (texte, case à cocher,
+         liste déroulante) au survol, via --input-hover-border-color: black
+         (voir pdf_viewer.css), pour montrer que la case est cliquable dans
+         son propre lecteur complet avec barre d'outils. Chez nous, les cases
+         sont déjà visibles par leur fond blanc (juste au-dessus) : ce
+         contour ajoute juste un carré parasite. On neutralise uniquement ce
+         survol (jamais le contour au clic/focus ci-dessous, qui reste utile
+         pour voir quelle case on est en train de remplir). */
+      .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea):hover,
+      .fillable-pdf-viewer .choiceWidgetAnnotation select:hover,
+      .fillable-pdf-viewer .buttonWidgetAnnotation:is(.checkBox, .radioButton) input:hover {
+        border-color: transparent !important;
       }
       /* Le "blob" bleu/mauve arrondi qui apparaissait au toucher sur iPhone
          (visible sur la capture d'écran envoyée) n'est ni la teinte pdf.js
