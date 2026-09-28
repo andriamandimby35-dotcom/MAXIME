@@ -846,11 +846,24 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         const pageWrapper = document.createElement("div");
         pageWrapper.dataset.pageNumber = String(pageNumber);
         pageWrapper.style.position = "relative";
-        pageWrapper.style.margin = pageNumber === 1 ? "0 auto 12px auto" : "12px auto";
+        // BUG corrigé (généralisé à TOUT document de plus d'une page ouvert
+        // dans ce lecteur, signalé sur "Annexe 6" mais pas spécifique à cette
+        // pièce) : "coupure bizarre" du texte à la fin de chaque page. Le
+        // contenu du PDF généré est pourtant complet et dans le bon ordre
+        // (vérifié directement page par page) — le vrai problème est que la
+        // fin d'une page et le début de la suivante étaient trop rapprochées
+        // (à peine 12px, presque collées visuellement), sans réelle séparation
+        // visible entre les deux : le blanc naturel de fin de page 1 se
+        // confondait avec le blanc naturel de début de page 2, donnant
+        // l'impression d'un texte coupé/manquant pile à cet endroit. On
+        // agrandit l'espace entre chaque page et on renforce son ombre pour
+        // que la limite entre deux pages soit toujours nette, quel que soit
+        // le document.
+        pageWrapper.style.margin = pageNumber === 1 ? "0 auto 28px auto" : "28px auto";
         pageWrapper.style.width = `${viewport.width}px`;
         pageWrapper.style.height = `${viewport.height}px`;
         pageWrapper.style.background = "#fff";
-        pageWrapper.style.boxShadow = "0 1px 4px rgba(0,0,0,.25)";
+        pageWrapper.style.boxShadow = "0 2px 10px rgba(0,0,0,.35)";
         pagesContainer.appendChild(pageWrapper);
 
         entries.push({ pageNumber, page, wrapper: pageWrapper, pageView: null, autoFitScale, savedFieldStyles });
