@@ -289,6 +289,30 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
   const customFieldNamesRef = useRef<Set<string>>(new Set());
   const customFieldValuesRef = useRef<Map<string, string>>(new Map());
   const customFieldCounterRef = useRef(0);
+  // BUG corrigé (signalé par Maxime : une case tout juste ajoutée "bute"
+  // contre une case déjà présente plus bas et ne peut pas être déplacée
+  // au-delà — comme si cette case déjà là faisait office de mur) : ce n'est
+  // pas un vrai blocage de déplacement (le code de glisser-déposer plus bas
+  // ne limite le mouvement qu'aux bords de la PAGE, jamais par rapport aux
+  // autres cases), mais un problème d'EMPILEMENT visuel — une case native du
+  // PDF garde un z-index "auto" et une case ajoutée gardait toujours le même
+  // z-index fixe (2), donc dès qu'une case en croisait une autre déjà
+  // présente au même niveau d'empilement, l'ordre d'affichage final pouvait
+  // la laisser cachée derrière : invisible et donc impossible à re-sélectionner
+  // ou à continuer de déplacer une fois passée "derrière", ce qui donnait
+  // l'impression d'un mur infranchissable. Solution générale (s'applique à
+  // TOUTE case, native ou ajoutée, sur N'IMPORTE QUEL PDF de l'application,
+  // pas seulement celle qui a révélé le problème) : la case que l'utilisateur
+  // est en train de toucher (déplacer, redimensionner, ou tout juste créer)
+  // reçoit systématiquement le z-index le plus élevé du moment, via ce
+  // compteur commun toujours croissant — elle passe donc TOUJOURS au premier
+  // plan dès qu'on la manipule et ne peut plus jamais se retrouver bloquée
+  // visuellement derrière une autre case.
+  const topFieldZIndexRef = useRef(100);
+  function bringFieldToFront(section: HTMLElement) {
+    topFieldZIndexRef.current += 1;
+    section.style.zIndex = String(topFieldZIndexRef.current);
+  }
 
   // --- Applique/retient la position, taille et police d'une case --------
 
@@ -447,6 +471,11 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       if (!editModeRef.current) return;
       e.preventDefault();
       e.stopPropagation();
+      // Passe cette case au premier plan DÈS qu'on commence à la toucher —
+      // voir le commentaire sur topFieldZIndexRef plus haut : sans ça, une
+      // case pouvait rester cachée derrière une autre dès qu'on la déplaçait
+      // à son niveau.
+      bringFieldToFront(section);
       const wrapperRect = entry.wrapper.getBoundingClientRect();
       const sectionRect = section.getBoundingClientRect();
       dragState = {
@@ -549,7 +578,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     section.style.top = `${topPercent}%`;
     section.style.width = `${widthPercent}%`;
     section.style.height = `${heightPercent}%`;
-    section.style.zIndex = "2";
+    bringFieldToFront(section);
 
     const input = document.createElement("input");
     input.type = "text";
