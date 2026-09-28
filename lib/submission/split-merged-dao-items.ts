@@ -20,7 +20,7 @@
 // code Node dans le paquet envoyé au navigateur (ce que Vercel refuse de
 // construire). N'importer ce fichier QUE depuis du code serveur (pages,
 // routes API) — jamais depuis un composant "use client".
-import { splitPagesByOwnTitle, pagesContainingText, firstPageAnnexeNumber, pageHasReliableOwnTitle } from "@/lib/submission/trim-to-relevant-pages";
+import { splitPagesByOwnTitle, pagesContainingText, firstPageAnnexeNumber, pageHasReliableOwnTitle, resolveAnnexeTitleForPage } from "@/lib/submission/trim-to-relevant-pages";
 import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
 import { titleSimilarity } from "@/lib/submission/title-match";
 import type { Field, TemplateDetectedItem, TemplateTable } from "@/lib/submission/build-dossier-items";
@@ -150,11 +150,15 @@ export async function splitMergedDaoItems<T extends TemplateDetectedItem>(items:
   // seule page connue), jamais seulement aux pièces qui viennent d'être
   // séparées plus haut.
   //
-  // 1) Numéro d'annexe explicite mal repris comme titre (signalé par Maxime :
-  // une pièce "ANNEXE 7" affichée sous le titre du ministère qui apparaît
-  // juste en dessous sur la même page) : on corrige le titre affiché dès
-  // qu'un numéro d'annexe est détecté en tout début de la PROPRE première
-  // page connue de la pièce, quel que soit le titre que l'IA lui avait donné.
+  // 1) Numéro d'annexe explicite (ou titre retrouvé via le sommaire du DAO,
+  // voir resolveAnnexeTitleForPage) mal repris comme titre — deux cas déjà
+  // observés par Maxime : une pièce "ANNEXE 7" affichée sous le titre du
+  // ministère qui apparaît juste en dessous sur la même page ; et une pièce
+  // "Annexe 6" absente de la liste car sa propre page de début (la
+  // convention elle-même) ne contient NULLE PART le mot "annexe", seul le
+  // sommaire du DAO le sait. On corrige le titre affiché dès que l'un ou
+  // l'autre est trouvé sur la PROPRE première page connue de la pièce, quel
+  // que soit le titre que l'IA lui avait donné.
   //
   // 2) Fragment isolé sans titre propre fiable (signalé par Maxime : "COULEUR"
   // affiché comme une pièce à part entière, avec EXACTEMENT les mêmes
@@ -174,9 +178,9 @@ export async function splitMergedDaoItems<T extends TemplateDetectedItem>(items:
       const ownPages = knownPagesForItem(item);
       if (!ownPages.length) continue;
       try {
-        const annexeNumber = await firstPageAnnexeNumber(pdfBytes, ownPages[0]);
-        if (annexeNumber !== null) {
-          const canonicalTitle = `Annexe ${annexeNumber}`;
+        const resolved = await resolveAnnexeTitleForPage(pdfBytes, ownPages[0]);
+        if (resolved) {
+          const canonicalTitle = resolved.title ? `Annexe ${resolved.number} : ${resolved.title}` : `Annexe ${resolved.number}`;
           if (titleSimilarity(item.title, canonicalTitle) < 0.6) result[index] = { ...item, title: canonicalTitle };
         }
       } catch {

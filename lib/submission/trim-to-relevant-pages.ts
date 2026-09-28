@@ -449,6 +449,21 @@ async function normalizedPageText(doc: Awaited<ReturnType<typeof getDocument>["p
   }
 }
 
+// Comme normalizedPageText, mais SANS mettre en minuscule ni retirer les
+// accents : sert uniquement à extraire un texte à AFFICHER tel quel (le
+// sommaire du DAO, voir extractAnnexeTableOfContents plus bas), jamais pour
+// une comparaison (qui doit toujours passer par normalizedPageText/
+// significantWords, insensibles à la casse et aux accents).
+async function rawPageText(doc: Awaited<ReturnType<typeof getDocument>["promise"]>, pageNumber: number): Promise<string> {
+  try {
+    const page = await doc.getPage(pageNumber);
+    const content = await page.getTextContent();
+    return content.items.map((item) => ("str" in item ? (item as { str?: string }).str ?? "" : "")).join(" ").replace(/\s+/g, " ").trim();
+  } catch {
+    return "";
+  }
+}
+
 // Une fois la pièce trouvée, elle continue tant qu'aucun nouveau titre ne
 // prend le relais — MÊME au-delà des pages initialement données par l'IA ou
 // par le sommaire du DAO (celles-ci ne couvrent pas toujours tout le
@@ -640,11 +655,108 @@ export type MergedItemSegment = { pages: number[]; title: string };
 // alinéa 2"). Générique par construction (le numéro est capturé, jamais
 // codé en dur) : reconnaît "Annexe 6", "Annexe 7", "Annexe 8" pareil que
 // n'importe quel autre numéro, sur n'importe quel DAO.
-const ANNEXE_HEADING_WINDOW = 150;
+// BUG corrigé (Maxime, DAO Manongarivo/Vohibolo : "ANNEXE 05 : CODE DE
+// CONDUITE" jamais reconnue) : cette fenêtre supposait le numéro d'annexe
+// TOUT AU DÉBUT de la page, ce qui n'est pas toujours vrai — une page peut
+// terminer le chapitre précédent avant de commencer une nouvelle annexe plus
+// bas (constaté : le marqueur apparaît après ~330 caractères de texte de fin
+// de chapitre, sur la même page). 500 caractères couvrent ce cas réel avec
+// une marge confortable, tout en restant largement en dessous d'une page
+// complète (~2000+ caractères) pour ne pas non plus attraper un simple
+// renvoi en passant ("voir aussi l'annexe 6") qui apparaîtrait, lui, presque
+// toujours plus loin dans le corps du texte.
+const ANNEXE_HEADING_WINDOW = 500;
 function annexeNumberAtPageStart(normalizedFullPageText: string): number | null {
   const start = normalizedFullPageText.slice(0, ANNEXE_HEADING_WINDOW);
   const match = /\bannexe\s*(?:n[o°]?\.?\s*)?(\d{1,2})\b/.exec(start);
   return match ? Number(match[1]) : null;
+}
+
+// BUG corrigé (Maxime, Annexe 6 introuvable dans la liste : "il faut trouver
+// les annexes... et ces titres sont tirés des listes de dossier demandées
+// par le DAO") : certaines annexes commencent par une page qui ne contient
+// NULLE PART le mot "annexe" ni son numéro (ex. l'Annexe 6 du DAO
+// Manongarivo/Vohibolo commence directement par le texte de la convention
+// elle-même, "CONVENTION SUR LA FACILITATION DU TRANSPORT A DOS D'HOMME...",
+// sans aucune mention de son numéro) — aucun signal sur CETTE page seule
+// (mise en forme, numéro) ne permet alors de deviner qu'il s'agit bien de
+// l'Annexe 6. Ce genre de DAO (modèle TALIM/FEFFI, vérifié identique sur
+// deux DAO différents) a toujours, tout au début du document, un sommaire
+// officiel qui énumère CHAQUE annexe avec son numéro ET son titre complet
+// ("-Annexe 6 : Convention sur la facilitation de transport à dos d'homme
+// entre CISCO et les bénéficiaires ... Page 252") : ce sommaire fait le lien
+// que la page elle-même ne fait pas. Générique par construction (aucun titre
+// n'est codé en dur, tout est lu depuis ce sommaire) : s'applique pareil à
+// n'importe quel DAO qui a ce genre de sommaire ; un DAO qui n'en a pas (ou
+// dont le sommaire ne suit pas ce format) renvoie simplement une liste vide
+// ci-dessous, sans aucune régression (le reste du fichier continue de
+// fonctionner exactement comme avant dans ce cas).
+export type TocAnnexeEntry = { number: number; title: string };
+const TOC_SCAN_PAGES = 20;
+async function extractAnnexeTableOfContents(doc: Awaited<ReturnType<typeof getDocument>["promise"]>): Promise<TocAnnexeEntry[]> {
+  const entries: TocAnnexeEntry[] = [];
+  try {
+    const maxPage = Math.min(TOC_SCAN_PAGES, doc.numPages);
+    let combined = "";
+    for (let page = 1; page <= maxPage; page += 1) combined += ` ${await rawPageText(doc, page)}`;
+    // "-Annexe 6 : Titre ... Page 252" ou "-Annexe2. Titre ... Page 46" (sans
+    // espace, ponctuation variable) : on capture tout jusqu'au prochain
+    // "Page N", qui termine systématiquement chaque ligne de ce sommaire.
+    const regex = /Annexe\s*(\d{1,2})\s*[:.]?\s*(.+?)\s*Page\s*\d+/gi;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(combined)) !== null) {
+      const number = Number(match[1]);
+      const title = match[2].replace(/\s+/g, " ").trim().replace(/[;,.\-–]+$/, "").trim();
+      // Filtre de sécurité : une entrée mal découpée (aucun "Page N" trouvé
+      // avant longtemps, ex. une mention isolée du mot "annexe" ailleurs dans
+      // les 20 premières pages) donnerait un titre anormalement long — jamais
+      // utilisée ensuite, aucune vraie ligne de sommaire ne fait cette
+      // longueur.
+      if (title.length >= 4 && title.length <= 140 && !/^\d+$/.test(title)) entries.push({ number, title });
+    }
+  } catch {
+    // DAO sans sommaire exploitable : liste vide, aucune régression (voir
+    // matchTocEntry plus bas, qui se contente alors de ne jamais matcher).
+  }
+  return entries;
+}
+
+// Associe une page à une entrée du sommaire ci-dessus : par NUMÉRO explicite
+// déjà repéré sur la page (annexeNumberAtPageStart) en priorité — s'il y a
+// plusieurs entrées avec ce même numéro dans le sommaire (les numéros
+// d'annexe recommencent à 1 dans chaque grande partie du DAO, voir plus
+// haut), on choisit celle dont le TITRE correspond le mieux au texte réel de
+// la page ; à défaut de numéro trouvé sur la page elle-même, par le TITRE
+// SEUL (cas de l'Annexe 6 ci-dessus). referenceNumber empêche de revenir en
+// arrière vers une entrée déjà dépassée (donc, de fait, vers les doublons de
+// numéro des grandes parties déjà lues) : le numéro trouvé doit toujours
+// être strictement supérieur à celui de l'annexe en cours.
+function matchTocEntry(pageText: string, explicitNumber: number | null, toc: TocAnnexeEntry[], used: Set<number>, referenceNumber: number | null): TocAnnexeEntry | null {
+  if (explicitNumber !== null) {
+    let bestIndex = -1;
+    let bestScore = -1;
+    for (let index = 0; index < toc.length; index += 1) {
+      if (used.has(index) || toc[index].number !== explicitNumber) continue;
+      const words = significantWords(toc[index].title);
+      const onPage = pageWords(pageText);
+      let matched = 0;
+      for (const word of words) if (onPage.has(word)) matched += 1;
+      const score = words.size ? matched / words.size : 0;
+      if (score > bestScore) { bestScore = score; bestIndex = index; }
+    }
+    if (bestIndex === -1) return null;
+    used.add(bestIndex);
+    return toc[bestIndex];
+  }
+  const minNumber = referenceNumber ?? 0;
+  for (let index = 0; index < toc.length; index += 1) {
+    if (used.has(index) || toc[index].number <= minNumber) continue;
+    if (pageLikelyContainsTitle(pageText, toc[index].title, 0.65)) {
+      used.add(index);
+      return toc[index];
+    }
+  }
+  return null;
 }
 
 export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: number[], ownTableTitles?: string[]): Promise<MergedItemSegment[]> {
@@ -714,16 +826,24 @@ export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: nu
     }
     const workingSortedPages = [...workingPages].sort((a, b) => a - b);
 
+    // Sommaire officiel du DAO (voir extractAnnexeTableOfContents plus haut) :
+    // lu UNE SEULE FOIS par appel, puis consommé au fil des pages ci-dessous
+    // (usedTocIndices) pour ne jamais réutiliser deux fois la même entrée.
+    const tocEntries = await extractAnnexeTableOfContents(doc);
+    const usedTocIndices = new Set<number>();
     const segments: MergedItemSegment[] = [{ pages: [workingSortedPages[0]], title: "" }];
     let referenceHeading = "";
     // Numéro de l'annexe en cours (voir annexeNumberAtPageStart plus haut) :
     // null tant qu'aucune page n'a encore montré de numéro d'annexe explicite.
     let referenceAnnexeNumber: number | null = null;
     try {
-      const firstAnnexeNumber = annexeNumberAtPageStart(await normalizedPageText(doc, workingSortedPages[0]));
-      if (firstAnnexeNumber !== null) {
-        segments[0].title = `Annexe ${firstAnnexeNumber}`;
-        referenceAnnexeNumber = firstAnnexeNumber;
+      const firstPageText = await normalizedPageText(doc, workingSortedPages[0]);
+      const firstAnnexeNumber = annexeNumberAtPageStart(firstPageText);
+      const firstTocEntry = matchTocEntry(firstPageText, firstAnnexeNumber, tocEntries, usedTocIndices, null);
+      const firstResolvedNumber = firstTocEntry?.number ?? firstAnnexeNumber;
+      if (firstResolvedNumber !== null) {
+        segments[0].title = firstTocEntry ? `Annexe ${firstResolvedNumber} : ${firstTocEntry.title}` : `Annexe ${firstResolvedNumber}`;
+        referenceAnnexeNumber = firstResolvedNumber;
       }
       if (!segments[0].title) {
         const first = await pageHeadingLine(doc, workingSortedPages[0]);
@@ -738,16 +858,22 @@ export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: nu
       if (pageNumber < 1 || pageNumber > doc.numPages) { currentSegment.pages.push(pageNumber); continue; }
       try {
         // Priorité au numéro d'annexe explicite (voir annexeNumberAtPageStart
-        // plus haut) : signal bien plus fiable que la mise en forme, et qui
-        // donne directement un titre propre ("Annexe 6") même quand le corps
-        // de la page qui suit est rédigé dans une langue où looksMalagasy
-        // bloque par ailleurs la détection de titre par mise en forme (voir
-        // plus bas) — sans ce cas prioritaire, plusieurs annexes différentes
-        // se retrouvaient fusionnées en une seule pièce sans titre à elles.
-        const annexeNumber = annexeNumberAtPageStart(await normalizedPageText(doc, pageNumber));
-        if (annexeNumber !== null && annexeNumber !== referenceAnnexeNumber) {
-          segments.push({ pages: [pageNumber], title: `Annexe ${annexeNumber}` });
-          referenceAnnexeNumber = annexeNumber;
+        // plus haut) et/ou au sommaire du DAO (voir matchTocEntry plus haut,
+        // pour une annexe dont la page de début ne contient elle-même aucun
+        // numéro) : signal bien plus fiable que la mise en forme, et qui
+        // donne directement un titre propre ("Annexe 6 : Convention sur la
+        // facilitation...") même quand le corps de la page qui suit est
+        // rédigé dans une langue où looksMalagasy bloque par ailleurs la
+        // détection de titre par mise en forme (voir plus bas) — sans ce cas
+        // prioritaire, plusieurs annexes différentes se retrouvaient
+        // fusionnées en une seule pièce sans titre à elles.
+        const pageText = await normalizedPageText(doc, pageNumber);
+        const annexeNumber = annexeNumberAtPageStart(pageText);
+        const tocEntry = matchTocEntry(pageText, annexeNumber, tocEntries, usedTocIndices, referenceAnnexeNumber);
+        const resolvedNumber = tocEntry?.number ?? annexeNumber;
+        if (resolvedNumber !== null && resolvedNumber !== referenceAnnexeNumber) {
+          segments.push({ pages: [pageNumber], title: tocEntry ? `Annexe ${resolvedNumber} : ${tocEntry.title}` : `Annexe ${resolvedNumber}` });
+          referenceAnnexeNumber = resolvedNumber;
           referenceHeading = ""; // Nouvelle annexe : un titre stylé à l'intérieur ne doit plus être comparé à l'ancienne pièce.
           continue;
         }
@@ -805,6 +931,39 @@ export async function firstPageAnnexeNumber(pdfBytes: Uint8Array, pageNumber: nu
     const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
     if (pageNumber < 1 || pageNumber > doc.numPages) return null;
     return annexeNumberAtPageStart(await normalizedPageText(doc, pageNumber));
+  } catch {
+    return null;
+  }
+}
+
+export type ResolvedAnnexeTitle = { number: number; title: string };
+
+// Comme firstPageAnnexeNumber ci-dessus, mais va plus loin en s'appuyant
+// AUSSI sur le sommaire officiel du DAO (voir extractAnnexeTableOfContents
+// plus haut) : trouve le VRAI titre complet d'une annexe à partir de la
+// seule page où elle commence — y compris quand cette page elle-même ne
+// contient NULLE PART le mot "annexe" (cas de l'Annexe 6, signalée par
+// Maxime : sa page de début est directement le texte de la convention,
+// "CONVENTION SUR LA FACILITATION DU TRANSPORT A DOS D'HOMME...", sans
+// aucune mention de son numéro — seul le sommaire du DAO fait ce lien).
+// Exporté pour split-merged-dao-items.ts : sert à corriger le titre d'une
+// pièce déjà détectée par l'IA comme une pièce à PART ENTIÈRE (une seule
+// page connue) — pour une pièce fusionnée sur PLUSIEURS pages, voir
+// directement splitPagesByOwnTitle plus haut, qui applique la même logique
+// pièce par pièce lors du découpage. referenceNumber optionnel : permet
+// d'exclure les annexes déjà dépassées quand l'appelant les connaît (voir
+// son usage) ; laissé à null, seul le numéro/titre de CETTE page compte.
+export async function resolveAnnexeTitleForPage(pdfBytes: Uint8Array, pageNumber: number, referenceNumber: number | null = null): Promise<ResolvedAnnexeTitle | null> {
+  try {
+    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    if (pageNumber < 1 || pageNumber > doc.numPages) return null;
+    const pageText = await normalizedPageText(doc, pageNumber);
+    const explicitNumber = annexeNumberAtPageStart(pageText);
+    const toc = await extractAnnexeTableOfContents(doc);
+    const entry = matchTocEntry(pageText, explicitNumber, toc, new Set(), referenceNumber);
+    if (entry) return { number: entry.number, title: entry.title };
+    if (explicitNumber !== null) return { number: explicitNumber, title: "" };
+    return null;
   } catch {
     return null;
   }
