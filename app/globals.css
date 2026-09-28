@@ -207,6 +207,33 @@
   }
 }
 
+/* Demandé par Maxime : sur ordinateur, tout le menu (logo, liens et carte
+   entreprise en bas) doit tenir directement à l'écran, sans avoir besoin de
+   faire défiler le menu lui-même — surtout visible sur un écran d'ordinateur
+   portable, moins haut qu'un écran de bureau. On resserre donc uniquement
+   les espacements verticaux du menu, seulement à partir de 761px de large :
+   rien ne change sur téléphone (le menu plein écran là-bas a de toute façon
+   toute la hauteur de l'écran pour lui, et peut défiler sans gêner le reste
+   de la page). */
+@media (min-width: 761px) {
+  .dashboardLayout .sidebar {
+    padding-top: 16px;
+    padding-bottom: 16px;
+  }
+  .dashboardLayout .sidebar .brand {
+    margin-bottom: 20px;
+  }
+  .dashboardLayout .sidebar nav {
+    gap: 10px;
+  }
+  .dashboardLayout .sidebar .companyBox {
+    padding: 10px 12px;
+  }
+  .dashboardLayout .sidebar .companyBox p {
+    margin: 3px 0;
+  }
+}
+
 
 
 .brand {
@@ -235,6 +262,13 @@
   display:flex;
   flex-direction:column;
   gap:18px;
+  /* Neutralise une ancienne règle ".sidebar nav" restée plus haut dans ce
+     fichier (un premier brouillon du tableau de bord, jamais nettoyé après
+     son remplacement — vérifié : aucun autre composant n'utilise plus ces
+     classes) qui ajoutait un "margin-top: 35px" jamais voulu ici, sans
+     jamais être visible dans CE fichier-ci puisqu'elle apparaît avant celle
+     du dessus dans le fichier. */
+  margin-top: 0;
 }
 
 
@@ -242,6 +276,12 @@
   text-decoration:none;
   color:#1f2937;
   font-weight:600;
+  /* Même chose que le "margin-top" ci-dessus : une ancienne règle
+     ".sidebar nav a" plus haut dans ce fichier ajoutait "padding: 11px 13px"
+     à chaque lien, invisible en lisant seulement CETTE règle-ci — c'est ce
+     qui rendait chaque lien bien plus haut que son simple texte, et donc
+     tout le menu plus long qu'il n'a besoin de l'être. */
+  padding: 0;
 }
 
 .sidebarGroupLabel {
