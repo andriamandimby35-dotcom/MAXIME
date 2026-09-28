@@ -105,6 +105,28 @@ type Props = {
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 3;
 const ZOOM_STEP = 0.25;
+// pdf.js multiplie TOUJOURS lui-même, en interne, le "scale" qu'on lui donne
+// par PixelsPerInch.PDF_TO_CSS_UNITS (96 pixels CSS / 72 points PDF) avant de
+// calculer la vraie taille d'une page (voir PDFPageView.setPdfPage()/update()
+// dans pdf_viewer.mjs) — une convention normale de son API (il attend une
+// échelle "pure", pas déjà convertie en pixels CSS). Nous lui donnions
+// pourtant directement NOTRE échelle (déjà pensée en pixels CSS par point
+// PDF, pour calculer nous-mêmes la taille de notre propre cadre de page),
+// qu'il multipliait donc UNE SECONDE FOIS : chaque page se dessinait environ
+// 33% plus GRANDE que le cadre qu'on avait nous-mêmes réservé pour elle
+// (mesuré précisément dans un vrai navigateur : 401px réservés, mais 534px
+// vraiment dessinés). Ce débordement, invisible à l'oeil sur une page
+// isolée, est exactement ce qui faisait déborder le bas d'une page sur la
+// suivante (ou disparaître dedans, une fois le débordement empêché
+// ailleurs) — sur N'IMPORTE quel document, N'IMPORTE quelle taille de page,
+// pas seulement celui où ça a été remarqué. En donnant nous-mêmes à pdf.js
+// l'échelle DIVISÉE par ce même facteur (partout où on lui donne une
+// échelle : dessin initial, redimensionnement de la fenêtre, zoom manuel),
+// sa propre multiplication interne retombe exactement sur l'échelle qu'on
+// voulait vraiment. Valeur écrite en dur (96/72) plutôt que lue sur
+// pdfjsLib.PixelsPerInch pour rester utilisable partout dans ce fichier,
+// y compris là où pdfjsLib n'est pas chargé (zoom manuel, redimensionnement).
+const PDF_JS_INTERNAL_SCALE_FACTOR = 96 / 72;
 // Marge de préchargement : une page à moins de 900px de l'écran (au-dessus
 // ou en dessous) est dessinée en avance, pour qu'on ne voie jamais de trou
 // vide pendant un défilement normal.
@@ -766,12 +788,17 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         const viewport = entry.page.getViewport({ scale });
         entry.wrapper.style.width = `${viewport.width}px`;
         entry.wrapper.style.height = `${viewport.height}px`;
+        // pdf.js reçoit l'échelle corrigée (voir commentaire ci-dessus) —
+        // seul notre propre cadre (wrapper, juste au-dessus) garde la vraie
+        // échelle "pixels CSS par point PDF" dont on a besoin pour le
+        // positionner correctement parmi les autres pages.
+        const pdfJsScale = scale / PDF_JS_INTERNAL_SCALE_FACTOR;
         if (entry.pageView) {
           // Le zoom a changé : on redessine la page déjà affichée à la
           // nouvelle taille au lieu d'en recréer une — les valeurs déjà
           // tapées ne sont pas perdues, elles vivent dans
           // pdfDocument.annotationStorage, pas dans la page elle-même.
-          entry.pageView.update({ scale });
+          entry.pageView.update({ scale: pdfJsScale });
           await entry.pageView.draw();
           afterDraw(entry);
           return;
@@ -779,7 +806,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         const pageViewOptions = {
           container: entry.wrapper,
           id: entry.pageNumber,
-          scale,
+          scale: pdfJsScale,
           defaultViewport: viewport,
           eventBus,
           linkService,
@@ -958,7 +985,10 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
           entry.wrapper.style.width = `${viewport.width}px`;
           entry.wrapper.style.height = `${viewport.height}px`;
           if (entry.pageView) {
-            entry.pageView.update({ scale });
+            // Voir PDF_JS_INTERNAL_SCALE_FACTOR plus haut : pdf.js multiplie
+            // lui-même l'échelle qu'on lui donne, il faut donc la lui donner
+            // déjà divisée par ce même facteur, ici comme partout ailleurs.
+            entry.pageView.update({ scale: scale / PDF_JS_INTERNAL_SCALE_FACTOR });
             entry.pageView.draw().then(() => afterDraw(entry)).catch(() => {});
           }
         });
@@ -1021,7 +1051,10 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       entry.wrapper.style.width = `${viewport.width}px`;
       entry.wrapper.style.height = `${viewport.height}px`;
       if (entry.pageView) {
-        entry.pageView.update({ scale });
+        // Voir PDF_JS_INTERNAL_SCALE_FACTOR plus haut : pdf.js multiplie
+        // lui-même l'échelle qu'on lui donne, il faut donc la lui donner
+        // déjà divisée par ce même facteur, ici comme partout ailleurs.
+        entry.pageView.update({ scale: scale / PDF_JS_INTERNAL_SCALE_FACTOR });
         entry.pageView.draw().then(() => afterDraw(entry)).catch(() => {});
       }
     });
