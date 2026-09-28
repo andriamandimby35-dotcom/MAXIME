@@ -2,6 +2,22 @@ import { PDFDocument, PDFFont, PDFPage, rgb } from "pdf-lib";
 import { embedUnicodeFonts } from "./pdf-font";
 import "@/lib/submission/pdfjs-worker-setup";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { findTrailingBoundaryCutoffY, resolveAnnexeTitleForPage } from "@/lib/submission/trim-to-relevant-pages";
+
+// Numéro d'annexe "propre" à cette pièce, pour findTrailingBoundaryCutoffY
+// (ne jamais masquer un simple rappel de CE numéro en fin de page). Passe
+// par resolveAnnexeTitleForPage (sommaire du DAO inclus) plutôt que par le
+// seul numéro explicite écrit sur la page : une pièce comme "Annexe 6"
+// n'a elle-même AUCUN numéro écrit sur sa propre page de début (seul le
+// sommaire du DAO fait ce lien, voir trim-to-relevant-pages.ts) — s'en tenir
+// au numéro explicite laisserait ownAnnexeNumber à null pour ce genre de
+// pièce, un peu moins protecteur contre un très rare double-emploi de ce
+// numéro en fin de page (jamais rencontré en pratique, mais ce calcul ne
+// coûte pas plus cher).
+async function resolveOwnAnnexeNumber(source: Uint8Array, firstPageNumber: number): Promise<number | null> {
+  const resolved = await resolveAnnexeTitleForPage(source, firstPageNumber);
+  return resolved?.number ?? null;
+}
 
 // field_size (facultatif) : taille de police RÉELLE du texte trouvé à cet
 // emplacement sur la page DAO d'origine (calculée par locateFieldPositions /
@@ -274,6 +290,24 @@ function compact(value: string, maximum: number) {
   return safe.length > maximum ? `${safe.slice(0, Math.max(1, maximum - 1))}…` : safe;
 }
 
+// Voir findTrailingBoundaryCutoffY (trim-to-relevant-pages.ts) pour le
+// pourquoi : la DERNIÈRE page connue d'une pièce peut, sans saut de page,
+// déjà contenir le titre de la pièce SUIVANTE tout en bas — on le masque ici
+// d'un rectangle blanc, jamais sur les autres pages de la pièce. Partagé par
+// createFilledDaoTemplatePdf et createFillableDaoTemplatePdf (copie verbatim
+// ou reconstruction, même correctif dans les deux cas).
+async function maskTrailingBoundaryOnLastPage(source: Uint8Array, page: PDFPage | undefined, pageNumber: number, ownAnnexeNumber: number | null) {
+  if (!page) return;
+  try {
+    const cutY = await findTrailingBoundaryCutoffY(source, pageNumber, ownAnnexeNumber);
+    if (cutY === null || cutY <= 0) return;
+    const { width } = page.getSize();
+    page.drawRectangle({ x: 0, y: 0, width, height: cutY, color: rgb(1, 1, 1) });
+  } catch {
+    // Détection impossible : la page reste telle quelle, aucune régression.
+  }
+}
+
 /**
  * Reconstruit chaque page nous-mêmes, mot par mot, à sa position d'origine
  * exacte (repérée par pdf.js) — plus jamais une copie de la vraie page du DAO
@@ -329,6 +363,14 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
   if (documentTitle?.trim()) result.setTitle(compact(documentTitle.trim(), 200));
   const { font } = await embedUnicodeFonts(result);
 
+  // Voir findTrailingBoundaryCutoffY (trim-to-relevant-pages.ts) : calculé
+  // UNE SEULE FOIS ici (à partir de la PREMIÈRE page connue de la pièce,
+  // jamais la dernière) pour servir de repère "propre numéro d'annexe" dans
+  // les deux branches ci-dessous — sert à ne jamais masquer un simple rappel
+  // de CE numéro sur la dernière page ("voir l'annexe 5 alinéa 2").
+  const ownAnnexeNumber = await resolveOwnAnnexeNumber(source, validPages[0]);
+  const lastPageNumber = validPages[validPages.length - 1];
+
   if (!options.rebuildAsText) {
     // Un plan technique (dessin vectoriel, aucun texte à remplacer) ou un
     // modèle de panneau/logo (voir l'appelant) n'a jamais de position à
@@ -337,6 +379,7 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
     // aucun risque, et rien à reconstruire de toute façon).
     const copiedPages = await result.copyPages(sourcePdf, validPages.map((page) => page - 1));
     copiedPages.forEach((page) => result.addPage(page));
+    await maskTrailingBoundaryOnLastPage(source, copiedPages[copiedPages.length - 1], lastPageNumber, ownAnnexeNumber);
     return Buffer.from(await result.save());
   }
 
@@ -435,6 +478,7 @@ export async function createFilledDaoTemplatePdf(source: Uint8Array, pageNumbers
       const maxChars = Math.max(4, Math.floor(available / 4.2));
       page.drawText(compact(value, maxChars), { x, y, size: fontSize, font, color: rgb(0, 0, 0) });
     }
+    await maskTrailingBoundaryOnLastPage(source, pageNumber === lastPageNumber ? page : undefined, pageNumber, ownAnnexeNumber);
   }
   return Buffer.from(await result.save());
 }
@@ -570,6 +614,15 @@ export async function createFillableDaoTemplatePdf(
       copiedPages[pageIndex].drawRectangle({ x: rect.x, y: rect.y, width: rect.width, height: rect.height, color: rgb(1, 1, 1) });
     }
   }
+
+  // Voir maskTrailingBoundaryOnLastPage/findTrailingBoundaryCutoffY : la
+  // dernière page connue de cette pièce peut déjà contenir, tout en bas, le
+  // titre de la pièce SUIVANTE (aucun saut de page entre les deux dans le
+  // DAO d'origine) — masqué ici, après toutes les autres cases, pour rester
+  // par-dessus tout ce qui vient d'être dessiné sur cette page.
+  const ownAnnexeNumber = await resolveOwnAnnexeNumber(source, validPages[0]);
+  const lastPageNumber = validPages[validPages.length - 1];
+  await maskTrailingBoundaryOnLastPage(source, copiedPages[copiedPages.length - 1], lastPageNumber, ownAnnexeNumber);
 
   if (createdFieldCount > 0) {
     try {

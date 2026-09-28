@@ -1067,6 +1067,80 @@ export async function extendDaoItemPages(pdfBytes: Uint8Array, lastKnownPage: nu
   return extra;
 }
 
+// BUG corrigé (capture d'écran de Maxime : la pièce "Annexe 5 - Code de
+// conduite" affichait encore, tout en bas de sa dernière page, le titre
+// "ANNEXE 06 :" de la pièce SUIVANTE) : cette page est en réalité partagée
+// SANS saut de page entre deux pièces différentes (le Code de Conduite se
+// termine, et l'Annexe 6 commence directement en dessous, sur cette même
+// page physique du DAO) — vérifié : "ANNEXE 06 :" est bien écrit en
+// majuscules mais PAS en gras sur cette page précise (police "serif" sans
+// suffixe Bold), donc invisible à pageHeadingLine qui exige les deux à la
+// fois (ce signal sert ailleurs à DÉCOUPER une pièce déjà validée par l'IA,
+// il resterait trop permissif si on l'assouplissait ici, avec le risque de
+// fausses coupures en plein milieu d'un vrai paragraphe). Comme toute
+// l'extraction actuelle ne peut attribuer une page ENTIÈRE qu'à une seule
+// pièce à la fois, la seule façon de ne plus montrer ce titre qui ne
+// concerne pas la pièce affichée est de le MASQUER visuellement sur la
+// copie de CETTE page utilisée pour CETTE pièce (voir son usage dans
+// dao-template-pdf.ts, appliqué uniquement à la toute DERNIÈRE page connue
+// d'une pièce — jamais à ses pages précédentes, ni à la première page de la
+// pièce SUIVANTE, qui doit au contraire garder ce titre bien visible).
+// Générique par construction : réutilise le même motif "Annexe N"/
+// "Chapitre N" déjà utilisé partout ailleurs dans ce fichier (jamais un
+// titre ni un numéro codé en dur), et deux garde-fous pour ne jamais masquer
+// du texte normal par erreur : (1) on ignore tout marqueur trouvé dans la
+// fenêtre de départ de page (ANNEXE_HEADING_WINDOW) — ce serait alors le
+// propre titre de cette page, jamais un titre qui s'invite à la fin ; (2) on
+// exige que le marqueur apparaisse tard dans le texte de la page (dernier
+// quart) — une simple mention en passant plus haut dans un paragraphe ("voir
+// l'annexe 3 alinéa 2") ne doit jamais déclencher de masquage.
+export async function findTrailingBoundaryCutoffY(pdfBytes: Uint8Array, pageNumber: number, ownAnnexeNumber: number | null): Promise<number | null> {
+  try {
+    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    if (pageNumber < 1 || pageNumber > doc.numPages) return null;
+    const page = await doc.getPage(pageNumber);
+    const content = await page.getTextContent();
+    type RawItem = { str?: string; transform?: number[] };
+    const items = (content.items as RawItem[]).filter((item) => (item.str ?? "").trim());
+    if (!items.length) return null;
+    // On reconstruit le texte complet de la page tout en gardant, pour
+    // chaque portion, l'item pdf.js d'origine dont elle provient — seul
+    // moyen de retrouver la position Y réelle du marqueur trouvé par la
+    // regex (un texte normalisé/concaténé seul perdrait cette correspondance).
+    let offset = 0;
+    const spans: Array<{ start: number; end: number; y: number; fontSize: number }> = [];
+    let combined = "";
+    for (const item of items) {
+      const str = item.str ?? "";
+      const y = item.transform ? item.transform[5] : 0;
+      const fontSize = item.transform ? Math.hypot(item.transform[2] ?? 0, item.transform[3] ?? 10) : 10;
+      spans.push({ start: offset, end: offset + str.length, y, fontSize });
+      combined += str;
+      offset += str.length;
+      combined += " ";
+      offset += 1;
+    }
+    const lateThreshold = combined.length * 0.75;
+    const regex = /\b(?:annexe|chapitre)\s*(?:n[o°]?\.?\s*)?(\d{1,2})\b/gi;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(combined)) !== null) {
+      if (match.index < ANNEXE_HEADING_WINDOW || match.index < lateThreshold) continue;
+      const number = Number(match[1]);
+      // Simple rappel du numéro déjà en cours ("voir annexe 5 alinéa 2") :
+      // jamais une nouvelle pièce qui commence.
+      if (ownAnnexeNumber !== null && number === ownAnnexeNumber) continue;
+      const span = spans.find((entry) => match!.index >= entry.start && match!.index < entry.end);
+      if (!span) continue;
+      // Marge généreuse au-dessus de la ligne de base (accents, majuscules)
+      // pour ne jamais laisser dépasser le haut du marqueur trouvé.
+      return span.y + span.fontSize * 1.3;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // Cette page a-t-elle un vrai titre à elle (mise en forme distincte ET
 // plusieurs mots, voir le garde-fou dans pageHeadingLine) ? Exporté pour
 // split-merged-dao-items.ts : sert à décider si une pièce DAO d'une seule
