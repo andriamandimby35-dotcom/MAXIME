@@ -895,6 +895,23 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         pageWrapper.style.height = `${viewport.height}px`;
         pageWrapper.style.background = "#fff";
         pageWrapper.style.boxShadow = "0 4px 16px rgba(0,0,0,.45)";
+        // Nouvelle cause trouvée (l'agrandissement de marge 28px -> 48px
+        // ci-dessus ne suffisait donc pas toujours) : pdf.js dessine LUI-MÊME,
+        // à l'intérieur de ce pageWrapper, sa propre div ".page" avec
+        // "overflow:visible" (voir pdf_viewer.css) — volontaire de son côté
+        // pour ne jamais rogner les poignées de sélection de texte. Mais si
+        // son rendu interne (texte, annotations) déborde ne serait-ce que de
+        // quelques pixels de la taille qu'on a calculée pour CETTE page
+        // (arrondis internes de pdf.js, police plus grande que prévu...), ce
+        // débordement n'était jusqu'ici jamais coupé : il pouvait alors
+        // visuellement empiéter sur l'espace blanc/l'ombre juste en dessous,
+        // et donner l'impression que la page suivante "touche" celle d'avant
+        // — quel que soit l'écart réellement réglé entre les deux. En
+        // forçant ce wrapper (notre VRAIE boîte de page, celle qui porte déjà
+        // la marge et l'ombre) à toujours se couper strictement à sa propre
+        // taille, un débordement interne de pdf.js ne peut plus jamais
+        // déborder visuellement sur la page suivante, sur N'IMPORTE quel PDF.
+        pageWrapper.style.overflow = "hidden";
         pagesContainer.appendChild(pageWrapper);
 
         entries.push({ pageNumber, page, wrapper: pageWrapper, pageView: null, autoFitScale, savedFieldStyles });
