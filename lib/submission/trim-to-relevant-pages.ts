@@ -521,8 +521,13 @@ async function rawPageText(doc: Awaited<ReturnType<typeof getDocument>["promise"
 // ce qui compte comme le même document (un document peut légitimement faire
 // bien plus de pages) : c'est uniquement un filet de sécurité technique
 // contre un balayage interminable si un document est illisible de bout en
-// bout. On s'arrête aussi net dès qu'une page est déjà revendiquée par une
-// AUTRE pièce déjà identifiée dans ce DAO (claimedByOtherPages).
+// bout. Une page déjà revendiquée par une AUTRE pièce identifiée dans ce DAO
+// (claimedByOtherPages) sert de filet de sécurité SUPPLÉMENTAIRE, mais
+// seulement en dernier recours quand rien sur la page elle-même ne confirme
+// ni n'infirme cette revendication (voir plus bas) — jamais comme un arrêt
+// automatique, cette revendication étant elle-même une estimation de l'IA,
+// donc pas plus fiable que celle qui a produit candidatePages (voir le
+// commentaire sur pagesNotClaimedByOtherItems côté appelant).
 const MAX_EXTRA_PAGES_BEYOND_CANDIDATES = 60;
 
 export async function extractRelevantPageRange(
@@ -540,9 +545,15 @@ export async function extractRelevantPageRange(
     // rien trouvé doit vouloir dire rien à imprimer, jamais "tout le DAO".
     returnEmptyIfNotFound?: boolean;
     // Pages déjà revendiquées par une AUTRE pièce déjà identifiée dans ce
-    // DAO (voir pagesNotClaimedByOtherItems côté appelant) : sert de
-    // garde-fou pendant l'extension au-delà de candidatePages, pour ne
-    // jamais avaler par erreur le début d'un autre document déjà repéré.
+    // DAO (voir pagesNotClaimedByOtherItems côté appelant) : garde-fou de
+    // DERNIER RECOURS pendant l'extension au-delà de candidatePages, pour ne
+    // pas avaler par erreur le début d'un autre document déjà repéré quand
+    // aucun autre indice n'est disponible. Ne doit jamais l'emporter sur un
+    // vrai signal de contenu (titre retrouvé sur la page, ou absence de
+    // titre) : une pièce peut très bien revendiquer un numéro de page qui,
+    // en réalité, tombe en PLEIN MILIEU d'une autre pièce (l'IA se trompe
+    // régulièrement de quelques pages sur ces numéros) — dans ce cas la page
+    // ne doit pas couper l'extraction juste à cause de cette revendication.
     claimedByOtherPages?: Set<number>;
     // Titres des AUTRES pièces du même dossier (voir siblingTitlesFor côté
     // appelant) : filet de sécurité complémentaire à isStopBoundary. Ce
@@ -654,15 +665,41 @@ export async function extractRelevantPageRange(
       let extraChecked = 0;
       let pageNumber = previousPage + 1;
       while (pageNumber <= doc.numPages && extraChecked < MAX_EXTRA_PAGES_BEYOND_CANDIDATES) {
-        if (options.claimedByOtherPages?.has(pageNumber)) break;
         try {
           const { heading, titleLine } = await pageHeadingLine(doc, pageNumber);
-          const siblingHit = normalizedSiblingTitles.length > 0 && pageContainsSiblingTitle(await normalizedPageText(doc, pageNumber), normalizedSiblingTitles);
+          const pageText = await normalizedPageText(doc, pageNumber);
+          const siblingHit = normalizedSiblingTitles.length > 0 && pageContainsSiblingTitle(pageText, normalizedSiblingTitles);
           if (siblingHit || isStopBoundary(titleLine, heading, referenceHeading, keywords)) break;
+          // Le contenu réel de cette page ne montre RIEN d'un autre document
+          // (ni titre distinct, ni texte d'une pièce connue) : une simple
+          // revendication de ce numéro par une autre pièce (souvent
+          // imprécise de la part de l'IA — voir le commentaire sur
+          // pagesNotClaimedByOtherItems côté appelant) ne suffit donc plus,
+          // à elle seule, à arrêter ici. Sans ce garde-fou, une pièce
+          // associée par erreur à ce numéro de page par l'IA (alors qu'il
+          // est en réalité en plein milieu d'UN AUTRE document déjà en
+          // cours de lecture, ex. "Article 6" cité pour une autre pièce
+          // alors qu'il appartient au CCAP) coupait ce dernier bien avant sa
+          // vraie fin.
+          // Exception : une page quasiment SANS texte (plan, photo, page
+          // blanche...) n'offre justement aucun de ces indices pour
+          // confirmer OU infirmer la revendication — là, comme pour une page
+          // illisible ci-dessous, on retombe sur claimedByOtherPages en
+          // dernier recours plutôt que d'avaler sans le savoir le début d'un
+          // autre document sans texte (ex. un plan) déjà repéré ailleurs.
+          const hasNoRealText = pageText.trim().length < 20;
+          if (hasNoRealText && options.claimedByOtherPages?.has(pageNumber)) break;
           kept.push(pageNumber);
           if (titleLine) referenceHeading = heading;
         } catch {
-          kept.push(pageNumber); // Page illisible au milieu : gardée par prudence, comme ci-dessus.
+          // Page illisible : aucun contenu à vérifier ici, contrairement au
+          // cas ci-dessus. Si en plus une AUTRE pièce revendique déjà ce
+          // numéro, on reste alors prudent (vrai dernier recours, faute de
+          // tout autre indice) et on s'arrête plutôt que d'avaler par erreur
+          // son début ; sinon, comme avant, page gardée par prudence au
+          // milieu d'un groupe contigu.
+          if (options.claimedByOtherPages?.has(pageNumber)) break;
+          kept.push(pageNumber);
         }
         pageNumber += 1;
         extraChecked += 1;
