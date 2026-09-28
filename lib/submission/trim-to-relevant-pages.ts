@@ -335,6 +335,55 @@ async function pageHeadingLine(doc: Awaited<ReturnType<typeof getDocument>["prom
   if (!highConfidenceTier && titleLine && significantWords(titleLine).size < 2) {
     return { titleLine: null, heading: "" };
   }
+  // BUG corrigé (signalé par Maxime : le CCAP perdait ses derniers articles,
+  // coupé net juste avant "article 6"/"article 7") : dans un CCAP, une
+  // convention ou tout document juridique similaire organisé en subdivisions
+  // numérotées, CHAQUE subdivision a presque toujours son propre sous-titre en
+  // gras et en majuscules ("article 6. SUIVI DES TRAVAUX") — mais le numéro
+  // qui le précède ("article 6.") reste lui en casse normale, donc dans un
+  // item de texte SÉPARÉ (mise en forme différente) juste avant. Ce sous-titre
+  // a alors EXACTEMENT la même mise en forme qu'un vrai nouveau titre de
+  // pièce DAO, mais ce n'en est pas un : ce n'est qu'une subdivision interne
+  // du document en cours. Sans ce garde-fou, isStopBoundary (plus bas)
+  // prenait ce sous-titre pour le début d'une toute nouvelle pièce dès qu'il
+  // ne correspondait pas au titre en cours, coupant le document avant ses
+  // dernières subdivisions.
+  //
+  // Généralisé (remarque de Maxime : un autre DAO peut ne pas utiliser le mot
+  // "article" du tout, ça peut être autre chose) : au lieu de ne reconnaître
+  // que "article", on reconnaît TOUS les mots de subdivision courants d'un
+  // document juridique/administratif francophone (article, chapitre, section,
+  // titre, partie, paragraphe, alinéa, point, §), PLUS une numérotation à
+  // plusieurs niveaux ou en chiffres romains même sans aucun mot devant (ex.
+  // "6.1" ou "IV" juste avant un sous-titre) — jamais un mot ni un numéro codé
+  // en dur pour un DAO précis, donc s'applique à n'importe quel DAO. On
+  // regarde à la fois le texte IMMÉDIATEMENT avant le titre détecté
+  // (numérotation toujours collée à son propre sous-titre, jamais ailleurs
+  // sur la page) ET le début du titre lui-même (au cas où le numéro serait
+  // exceptionnellement inclus dans le même item que le sous-titre).
+  const SUBDIVISION_WORD = "(?:article|art\\.?|chapitre|chap\\.?|section|sect\\.?|titre|partie|paragraphe|alin[ée]a|point|§)";
+  const SUBDIVISION_WORD_MARKER = new RegExp(`\\b${SUBDIVISION_WORD}\\s*n?°?\\s*\\d{1,3}(?:\\.\\d{1,3}){0,3}\\b\\.?\\s*[-–:]?\\s*$`, "i");
+  const SUBDIVISION_WORD_MARKER_AT_START = new RegExp(`^\\s*${SUBDIVISION_WORD}\\s*n?°?\\s*\\d{1,3}(?:\\.\\d{1,3}){0,3}\\b`, "i");
+  // Numérotation nue (sans mot devant) : seulement quand c'est TOUT le
+  // contenu de l'item de texte juste avant le titre (jamais un numéro perdu
+  // au milieu d'une phrase), et seulement à partir d'une numérotation à
+  // plusieurs niveaux ("6.1", "2.3.4") ou d'un chiffre romain ("IV", "VI") —
+  // un simple "6." isolé reste ambigu (numéro de page, puce de liste...) donc
+  // n'est volontairement pas traité comme un marqueur à lui seul.
+  const BARE_SUBDIVISION_NUMBER = /^\d{1,3}(?:\.\d{1,3}){1,3}\.?$|^[ivxlcdm]{1,6}\.?$/i;
+  const precedingItems = zone
+    .slice(Math.max(0, startIndex - 3), startIndex)
+    .map((item) => (item.str ?? "").trim())
+    .filter(Boolean);
+  const precedingText = precedingItems.join(" ");
+  const lastPrecedingItem = precedingItems[precedingItems.length - 1] ?? "";
+  if (
+    SUBDIVISION_WORD_MARKER.test(precedingText) ||
+    SUBDIVISION_WORD_MARKER_AT_START.test(titleLine) ||
+    BARE_SUBDIVISION_NUMBER.test(lastPrecedingItem)
+  ) {
+    return { titleLine: null, heading: "" };
+  }
   return { titleLine, heading: normalizeText(titleLine) };
 }
 
