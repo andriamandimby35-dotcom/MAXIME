@@ -1,7 +1,21 @@
-// Doit rester le tout premier import de ce fichier : il installe la
-// variable globale DOMMatrix dont pdfjs-dist a besoin dès son propre
-// chargement (voir le commentaire dans dommatrix-polyfill.ts). Si l'import
-// de pdfjs-dist juste en dessous passait avant celui-ci, le polyfill
+// Filet de sécurité GÉNÉRAL (pas seulement pour le bug déjà rencontré une
+// fois avec build-dossier-items.ts) : ce fichier lit un chemin sur le disque
+// (fs/path, voir plus bas) — du code strictement SERVEUR qui ne doit JAMAIS
+// se retrouver dans le paquet envoyé au navigateur, même par un import
+// indirect à travers plusieurs fichiers qu'on n'aurait pas repéré à temps.
+// Le paquet "server-only" fait planter la CONSTRUCTION (avec un message
+// clair citant le fichier CLIENT fautif) dès qu'un composant "use client"
+// importe ce fichier, même indirectement — au lieu de l'échec confus
+// "Module not found: Can't resolve 'fs'" (aucune indication d'où vient le
+// problème) rencontré une fois lors d'une construction Vercel. Doit rester
+// le tout premier import du fichier : c'est justement ce qui permet à
+// Next.js de bloquer la construction AVANT même d'essayer de regrouper le
+// reste (dommatrix-polyfill compris) pour une cible navigateur.
+import "server-only";
+// Doit rester juste après server-only ci-dessus (et avant tout le reste) :
+// installe la variable globale DOMMatrix dont pdfjs-dist a besoin dès son
+// propre chargement (voir le commentaire dans dommatrix-polyfill.ts). Si
+// l'import de pdfjs-dist plus bas passait avant celui-ci, le polyfill
 // arriverait trop tard et pdfjs-dist planterait quand même.
 import "@/lib/submission/dommatrix-polyfill";
 import path from "path";
