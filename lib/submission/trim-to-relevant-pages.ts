@@ -496,6 +496,34 @@ function isStopBoundary(titleLine: string | null, heading: string, referenceHead
   return !matchesTitle(heading, keywords);
 }
 
+// BUG corrigé (vérifié en vrai sur "PARTIE I - REGLEMENT DE L'APPEL
+// D'OFFRES" : coupée après sa page 4, perdant sa page 5 qui continue
+// pourtant la MÊME phrase — "...et" / "de la TVA..." — confirmé en lisant
+// les deux pages directement dans le DAO original). Cause : l'Article 6 de
+// ce règlement ("Dossier d'Appel d'Offres Local") liste, comme presque tout
+// DAO, un SOMMAIRE citant le titre exact de chaque autre pièce du dossier
+// suivi de son numéro de page ("- Annexe 1 : Cadre du Bordereau Détail
+// Quantitatif et Estimatif (BDQE) ; Page 21") — cette ligne de sommaire
+// suffisait à déclencher pageContainsSiblingTitle (qui ne regarde que la
+// présence du texte, jamais ce qui l'entoure) et donc à faire croire qu'une
+// AUTRE pièce commençait ici, alors que la page continue en réalité
+// normalement le même document (voir le commentaire plus haut sur
+// isStopBoundary : "un sommaire... ne compte jamais comme un changement de
+// document" — déjà vrai pour la détection par mise en forme, mais pas pour
+// celle-ci). Généralisable : n'importe quel DAO dont le règlement/CCAP cite,
+// dans son propre sommaire ou dans un article de renvoi, le titre d'une
+// autre pièce suivi de "Page N" peut provoquer la même coupure. On ignore
+// donc une occurrence du titre d'une autre pièce quand elle est immédiatement
+// suivie (à quelques caractères de ponctuation près) de "Page N" — signe
+// d'une simple citation de sommaire, jamais du début réel de cette pièce —
+// sans jamais désactiver la protection pour une VRAIE occurrence ailleurs
+// sur la même page (on continue alors à chercher une autre occurrence du
+// même titre avant de conclure qu'il n'y en a aucune).
+const SOMMAIRE_PAGE_REFERENCE_WINDOW = 25;
+function isSommaireStylePageReference(normalizedPageText: string, matchEnd: number): boolean {
+  const after = normalizedPageText.slice(matchEnd, matchEnd + SOMMAIRE_PAGE_REFERENCE_WINDOW);
+  return /^[^a-z0-9]{0,15}page\s*\d/.test(after);
+}
 // Cherche le titre EXACT (mot pour mot, déjà connu) d'une autre pièce du
 // dossier n'importe où sur la page — pas seulement dans la zone de titre
 // repérée par pageHeadingLine, qui exige une mise en forme distincte
@@ -504,7 +532,17 @@ function isStopBoundary(titleLine: string | null, heading: string, referenceHead
 // (une fois ici, une fois dans pageHeadingLine) : l'appelant fournit déjà le
 // texte normalisé, calculé une seule fois par page.
 function pageContainsSiblingTitle(normalizedPageText: string, normalizedSiblingTitles: string[]) {
-  return normalizedSiblingTitles.some((otherTitle) => otherTitle.length >= 12 && normalizedPageText.includes(otherTitle));
+  return normalizedSiblingTitles.some((otherTitle) => {
+    if (otherTitle.length < 12) return false;
+    let searchFrom = 0;
+    for (;;) {
+      const index = normalizedPageText.indexOf(otherTitle, searchFrom);
+      if (index === -1) return false;
+      const matchEnd = index + otherTitle.length;
+      if (!isSommaireStylePageReference(normalizedPageText, matchEnd)) return true;
+      searchFrom = matchEnd; // Simple citation de sommaire : on continue de chercher une VRAIE occurrence.
+    }
+  });
 }
 
 async function normalizedPageText(doc: Awaited<ReturnType<typeof getDocument>["promise"]>, pageNumber: number): Promise<string> {
