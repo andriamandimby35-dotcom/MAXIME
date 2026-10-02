@@ -1256,29 +1256,51 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       /* BUG corrigé (généralisé à TOUTE case de TOUT document ouvert dans ce
          lecteur — signalé sur un tableau de "A2 - Planning d'exécution des
          travaux" mais pas spécifique à cette pièce ni aux tableaux) : "carré
-         noir" qui apparaît devant une case, absent du DAO d'origine. Ce
-         n'est pas notre CSS ni un défaut de génération du PDF : c'est pdf.js
-         qui dessine par défaut un contour de 2px sur TOUTE case (texte, case
-         à cocher, liste déroulante), aussi bien au survol qu'en train d'être
-         remplie (via --input-hover-border-color/--input-focus-border-color,
-         voir pdf_viewer.css), pour montrer qu'elle est cliquable/active dans
-         son propre lecteur complet avec barre d'outils. Un premier correctif
-         n'avait neutralisé que le survol (en gardant le contour pendant la
-         saisie, pensé comme un repère utile) : mais la case reste entourée
-         de ce carré aussi bien AVANT qu'APRÈS la saisie sur cette
-         application (pas seulement pendant, comme le montrent les captures
-         envoyées avec une valeur déjà tapée) — on neutralise donc maintenant
-         ce contour dans tous les cas (survol, pendant la saisie, et après),
-         partout dans ce lecteur. Les cases restent déjà bien visibles par
-         leur fond blanc (juste au-dessus), sans avoir besoin de ce carré. */
-      .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea):hover,
-      .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea):focus,
-      .fillable-pdf-viewer .choiceWidgetAnnotation select:hover,
-      .fillable-pdf-viewer .choiceWidgetAnnotation select:focus,
-      .fillable-pdf-viewer .buttonWidgetAnnotation:is(.checkBox, .radioButton) input:hover,
-      .fillable-pdf-viewer .buttonWidgetAnnotation:is(.checkBox, .radioButton) input:focus {
+         noir"/petit trait qui apparaît devant une case, absent du DAO
+         d'origine. Ce n'est pas notre CSS ni un défaut de génération du PDF :
+         c'est pdf.js qui dessine par défaut un contour de 2px sur TOUTE case
+         (texte, case à cocher, liste déroulante), aussi bien au survol qu'en
+         train d'être remplie (via --input-hover-border-color/
+         --input-focus-border-color, voir pdf_viewer.css), pour montrer
+         qu'elle est cliquable/active dans son propre lecteur complet avec
+         barre d'outils. Un premier correctif n'avait neutralisé que le
+         survol et la saisie (règles :hover/:focus ci-dessous) : le
+         commentaire disait déjà vouloir couvrir "tous les cas (survol,
+         pendant la saisie, et après)", mais le code ne couvrait en réalité
+         QUE :hover et :focus — jamais l'état "au repos" (case ni survolée ni
+         en train d'être remplie, par exemple déjà remplie puis la souris
+         s'en est allée). C'est pour ça que le carré/trait revenait : il
+         n'avait en fait jamais été supprimé au repos, seulement pendant le
+         survol ou la saisie. On neutralise donc maintenant ce contour tout
+         le temps, sans condition de survol/saisie, partout dans ce lecteur.
+         Les cases restent déjà bien visibles par leur fond blanc (juste
+         au-dessus), sans avoir besoin de ce carré. */
+      .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea),
+      .fillable-pdf-viewer .choiceWidgetAnnotation select,
+      .fillable-pdf-viewer .buttonWidgetAnnotation:is(.checkBox, .radioButton) input {
         border-color: transparent !important;
         outline: none !important;
+      }
+      /* BUG trouvé en testant directement le dossier de soumission ouvert
+         dans Chrome (tableau "Annexe 2 - Planning d'exécution des travaux") :
+         petit trait/crochet gris qui dépasse dans le coin de certaines cases,
+         confirmé comme venant de CE lecteur (il disparaît si on cache la
+         case). Ce n'est ni une bordure, ni une ombre, ni le fond, ni un
+         arrondi de coin (tout ça a été testé un par un directement dans le
+         navigateur) : c'est le padding ("11px 12px") de la règle globale
+         "input, select, textarea" (voir globals.css), pensée pour les champs
+         de formulaire normaux du site (plusieurs dizaines de pixels de
+         haut), qui s'applique aussi à ces minuscules cases de tableau PDF
+         (21 à 26 px de haut à peine) : ce padding, bien trop grand pour une
+         case aussi petite, écrase presque tout l'espace utile pour le texte
+         et laisse dépasser un fragment de lettre à l'extérieur de la case —
+         ce fragment est le "crochet" gris observé. On annule donc ce padding
+         hérité pour toute case de texte ou liste déroulante de ce lecteur ;
+         le texte garde déjà un espacement correct grâce au positionnement
+         précis de chaque case lors de la génération du PDF. */
+      .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea),
+      .fillable-pdf-viewer .choiceWidgetAnnotation select {
+        padding: 0 !important;
       }
       /* Le "blob" bleu/mauve arrondi qui apparaissait au toucher sur iPhone
          (visible sur la capture d'écran envoyée) n'est ni la teinte pdf.js
