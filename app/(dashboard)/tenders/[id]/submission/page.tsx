@@ -3,8 +3,8 @@ import SubmissionDossierManager from "@/components/tenders/SubmissionDossierMana
 import { GenerateSubmissionDossierButton } from "@/components/tenders/GenerateSubmissionDossierButton";
 import { getContext } from "@/lib/organization";
 import { buildMasterDetectedItems, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
-import { splitMergedDaoItems } from "@/lib/submission/split-merged-dao-items";
-import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
+import { resolveFinalSubmissionItems } from "@/lib/submission/resolve-submission-items";
+import type { WorkItemLike } from "@/lib/submission/sanitize-ai-analysis";
 
 export default async function SubmissionPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ estimateId?: string }> }) {
   const { id } = await params;
@@ -57,33 +57,25 @@ export default async function SubmissionPage({ params, searchParams }: { params:
   } catch {
     analysis = null;
   }
-  // Corrige après coup une pièce que l'IA a fusionnée à tort (voir
-  // splitMergedDaoItems) : ne retélécharge le DAO original QUE si au moins
-  // une pièce s'étale sur plusieurs vraies pages du DAO (le cas normal,
-  // largement majoritaire, n'a donc jamais ce coût supplémentaire). Un DAO
-  // temporairement injoignable ne doit jamais empêcher d'afficher le
-  // dossier : on continue alors simplement avec la liste non corrigée.
-  const rawItems = analysis?.submission_items ?? [];
-  // knownPagesForItem (fonction partagée, voir parse-page-reference.ts)
-  // combine template_page_numbers ET les pages notées seulement en texte
-  // dans source_reference — jamais template_page_numbers seul ici, sinon ce
-  // télédéchargement du DAO, nécessaire au découpage, n'est même jamais
-  // tenté pour une pièce dont la page manquante n'est révélée qu'en texte.
-  const mightHaveMergedItems = rawItems.some((item) => item.template_origin === "dao"
-    && knownPagesForItem(item).length > 1);
-  if (mightHaveMergedItems && tender.document_url) {
-    try {
-      const response = await fetch(tender.document_url);
-      if (response.ok) {
-        const pdfBytes = new Uint8Array(await response.arrayBuffer());
-        const splitItems = await splitMergedDaoItems(rawItems, pdfBytes);
-        if (analysis) analysis = { ...analysis, submission_items: splitItems };
-      }
-    } catch {
-      // DAO original temporairement inaccessible : on continue avec la
-      // liste telle quelle plutôt que de bloquer toute la page.
-    }
-  }
+  // BUG corrigé (cause racine, voir resolve-submission-items.ts) : cette page
+  // avait sa PROPRE copie de la logique découpage+nettoyage, pendant que
+  // app/api/tenders/[id]/submission-dossier/generate/route.ts (la route qui
+  // ENREGISTRE le dossier) avait la SIENNE — un correctif ajouté à l'une
+  // n'était jamais répercuté dans l'autre. Résultat observé en vrai : un
+  // dossier "régénéré" avec un correctif tout neuf semblait inchangé à
+  // l'écran, parce que CETTE page ne lit même pas les lignes enregistrées
+  // par la génération (seulement leur NOMBRE, juste au-dessus, pour savoir si
+  // un dossier existe) — elle reconstruit toujours sa propre liste
+  // directement depuis tenders.ai_analysis. Les deux endroits appellent
+  // désormais la MÊME fonction partagée, pour ne plus jamais pouvoir se
+  // désynchroniser au prochain correctif.
+  const rawWorkItems = ((analysis as unknown) as { work_items?: WorkItemLike[] } | null)?.work_items ?? [];
+  const { items: resolvedItems } = await resolveFinalSubmissionItems(
+    (analysis?.submission_items ?? []) as TemplateDetectedItem[],
+    rawWorkItems,
+    tender.document_url,
+  );
+  if (analysis) analysis = { ...analysis, submission_items: resolvedItems };
   const detectedItems = buildMasterDetectedItems(analysis);
 
   const estimatedAmount = typeof tender.estimated_amount === "number" ? tender.estimated_amount : Number(tender.estimated_amount) || null;
