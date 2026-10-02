@@ -40,6 +40,12 @@
 //    lui-même laquelle est la bonne (voir le principe déjà appliqué ailleurs
 //    dans ce projet : ne jamais faire disparaître silencieusement une pièce
 //    potentiellement réelle).
+//
+// Le motif "titre de bordereau" (point 1) est défini UNE SEULE FOIS, partagée
+// avec trim-to-relevant-pages.ts qui en a besoin pour une raison différente
+// mais liée (voir bordereau-heading.ts) — pour ne jamais laisser les deux
+// endroits se désynchroniser.
+import { looksLikeBordereauHeading } from "@/lib/submission/bordereau-heading";
 
 export type WorkItemLike = {
   row_type?: string;
@@ -76,17 +82,6 @@ function normalizeInstructions(value: string) {
     .toUpperCase();
 }
 
-// Chiffre romain suivi d'un tiret/point ("VII - ...", "IV. ...") : numérotation
-// typique d'une rubrique de bordereau, jamais celle d'une pièce de soumission
-// (qui porte un intitulé comme "Annexe 7", "A2", "B1", jamais un chiffre
-// romain seul).
-const BORDEREAU_HEADING_PATTERNS = [
-  /^TOTAL\b/i,
-  /^SOUS[ -]?TOTAL\b/i,
-  /^R[ÉE]CAPITULAT/i,
-  /^[IVXLCDM]{1,6}\s*[-–—.)]/i,
-];
-
 export function sanitizeSubmissionItems<T extends SubmissionItemLike>(
   submissionItems: T[],
   workItems: WorkItemLike[],
@@ -108,7 +103,7 @@ export function sanitizeSubmissionItems<T extends SubmissionItemLike>(
     const rawTitle = (item.title || "").trim();
     if (!rawTitle) return true;
     const normalized = normalizeTitle(rawTitle);
-    const matchesPattern = BORDEREAU_HEADING_PATTERNS.some((pattern) => pattern.test(rawTitle));
+    const matchesPattern = looksLikeBordereauHeading(rawTitle);
     const matchesWorkItemTitle = normalized.length > 0 && bordereauTitles.has(normalized);
     if (matchesPattern || matchesWorkItemTitle) {
       removedAsBordereauHeading.push(rawTitle);

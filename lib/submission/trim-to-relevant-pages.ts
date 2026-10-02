@@ -1,6 +1,7 @@
 import "@/lib/submission/pdfjs-worker-setup";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { significantWords } from "@/lib/submission/title-match";
+import { looksLikeBordereauHeading } from "@/lib/submission/bordereau-heading";
 
 // Une plage de pages tirée d'une référence textuelle ("Pages 31-46, Partie
 // III") ou de numéros extraits par l'IA peut englober plusieurs documents à
@@ -382,6 +383,24 @@ async function pageHeadingLine(doc: Awaited<ReturnType<typeof getDocument>["prom
     SUBDIVISION_WORD_MARKER_AT_START.test(titleLine) ||
     BARE_SUBDIVISION_NUMBER.test(lastPrecedingItem)
   ) {
+    return { titleLine: null, heading: "" };
+  }
+  // BUG corrigé (vérifié directement sur un vrai DAO, dans la pièce qui
+  // reprend le bordereau détail quantitatif en pages PDF) : une ligne de
+  // total/sous-total/récapitulatif ou un lot numéroté en chiffre romain du
+  // bordereau de prix ("TOTAL - CHARPENTE & COUVERTURE", "SOUS-TOTAL
+  // MACONNERIE", "RÉCAPITULATION GÉNÉRALE", "VII - PEINTURE ET VITRERIE")
+  // est, dans la quasi-totalité des DAO, écrit EN MAJUSCULES ET EN GRAS —
+  // exactement le même style qu'un vrai titre de document — alors que ce
+  // n'est jamais le début d'une nouvelle pièce : rien qu'une ligne de prix,
+  // déjà représentée correctement dans work_items/le bordereau automatique.
+  // Sans ce garde-fou, une pièce DAO à plusieurs pages qui reprend le
+  // bordereau (ex. "Annexe X : Bordereau détail quantitatif") se faisait
+  // fragmenter par splitPagesByOwnTitle/splitMergedDaoItems en une dizaine de
+  // fausses pièces séparées, une par ligne de total repérée dans ses pages —
+  // même détecteur que sanitize-ai-analysis.ts (voir bordereau-heading.ts),
+  // pour que les deux endroits ne se désynchronisent jamais.
+  if (looksLikeBordereauHeading(titleLine)) {
     return { titleLine: null, heading: "" };
   }
   return { titleLine, heading: normalizeText(titleLine) };
