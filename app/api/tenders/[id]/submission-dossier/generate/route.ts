@@ -3,6 +3,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import { buildMasterDetectedItems, buildDossierRecordsForInsert, type MasterAnalysis, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
 import { splitMergedDaoItems } from "@/lib/submission/split-merged-dao-items";
 import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
+import { sanitizeSubmissionItems, type WorkItemLike } from "@/lib/submission/sanitize-ai-analysis";
 
 function migrationError(error: { code?: string; message?: string } | null) {
   return error?.code === "42P01" || error?.message?.includes("does not exist");
@@ -61,12 +62,42 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     analysis = null;
   }
 
+  // BUG corrigé (observé en vrai : un dossier SUPPRIMÉ PUIS RÉGÉNÉRÉ après
+  // ce correctif gardait quand même une fausse pièce "RECAPITULATION
+  // GENERALE" avec l'instruction "Joindre le BDQE complété et signé") :
+  // sanitizeSubmissionItems (qui retire un submission_item créé à tort à
+  // partir d'un titre de rubrique/sous-total/récapitulatif du bordereau de
+  // prix, et qui avertit sur les doublons — voir ce fichier) n'était
+  // appliqué QU'au moment de l'analyse IA (analyze-dao/route.ts). Une
+  // analyse déjà enregistrée AVANT ce filtre (ou avant son extension à un
+  // nouveau cas) garde donc ses pièces fausses pour toujours dans
+  // tenders.ai_analysis — et comme cette route LIT cette analyse telle
+  // quelle sans jamais la re-nettoyer, supprimer puis régénérer le dossier
+  // (gratuit, sans appel IA) ne corrigeait jamais ce genre de pièce : seule
+  // une toute nouvelle analyse (payante) l'évitait. En réappliquant ici le
+  // même filtre déterministe (aucun coût IA, identique à celui de l'analyse),
+  // régénérer suffit maintenant à nettoyer une ancienne analyse, sans jamais
+  // devoir la refaire juste pour ça.
+  const rawWorkItems = ((analysis as unknown) as { work_items?: WorkItemLike[] } | null)?.work_items ?? [];
+  const { items: sanitizedItems, removedAsBordereauHeading, flaggedDuplicateTitles, flaggedDuplicateInstructions } =
+    sanitizeSubmissionItems((analysis?.submission_items ?? []) as TemplateDetectedItem[], rawWorkItems);
+  if (removedAsBordereauHeading.length || flaggedDuplicateTitles.length || flaggedDuplicateInstructions.length) {
+    console.warn("Génération du dossier de soumission : nettoyage submission_items", {
+      removedAsBordereauHeading,
+      flaggedDuplicateTitles,
+      flaggedDuplicateInstructions,
+    });
+  }
+  if (analysis) analysis = { ...analysis, submission_items: sanitizedItems };
+
   // Même correctif après coup que app/(dashboard)/tenders/[id]/submission/
   // page.tsx (voir splitMergedDaoItems) : une pièce déjà fusionnée à tort par
   // l'IA doit être séparée dès la toute première génération du dossier, pas
   // seulement à l'affichage. Ne retélécharge le DAO que si vraiment
-  // nécessaire (au moins une pièce sur plusieurs vraies pages).
-  const rawItems = (analysis?.submission_items ?? []) as TemplateDetectedItem[];
+  // nécessaire (au moins une pièce sur plusieurs vraies pages). On part ici
+  // de la liste déjà nettoyée ci-dessus (sanitizedItems), jamais de la liste
+  // brute de l'IA.
+  const rawItems = sanitizedItems as TemplateDetectedItem[];
   // knownPagesForItem (fonction partagée, voir parse-page-reference.ts) :
   // même vérification que partout ailleurs (page.tsx,
   // printable-submission-document/route.ts), jamais réécrite à la main ici.
