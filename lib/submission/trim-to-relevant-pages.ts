@@ -516,15 +516,41 @@ const LENIENT_PAGE_START_WINDOW = 160;
 function stripLeadingPageNumber(pageText: string): string {
   return pageText.replace(/^\s*\d{1,4}\s*/, "");
 }
-async function locateTitleAtPageStarts(pdfBytes: Uint8Array, title: string): Promise<RelevantPageRange> {
+// BUG corrigé (vérifié en vrai sur ce DAO, page 11) : la pièce "A1-
+// IDENTIFICATION DU CANDIDAT" (son vrai titre, page 13) se faisait confondre
+// à tort avec la page 11 — le sommaire de la "PARTIE II" du DAO, qui liste à
+// la suite, sans aucune mise en forme distinctive (pas de gras, juste des
+// majuscules comme le reste du corps de texte), les intitulés de TOUTES les
+// pièces de cette partie : "A1- IDENTIFICATION DU CANDIDAT A2- CAPACITÉS
+// TECHNIQUES A3- CAPACITÉS FINANCIÈRES...". Cette page ne contient JAMAIS
+// "Page N" (le garde-fou déjà en place ne protège donc pas ce cas), et
+// l'intitulé cherché apparaît bien mot pour mot dans les 160 premiers
+// caractères de la page — cette fenêtre tolérante confirmait donc à tort
+// cette page de sommaire comme le vrai début du document.
+// Généralisé (jamais un titre ni un numéro codé en dur) : une page de
+// sommaire de ce genre se reconnaît par le fait qu'elle cite, dans la MÊME
+// petite fenêtre, le titre d'au moins une AUTRE pièce déjà connue du
+// dossier — un vrai début de document, lui, ne cite jamais le titre complet
+// d'une autre pièce dès ses 160 premiers caractères. On réutilise les mêmes
+// titres déjà connus des autres pièces (siblingTitles, voir leur usage plus
+// haut dans ce fichier) pour ce contrôle.
+function windowContainsOtherSiblingTitle(windowText: string, normalizedSiblingTitles: string[]): boolean {
+  return normalizedSiblingTitles.some((otherTitle) => otherTitle.length >= 12 && windowText.includes(otherTitle));
+}
+async function locateTitleAtPageStarts(pdfBytes: Uint8Array, title: string, siblingTitles: string[] = []): Promise<RelevantPageRange> {
   const keywords = phraseWords(title);
   if (!keywords.length) return { pages: [], title: null };
+  const normalizedSiblingTitles = siblingTitles.map((otherTitle) => normalizeText(otherTitle));
   try {
     const doc = await loadPdfDocument(pdfBytes);
     for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
       const text = await normalizedPageText(doc, pageNumber);
       const windowText = stripLeadingPageNumber(text).slice(0, LENIENT_PAGE_START_WINDOW);
-      if (matchesTitle(windowText, keywords) && !/\bpage\s*\d{1,4}\b/.test(windowText)) {
+      if (
+        matchesTitle(windowText, keywords) &&
+        !/\bpage\s*\d{1,4}\b/.test(windowText) &&
+        !windowContainsOtherSiblingTitle(windowText, normalizedSiblingTitles)
+      ) {
         return { pages: [pageNumber], title };
       }
     }
@@ -570,7 +596,7 @@ export async function resolveVerifiedPages(
   if (blind.pages.length) return blind;
   // Toujours rien trouvé (titre non confirmé par la mise en forme nulle
   // part) : dernier recours, plus tolérant — voir locateTitleAtPageStarts.
-  const lenient = await locateTitleAtPageStarts(pdfBytes, title);
+  const lenient = await locateTitleAtPageStarts(pdfBytes, title, options.siblingTitles);
   return lenient.pages.length ? lenient : direct;
 }
 
@@ -621,6 +647,43 @@ function matchesTitle(heading: string, keywords: string[]) {
   if (!keywords.length) return false;
   const matched = keywords.filter((keyword) => keywordAppearsIn(heading, keyword)).length;
   return matched / keywords.length >= MIN_KEYWORD_MATCH_RATIO;
+}
+
+// BUG corrigé (vérifié en vrai sur ce DAO, page 11) : la pièce "A1-
+// IDENTIFICATION DU CANDIDAT" (son vrai titre, page 13) risquait d'être
+// confondue avec la page 11, qui n'est QUE le sommaire de la "PARTIE II" du
+// DAO ("A1- IDENTIFICATION DU CANDIDAT A2- CAPACITÉS TECHNIQUES A3-
+// CAPACITÉS FINANCIÈRES A4 - ANTÉCÉDENTS DU CANDIDAT... B1- GARANTIE
+// BANCAIRE B2- CAUTION..."). Cette liste est, sur ce DAO, écrite tout
+// entière en gras/majuscules sans aucune rupture de mise en forme entre
+// chaque intitulé — pageHeadingLine (plus haut) les regroupe alors tous en
+// UN SEUL titre géant, qui contient forcément, au passage, les mots de
+// CHAQUE pièce listée (donc aussi ceux de "A1- IDENTIFICATION DU
+// CANDIDAT") : matchesTitle les retrouve tous et accepte à tort cette page
+// de sommaire comme si c'était le vrai début du document. Le garde-fou
+// "Page N juste après" (isSommaireStylePageReference, plus haut) ne
+// protège pas de ce cas précis : ce sommaire-là ne cite aucun numéro de
+// page, juste une liste de titres à la suite.
+//
+// Signal générique (jamais un mot ni un numéro codé en dur, donc valable
+// sur n'importe quel DAO) : un vrai titre de pièce reste toujours à peu
+// près de la même longueur que le titre recherché (quelques mots de plus
+// tout au plus, pour une formulation légèrement différente) — alors qu'un
+// titre "avalé" par erreur avec tout un sommaire à la suite devient
+// nettement plus long, puisqu'il contient en plus les intitulés de TOUTES
+// les autres pièces listées sur cette même page. On compare donc le nombre
+// de mots du titre trouvé à celui du titre recherché : un écart de plus de
+// 3 fois reste très généreux pour un vrai titre un peu plus long (vérifié
+// sur "Annexe 6 - Convention sur la facilitation de transport à dos
+// d'homme entre CISCO et les bénéficiaires", déjà plus de 15 mots, qui
+// reste bien sous ce seuil car il n'y a là aucun autre titre avalé avec
+// lui) mais rejette sans problème un sommaire qui en avale une dizaine
+// d'autres à la suite.
+const MAX_HEADING_TO_TITLE_WORD_RATIO = 3;
+function headingLooksLikeIndexListing(heading: string, keywords: string[]): boolean {
+  if (!keywords.length) return false;
+  const headingWordCount = heading.split(/\s+/).filter(Boolean).length;
+  return headingWordCount > keywords.length * MAX_HEADING_TO_TITLE_WORD_RATIO;
 }
 
 // Une page suivante marque-t-elle un VRAI changement de document (donc la
@@ -811,7 +874,7 @@ export async function extractRelevantPageRange(
       if (pageNumber < 1 || pageNumber > doc.numPages) continue;
       try {
         const { heading, titleLine } = await pageHeadingLine(doc, pageNumber);
-        if (titleLine && matchesTitle(heading, keywords)) {
+        if (titleLine && matchesTitle(heading, keywords) && !headingLooksLikeIndexListing(heading, keywords)) {
           startIndex = index;
           referenceHeading = heading;
           detectedTitle = titleLine;
