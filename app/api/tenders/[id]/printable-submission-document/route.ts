@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, rgb } from "pdf-lib";
 import { createServerClient } from "@/lib/supabase/server";
+import { embedUnicodeFonts } from "@/lib/submission/pdf-font";
 import { createPrintableSubmissionPdf } from "@/lib/submission/printable-pdf";
 import { appendDaoPagesToPdf, appendExternalFileAsPages, createFilledDaoTemplatePdf, createFillableDaoTemplatePdf } from "@/lib/submission/dao-template-pdf";
 import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholders, locateTableCellPositions } from "@/lib/submission/locate-field-positions";
@@ -99,6 +100,111 @@ function truncateBeforeOtherItemTitle(text: string, siblingTitles: string[]): st
     if (index !== -1 && (earliestIndex === -1 || index < earliestIndex)) earliestIndex = index;
   }
   return earliestIndex === -1 ? text : text.slice(0, earliestIndex).trimEnd();
+}
+
+// BUG trouvé en vérifiant les PDF générés un par un, pas seulement la liste
+// affichée à l'écran (demande explicite de Maxime, "verifi tout les pdf...
+// pour que peu importe tout les dao soumis elle doit etre bon directement") :
+// une pièce que sanitizeSubmissionItems a déjà marquée comme doublon — même
+// TITRE, mêmes INSTRUCTIONS, ou les deux à la fois qu'une autre pièce du
+// dossier (voir sanitize-ai-analysis.ts) — peut en réalité pointer vers des
+// pages qui n'ont RIEN à voir avec son propre titre. Vérifié en vrai sur DEUX
+// cas différents, l'un avec les deux signaux à la fois, l'autre avec le
+// signal "titre" seul, ce qui a forcé à élargir cette protection aux trois
+// cas plutôt qu'à un seul :
+//   - "Annexe 8 : Modèle plaque TALIM" (pages 6, 7, titre ET instructions
+//     identiques à un autre doublon) générait en fait l'article du règlement
+//     sur les modalités de remise des offres (mêmes pages que "PARTIE I -
+//     REGLEMENT DE L'APPEL D'OFFRES", recopiées par erreur par l'IA) —
+//     aucun rapport avec une plaque de chantier.
+//   - "Annexe 1 : Modèle de garantie bancaire de bonne exécution" (titre
+//     identique recopié 3 fois, pages 19, 31 et 45) : aucune des 3 pages
+//     n'est la bonne — la page 19 est le modèle de garantie DE SOUMISSION
+//     (pièce différente), la page 31 ne fait que CITER ce titre dans un
+//     sommaire, et la page 45 parle d'un tout autre sujet (révision des
+//     prix). La vraie page (47) a bien été trouvée par l'IA, mais sous un
+//     AUTRE titre ("ANNEXE 1 AU CCAP", pas marqué doublon car titre
+//     différent) — ces 3 entrées-ci, elles, ne pointent sur rien de valable.
+//     Un simple doublon de TITRE seul (sans instructions identiques) pouvait
+//     donc, lui aussi, cacher un vrai problème de pages — pas seulement le
+//     cas "titre ET instructions" initialement visé.
+// L'avertissement existe déjà sur l'écran du dossier (3 variantes de texte
+// selon le(s) signal(aux) détecté(s)), mais disparaît entièrement une fois le
+// PDF ouvert, imprimé ou enregistré à part : rien dans le fichier lui-même ne
+// prévient plus Maxime (ou quiconque l'imprime à sa place) que ce document
+// précis est douteux.
+//
+// Plutôt que de supprimer la pièce (risque déjà écarté ailleurs : impossible
+// de savoir laquelle des deux est la bonne sans deviner), on tamponne un
+// bandeau d'avertissement en HAUT de la première page du PDF généré, quelle
+// que soit la méthode qui l'a produit (vraie page du DAO, texte recomposé,
+// tableau...) — l'avertissement suit alors le document partout où il va, pas
+// seulement cet écran. Générique par construction : s'appuie uniquement sur
+// les textes d'avertissement déjà posés par sanitizeSubmissionItems (jamais
+// un titre codé en dur), donc s'applique pareil à n'importe quelle pièce, sur
+// n'importe quel DAO — dès que l'écran afficherait déjà un avertissement de
+// doublon pour cette pièce, le PDF l'affiche aussi désormais.
+const DUPLICATE_WARNING_MARKERS = [
+  "Titre ET instructions identiques",
+  "Titre identique à une autre pièce",
+  "Instructions identiques, mot pour mot",
+];
+function isFlaggedDuplicate(instructions: string | undefined | null): boolean {
+  return Boolean(instructions && DUPLICATE_WARNING_MARKERS.some((marker) => instructions.includes(marker)));
+}
+function wrapForBanner(text: string, maxWidth: number, font: { widthOfTextAtSize: (t: string, s: number) => number }, fontSize: number): string[] {
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let current = "";
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (font.widthOfTextAtSize(candidate, fontSize) > maxWidth && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+async function stampDuplicateWarningBanner(pdfBytes: Uint8Array): Promise<Uint8Array> {
+  try {
+    const doc = await PDFDocument.load(pdfBytes);
+    const pages = doc.getPages();
+    if (!pages.length) return pdfBytes;
+    const { boldFont } = await embedUnicodeFonts(doc);
+    const page = pages[0];
+    const { width, height } = page.getSize();
+    const fontSize = 8.5;
+    const margin = 14;
+    const message = "⚠ Cette pièce a été détectée en double dans ce DAO (même titre et/ou mêmes instructions qu'une autre pièce) : il est possible qu'elle ne corresponde pas vraiment à son titre, ou que la vraie page se trouve ailleurs dans le DAO. Vérifiez vous-même dans le DAO avant de vous en servir.";
+    const lines = wrapForBanner(message, width - margin * 2, boldFont, fontSize);
+    const lineHeight = fontSize + 4;
+    const bandHeight = lineHeight * lines.length + 10;
+    // Un bandeau tamponné par-dessus une page DAO bien remplie (champs,
+    // cases à cocher déjà positionnés par createFillableDaoTemplatePdf plus
+    // haut) pourrait masquer une information réelle : on agrandit plutôt la
+    // page vers le haut et on insère le bandeau dans cet espace neuf, sans
+    // jamais recouvrir le contenu d'origine. setSize seul suffit : la page
+    // grandit en gardant (0,0) en bas à gauche, donc le nouvel espace
+    // apparaît naturellement tout en haut, au-dessus du contenu existant qui
+    // ne bouge pas — contrairement à translateContent, qui aurait aussi
+    // décalé tout ce qu'on dessine APRÈS (bandeau compris, le faisant sortir
+    // de la page).
+    page.setSize(width, height + bandHeight);
+    page.drawRectangle({ x: 0, y: height, width, height: bandHeight, color: rgb(0.74, 0.1, 0.1) });
+    lines.forEach((line, index) => {
+      page.drawText(line, { x: margin, y: height + bandHeight - lineHeight * (index + 1), size: fontSize, font: boldFont, color: rgb(1, 1, 1) });
+    });
+    return await doc.save();
+  } catch (error) {
+    // L'avertissement ne doit jamais faire échouer la génération elle-même :
+    // au pire, Maxime garde le document sans bandeau, jamais sans document du
+    // tout.
+    console.error("Duplicate warning banner stamp failed", error);
+    return pdfBytes;
+  }
 }
 
 type TableForCellTargets = { columns: string[]; rows: string[][]; organization_column_indexes?: number[] };
@@ -215,13 +321,14 @@ function buildExecutionPlanningTable(items: PlanningWorkItem[], executionDays: n
 // main dans Supabase, et sans avoir besoin de relancer une analyse du DAO
 // (qui ne sert \u00e0 rien ici : le souci vient du fichier PDF d\u00e9j\u00e0 g\u00e9n\u00e9r\u00e9, jamais
 // de l'analyse elle-m\u00eame).
-const GENERATED_PDF_VERSION = "v7";
+const GENERATED_PDF_VERSION = "v9";
 function pdfStorageName(title: string, kind: string, workerIndex: number) {
   const normalized = title.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 96) || "document";
   return `${kind === "form_to_complete" ? "formulaire" : "piece"}-${normalized}-${workerIndex + 1}-${GENERATED_PDF_VERSION}.pdf`;
 }
 
-async function savedPdfResponse(supabase: Awaited<ReturnType<typeof createServerClient>>, pdf: Uint8Array, organizationId: string, tenderId: string, estimateId: string | null, title: string, kind: string, workerIndex: number, clientFetch = false) {
+async function savedPdfResponse(supabase: Awaited<ReturnType<typeof createServerClient>>, pdfInput: Uint8Array, organizationId: string, tenderId: string, estimateId: string | null, title: string, kind: string, workerIndex: number, clientFetch = false, needsDuplicateWarningBanner = false) {
+  const pdf = needsDuplicateWarningBanner ? await stampDuplicateWarningBanner(pdfInput) : pdfInput;
   const fileName = pdfStorageName(title, kind, workerIndex);
   const path = `${organizationId}/submission/${tenderId}/generated/${estimateId ?? "master"}/${fileName}`;
   const clientResponse = (storageStatus: "saved" | "unavailable") => {
@@ -536,6 +643,10 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
   // stricte, sinon les vraies pages/le vrai modèle du DAO ne sont jamais
   // utilisés pour les pièces de la liste générique.
   const detectedTemplate = findBestTitleMatch(title, analysis?.submission_items ?? []);
+  // Voir isFlaggedDuplicate plus haut : calculé une seule fois ici, utilisé
+  // par TOUS les appels à savedPdfResponse plus bas, quelle que soit la
+  // méthode de génération qui a réussi.
+  const itemNeedsDuplicateWarningBanner = isFlaggedDuplicate(detectedTemplate?.instructions);
   // Garde-fou contre la fusion de plusieurs pages titrées en un seul
   // submission_item par l'IA (voir containsOtherItemTitle/
   // truncateBeforeOtherItemTitle plus haut, et la consigne correspondante
@@ -905,7 +1016,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
         leftoverFieldLines,
       });
       const pdf = await renderGeneratedDocumentPdf(blocks);
-      return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
+      return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch, itemNeedsDuplicateWarningBanner);
     } catch (error) {
       // Repropagée nulle part ici volontairement : si cette nouvelle méthode
       // échoue pour une raison imprévue, on préfère retomber sur les anciennes
@@ -1038,7 +1149,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             copiedPages.forEach((page) => mainDoc.addPage(page));
             pdf = Buffer.from(await mainDoc.save());
           }
-          return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
+          return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch, itemNeedsDuplicateWarningBanner);
         }
       } catch (error) {
         // Repropagée (au lieu d'être avalée en silence) : sinon toute
@@ -1103,7 +1214,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           } else {
             pdf = await createFilledDaoTemplatePdf(bytes, verifiedPages, positions, valuesWithFallbacks, redactions, verifiedTitle, { rebuildAsText: !isGraphicOnlyDocument });
           }
-          return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
+          return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch, itemNeedsDuplicateWarningBanner);
         }
       } catch (error) {
         console.error("Source-reference PDF generation failed", error);
@@ -1141,7 +1252,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
             } else {
               pdf = await createFilledDaoTemplatePdf(bytes, locatedPages, positions, valuesWithFallbacks, redactions, blindSearchResult.title, { rebuildAsText: !isGraphicOnlyDocument });
             }
-            return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
+            return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch, itemNeedsDuplicateWarningBanner);
           }
         }
       } catch (error) {
@@ -1251,7 +1362,7 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
       console.error("Worker CIN append failed", error);
     }
   }
-  return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch);
+  return savedPdfResponse(supabase, pdf, member.organization_id, id, estimateId, title, kind, workerIndex, clientFetch, itemNeedsDuplicateWarningBanner);
 }
 
 // Les documents générés sont préparés via POST par le lecteur PDF afin qu'un
