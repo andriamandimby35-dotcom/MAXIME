@@ -526,13 +526,22 @@ export async function POST(request: Request) {
     structured = parsedOutput as typeof structured;
 
     // Nettoyage déterministe, sans appel IA supplémentaire : voir
-    // sanitize-ai-analysis.ts pour le détail des deux erreurs rattrapées ici
+    // sanitize-ai-analysis.ts pour le détail des erreurs rattrapées ici
     // (titre de rubrique/sous-total du bordereau confondu avec une pièce de
-    // soumission, et doublon de titre entre deux pièces).
-    const { items: sanitizedSubmissionItems, removedAsBordereauHeading, flaggedDuplicateTitles } =
-      sanitizeSubmissionItems(structured.submission_items, structured.work_items);
-    if (removedAsBordereauHeading.length || flaggedDuplicateTitles.length) {
-      console.warn("DAO analysis: nettoyage submission_items", { removedAsBordereauHeading, flaggedDuplicateTitles });
+    // soumission, et pièce dupliquée — même titre, ou même texte
+    // d'instructions sous un titre différent/mal recopié).
+    const {
+      items: sanitizedSubmissionItems,
+      removedAsBordereauHeading,
+      flaggedDuplicateTitles,
+      flaggedDuplicateInstructions,
+    } = sanitizeSubmissionItems(structured.submission_items, structured.work_items);
+    if (removedAsBordereauHeading.length || flaggedDuplicateTitles.length || flaggedDuplicateInstructions.length) {
+      console.warn("DAO analysis: nettoyage submission_items", {
+        removedAsBordereauHeading,
+        flaggedDuplicateTitles,
+        flaggedDuplicateInstructions,
+      });
     }
     structured = { ...structured, submission_items: sanitizedSubmissionItems };
 
