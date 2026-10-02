@@ -8,7 +8,8 @@ import { findBestTitleMatch, titleSimilarity } from "@/lib/submission/title-matc
 import { parsePageNumbersFromReference, knownPagesForItem } from "@/lib/submission/parse-page-reference";
 import { trimToRelevantStart, extractRelevantPageRange, locateTitleInFullDocument } from "@/lib/submission/trim-to-relevant-pages";
 import { daoSourcedGenericTitles, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
-import { splitMergedDaoItems } from "@/lib/submission/split-merged-dao-items";
+import { resolveFinalSubmissionItems } from "@/lib/submission/resolve-submission-items";
+import type { WorkItemLike } from "@/lib/submission/sanitize-ai-analysis";
 import { renderGeneratedDocumentPdf } from "@/lib/submission/generated-document-pdf";
 import { buildGeneratedDocumentBlocks } from "@/lib/submission/generated-document-blocks";
 import { resolveKnownFieldValue, normalizeIdentifier, isGuaranteeBankIdentityTitle } from "@/lib/submission/resolve-known-field-value";
@@ -427,42 +428,30 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
     work_items?: Array<PlanningWorkItem>;
     submission_items?: TemplateDetectedItem[];
   } | null;
-  // Même correctif après coup qu'à l'affichage du dossier (voir
-  // splitMergedDaoItems) : sans lui, cette route cherche detectedTemplate en
-  // comparant "title" (déjà séparé, ex. "A5 - Litiges...") à l'ANCIENNE
-  // liste encore fusionnée dans tenders.ai_analysis — aucune correspondance
-  // trouvée, donc plus aucun champ ni texte de modèle correctement rattaché
-  // pour cette pièce précise (c'est ce qui provoquait le texte mélangé et
-  // les mots coupés à l'impression). Réutilise le PDF déjà mis en cache par
-  // getDocumentBytes ci-dessus : jamais un second téléchargement du DAO.
-  // BUG corrigé : ce déclencheur ne regardait QUE template_page_numbers,
-  // sans jamais combiner les pages parfois notées seulement en texte dans
-  // source_reference ("Pages 16, 267-268") — déjà corrigé à l'affichage du
-  // dossier (page.tsx) et à la toute première génération (generate/route.ts)
-  // mais oublié ICI, la route qui fabrique VRAIMENT le PDF. Une pièce dont
-  // la page manquante n'était révélée QUE par ce texte (ex. "A2 :
-  // CAPACITES TECHNIQUES", pages réelles 14 ET 15, mais 15 seulement citée
-  // en texte) ne déclenchait donc jamais ce découpage ICI, même si le
-  // dossier affiché la montrait déjà bien séparée en "A2-a"/"A2-b" — cette
-  // route continuait alors de chercher son modèle dans l'ANCIENNE liste
-  // encore fusionnée, sans jamais trouver "A2-a Matériel" dedans, et
-  // retombait sur un mauvais rapprochement (voir findBestTitleMatch plus
-  // bas) qui mélangeait le contenu des deux pièces. Toujours via
-  // knownPagesForItem désormais (fonction partagée, voir
-  // parse-page-reference.ts) : un futur ajustement de cette règle se
-  // répercute alors automatiquement partout, sans avoir à le refaire à la
-  // main à chaque endroit qui en a besoin.
-  if (analysis?.submission_items?.some((item) => item.template_origin === "dao"
-    && knownPagesForItem(item).length > 1)) {
-    try {
-      const bytes = await getDocumentBytes();
-      if (bytes) {
-        const splitItems = await splitMergedDaoItems(analysis.submission_items ?? [], bytes);
-        analysis = { ...analysis, submission_items: splitItems };
-      }
-    } catch (error) {
-      console.error("splitMergedDaoItems failed in printable-submission-document", error);
-    }
+  // BUG corrigé (cause racine, voir resolve-submission-items.ts) : CETTE
+  // route avait sa PROPRE copie, partielle, de la logique de découpage
+  // (seulement splitMergedDaoItems, jamais le nettoyage anti-bordereau/
+  // anti-doublon de sanitizeSubmissionItems), different de app/(dashboard)/
+  // tenders/[id]/submission/page.tsx et de submission-dossier/generate/
+  // route.ts — déjà réunies, elles, derrière la même fonction partagée. Deux
+  // pièces au titre quasi identique (ex. "Annexe 7 : Modèle Panneau de
+  // chantier" / "Annexe 7 - Modèle Panneau de chantier", observées en vrai)
+  // rendent findBestTitleMatch plus bas ambigu : sans ce même nettoyage ici,
+  // cette route pouvait chercher son modèle dans une liste légèrement
+  // différente de celle que l'utilisateur voit affichée, avec un risque de
+  // rattacher le mauvais modèle/les mauvaises pages à la pièce imprimée.
+  // Utilise la même fonction partagée désormais, pour que les trois endroits
+  // ne puissent plus jamais se désynchroniser au prochain correctif.
+  try {
+    const rawWorkItems = (analysis?.work_items ?? []) as unknown as WorkItemLike[];
+    const { items: resolvedItems } = await resolveFinalSubmissionItems(
+      (analysis?.submission_items ?? []) as TemplateDetectedItem[],
+      rawWorkItems,
+      documentUrl,
+    );
+    if (analysis) analysis = { ...analysis, submission_items: resolvedItems };
+  } catch (error) {
+    console.error("resolveFinalSubmissionItems failed in printable-submission-document", error);
   }
   templateValues.worksite_location = analysis?.worksite_location || "";
   templateValues.chantier_location = analysis?.worksite_location || "";
