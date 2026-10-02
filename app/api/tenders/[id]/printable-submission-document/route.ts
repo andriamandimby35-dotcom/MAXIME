@@ -7,7 +7,7 @@ import { appendDaoPagesToPdf, appendExternalFileAsPages, createFilledDaoTemplate
 import { measureTableColumnRatios, locateFieldPositions, locateBracketPlaceholders, locateTableCellPositions } from "@/lib/submission/locate-field-positions";
 import { findBestTitleMatch, titleSimilarity } from "@/lib/submission/title-match";
 import { parsePageNumbersFromReference, knownPagesForItem } from "@/lib/submission/parse-page-reference";
-import { trimToRelevantStart, extractRelevantPageRange, locateTitleInFullDocument } from "@/lib/submission/trim-to-relevant-pages";
+import { trimToRelevantStart, locateTitleInFullDocument, resolveVerifiedPages } from "@/lib/submission/trim-to-relevant-pages";
 import { daoSourcedGenericTitles, type TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
 import { resolveFinalSubmissionItems } from "@/lib/submission/resolve-submission-items";
 import type { WorkItemLike } from "@/lib/submission/sanitize-ai-analysis";
@@ -1048,53 +1048,32 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           // Titre du document VRAIMENT confirmé (majuscules + gras retrouvés
           // sur la page DAO elle-même) — un plan n'a pas de texte à ce titre,
           // donc pas de titre confirmé par cette méthode pour lui.
-          let { pages: verifiedPages, title: verifiedTitle } = /\bplans?\b/i.test(title)
-            ? { pages: await expandToContiguousPlanRange(title, candidatePages, analysis?.submission_items ?? [], documentPageCount), title: null as string | null }
-            : await extractRelevantPageRange(bytes, candidatePages, detectedTemplate.title ?? title, {
-              claimedByOtherPages: otherItemsClaimedPages(analysis?.submission_items ?? [], detectedTemplate.title ?? title),
-              siblingTitles: siblingTitlesForThisItem,
-            });
           // BUG trouvé en vérifiant les PDF générés un par un sur un vrai DAO
           // (demande explicite de Maxime : que l'analyse d'un DAO donne
           // directement une liste et des PDF corrects, pas seulement
-          // "signalés comme douteux"). Jusqu'ici, quand la page donnée par
-          // l'IA (candidatePages) était carrément la MAUVAISE page — pas
-          // juste légèrement décalée, ce qu'extractRelevantPageRange corrige
-          // déjà en élargissant de ±1 page — son propre titre n'y était
-          // jamais confirmé (verifiedTitle restait null), et on gardait quand
-          // même cette page fausse faute de mieux (verifiedPages inchangé).
-          // Vérifié en vrai sur plusieurs pièces d'un DAO réel : "Annexe 1 :
-          // Modèle de garantie bancaire de bonne exécution" pointait sur les
-          // pages 19, 31 ou 45 selon l'entrée en double, alors que la vraie
-          // page (47) n'était aucune des trois ; "Annexe 2 : Pratiques de
-          // fraude et corruption" pointait sur les pages 32-33 (en réalité
-          // l'acte d'engagement) alors que la vraie page est 48. Dans les deux
-          // cas, le même mécanisme de recherche "à l'aveugle" dans tout le
-          // document (locateTitleInFullDocument, déjà utilisé plus bas quand
-          // l'IA n'a donné AUCUNE page pour une pièce) retrouve la bonne page
-          // sans difficulté, puisqu'il cherche ce même titre confirmé
-          // (majuscules + gras) partout dans le DAO plutôt que dans la seule
-          // plage donnée par l'IA. On étend donc ici ce même filet de
-          // sécurité à ce cas-ci : la page donnée s'avère fausse, on cherche
-          // la vraie ailleurs dans le DAO avant d'abandonner et de garder la
-          // page fausse. Jamais appliqué aux plans (sans texte, donc sans
-          // titre à confirmer par nature — verifiedTitle y est toujours null,
-          // ce qui ne veut rien dire d'anormal pour eux). Générique par
-          // construction (le titre cherché reste un paramètre, jamais codé en
-          // dur) : s'applique pareil à n'importe quelle pièce, sur n'importe
-          // quel DAO.
-          if (!verifiedTitle && !/\bplans?\b/i.test(title)) {
-            try {
-              const blindSearchResult = await locateTitleInFullDocument(bytes, detectedTemplate.title ?? title, otherItemsClaimedPages(analysis?.submission_items ?? [], detectedTemplate.title ?? title), siblingTitlesForThisItem);
-              const locatedPages = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], detectedTemplate.title ?? title, blindSearchResult.pages);
-              if (locatedPages.length) {
-                verifiedPages = locatedPages;
-                verifiedTitle = blindSearchResult.title;
-              }
-            } catch (blindSearchError) {
-              console.error("Blind full-document search fallback failed (wrong-page recovery)", blindSearchError);
-            }
-          }
+          // "signalés comme douteux"). Jusqu'ici, extractRelevantPageRange
+          // seul gardait la page donnée par l'IA (candidatePages) même quand
+          // elle s'avérait carrément la MAUVAISE page (pas juste décalée de
+          // ±1, déjà corrigé par cette fonction) : son propre titre n'y étant
+          // jamais confirmé, on continuait quand même avec cette page fausse,
+          // faute de mieux. Vérifié en vrai sur plusieurs pièces d'un DAO
+          // réel : "Annexe 1 : Modèle de garantie bancaire de bonne
+          // exécution" pointait sur les pages 19, 31 ou 45 selon l'entrée en
+          // double, alors que la vraie page (47) n'était aucune des trois ;
+          // "Annexe 2 : Pratiques de fraude et corruption" pointait sur les
+          // pages 32-33 (en réalité l'acte d'engagement) alors que la vraie
+          // page est 48. resolveVerifiedPages (lib/submission/trim-to-
+          // relevant-pages.ts) ajoute exactement le filet qui manquait : si le
+          // titre n'est pas confirmé dans la plage donnée, chercher ce même
+          // titre confirmé (majuscules + gras) partout ailleurs dans le DAO
+          // avant d'abandonner — jamais appliqué aux plans (sans texte, donc
+          // sans titre à confirmer par nature).
+          const { pages: verifiedPages, title: verifiedTitle } = /\bplans?\b/i.test(title)
+            ? { pages: await expandToContiguousPlanRange(title, candidatePages, analysis?.submission_items ?? [], documentPageCount), title: null as string | null }
+            : await resolveVerifiedPages(bytes, candidatePages, detectedTemplate.title ?? title, {
+              claimedByOtherPages: otherItemsClaimedPages(analysis?.submission_items ?? [], detectedTemplate.title ?? title),
+              siblingTitles: siblingTitlesForThisItem,
+            });
           const templateFields = detectedTemplate.fields ?? [];
           let pdf: Buffer;
           let allTableCellsResolvedOnRealPage = false;

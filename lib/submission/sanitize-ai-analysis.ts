@@ -141,10 +141,10 @@ export function sanitizeSubmissionItems<T extends SubmissionItemLike>(
     if (isDuplicateInstructions) flaggedDuplicateInstructions.push(item.title);
 
     const warning = isDuplicateTitle && isDuplicateInstructions
-      ? "⚠ Titre ET instructions identiques à une autre pièce détectée dans ce DAO — vérifiez laquelle des deux correspond vraiment avant de vous en servir."
+      ? DUPLICATE_WARNING_BOTH
       : isDuplicateTitle
-        ? "⚠ Titre identique à une autre pièce détectée dans ce DAO — vérifiez laquelle des deux correspond vraiment avant de vous en servir."
-        : "⚠ Instructions identiques, mot pour mot, à une autre pièce de ce DAO (même si le titre diffère) — c'est probablement la même pièce détectée deux fois ; vérifiez laquelle des deux est la bonne avant de vous en servir.";
+        ? DUPLICATE_WARNING_TITLE_ONLY
+        : DUPLICATE_WARNING_INSTRUCTIONS_ONLY;
     const instructions = item.instructions && item.instructions.trim()
       ? `${item.instructions.trim()}\n\n${warning}`
       : warning;
@@ -152,4 +152,33 @@ export function sanitizeSubmissionItems<T extends SubmissionItemLike>(
   });
 
   return { items, removedAsBordereauHeading, flaggedDuplicateTitles, flaggedDuplicateInstructions };
+}
+
+// Textes d'avertissement EXPORTÉS (une seule fois, ici, là où ils sont
+// produits) : réutilisés ailleurs (le bandeau tamponné sur le PDF généré, et
+// resolve-duplicate-items.ts qui tente de vérifier/corriger ces pièces
+// directement dans le DAO) pour détecter/retirer cet avertissement — jamais
+// recopiés en texte en dur à un autre endroit, pour ne jamais pouvoir se
+// désynchroniser d'ici au prochain correctif sur le texte lui-même.
+export const DUPLICATE_WARNING_BOTH = "⚠ Titre ET instructions identiques à une autre pièce détectée dans ce DAO — vérifiez laquelle des deux correspond vraiment avant de vous en servir.";
+export const DUPLICATE_WARNING_TITLE_ONLY = "⚠ Titre identique à une autre pièce détectée dans ce DAO — vérifiez laquelle des deux correspond vraiment avant de vous en servir.";
+export const DUPLICATE_WARNING_INSTRUCTIONS_ONLY = "⚠ Instructions identiques, mot pour mot, à une autre pièce de ce DAO (même si le titre diffère) — c'est probablement la même pièce détectée deux fois ; vérifiez laquelle des deux est la bonne avant de vous en servir.";
+export const DUPLICATE_WARNING_MESSAGES = [DUPLICATE_WARNING_BOTH, DUPLICATE_WARNING_TITLE_ONLY, DUPLICATE_WARNING_INSTRUCTIONS_ONLY];
+
+export function hasDuplicateWarning(instructions: string | undefined | null): boolean {
+  return Boolean(instructions && DUPLICATE_WARNING_MESSAGES.some((message) => instructions.includes(message)));
+}
+
+// Retire l'avertissement (et le séparateur "\n\n" qui l'introduit) une fois
+// la pièce vérifiée directement dans le DAO — jamais un simple retrait de
+// texte au hasard : seul le texte EXACT déjà posé par sanitizeSubmissionItems
+// ci-dessus est reconnu et retiré.
+export function stripDuplicateWarning(instructions: string | undefined | null): string | undefined {
+  if (!instructions) return instructions ?? undefined;
+  for (const message of DUPLICATE_WARNING_MESSAGES) {
+    const withSeparator = `\n\n${message}`;
+    if (instructions.endsWith(withSeparator)) return instructions.slice(0, -withSeparator.length);
+    if (instructions === message) return undefined;
+  }
+  return instructions;
 }

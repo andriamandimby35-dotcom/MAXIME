@@ -434,6 +434,94 @@ export async function locateTitleInFullDocument(pdfBytes: Uint8Array, title: str
   }
 }
 
+// Dernier recours, encore plus tolérant que locateTitleInFullDocument :
+// certains DAO n'écrivent QUE le préfixe ("ANNEXE 2 :") en majuscules sur la
+// ligne de titre, le reste du titre — souvent la partie la plus distinctive
+// ("Pratiques de fraude et corruption") — restant en casse normale sur la
+// MÊME ligne/le même item de texte. pageHeadingLine (majuscules + gras exigés
+// sur TOUTE la zone de titre) ne retient alors que ce préfixe, largement
+// insuffisant pour confirmer 85% des mots du titre recherché. Vérifié en
+// vrai sur un DAO réel (page 48 : "ANNEXE 2 :" seul détecté au lieu de
+// "ANNEXE 2 : Pratiques de fraude et corruption").
+//
+// Repli : on regarde directement si l'essentiel du titre recherché apparaît
+// dans les tout premiers caractères de la page (après son numéro de page
+// imprimé) — jamais plus loin, pour ne jamais confondre avec une simple
+// mention dans un sommaire. Vérifié en vrai sur ce même DAO : la Partie III
+// cite elle aussi "Annexe 02 : Pratiques de fraude et corruption" dans son
+// sommaire (page 31), mais bien après le début de cette page-là (~200
+// caractères, après "PARTIE III – MARCHES ET FORMULAIRES A- Acte
+// d'engagement B- Localisation du Site...") — en originale hors de la petite
+// fenêtre utilisée ici. Exclut aussi toute occurrence immédiatement suivie de
+// "Page N" (même garde-fou que pageContainsSiblingTitle plus haut), pour le
+// cas où un autre DAO citerait, lui, un numéro de page dans son sommaire.
+//
+// Volontairement limité à une SEULE page (jamais d'extension aux pages
+// suivantes, contrairement à extractRelevantPageRange) : sans détection de
+// titre fiable pour savoir où cette pièce s'arrête vraiment, mieux vaut
+// renvoyer une seule page sûre que de deviner une plage plus large.
+const LENIENT_PAGE_START_WINDOW = 160;
+function stripLeadingPageNumber(pageText: string): string {
+  return pageText.replace(/^\s*\d{1,4}\s*/, "");
+}
+async function locateTitleAtPageStarts(pdfBytes: Uint8Array, title: string): Promise<RelevantPageRange> {
+  const keywords = phraseWords(title);
+  if (!keywords.length) return { pages: [], title: null };
+  try {
+    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
+      const text = await normalizedPageText(doc, pageNumber);
+      const windowText = stripLeadingPageNumber(text).slice(0, LENIENT_PAGE_START_WINDOW);
+      if (matchesTitle(windowText, keywords) && !/\bpage\s*\d{1,4}\b/.test(windowText)) {
+        return { pages: [pageNumber], title };
+      }
+    }
+    return { pages: [], title: null };
+  } catch {
+    return { pages: [], title: null };
+  }
+}
+
+// BUG trouvé en vérifiant les PDF générés un par un sur un vrai DAO (demande
+// de Maxime : qu'une analyse donne directement une liste et des PDF corrects,
+// pas seulement "signalés comme douteux") : quand l'IA DONNE une page pour
+// une pièce, mais que cette page s'avère être la MAUVAISE (pas juste décalée
+// de ±1, ce qu'extractRelevantPageRange corrige déjà) — son titre n'y est
+// jamais confirmé — on gardait jusqu'ici cette page fausse faute de mieux, au
+// lieu d'essayer la recherche à l'aveugle dans tout le document
+// (locateTitleInFullDocument) qui, elle, n'était déclenchée que pour les
+// pièces SANS AUCUNE page du tout. Cette fonction réunit les deux étapes en
+// UNE SEULE, partagée par printable-submission-document/route.ts (génère le
+// PDF d'une pièce) et resolve-duplicate-items.ts (vérifie/fusionne les
+// doublons affichés dans la liste) — pour que les deux ne puissent plus
+// jamais se désynchroniser au prochain correctif (même défaut déjà rencontré
+// plusieurs fois sur ce projet, voir l'historique de ce fichier et de
+// resolve-submission-items.ts).
+export async function resolveVerifiedPages(
+  pdfBytes: Uint8Array,
+  candidatePages: number[],
+  title: string,
+  options: { claimedByOtherPages?: Set<number>; siblingTitles?: string[] } = {},
+): Promise<RelevantPageRange> {
+  const direct = await extractRelevantPageRange(pdfBytes, candidatePages, title, options);
+  if (direct.title) return direct;
+  // La page donnée ne confirme pas le titre : on cherche ailleurs dans tout
+  // le document. Volontairement SANS passer claimedByOtherPages ici pour le
+  // filtrage final (locateTitleInFullDocument l'utilise déjà en interne comme
+  // simple garde-fou de dernier recours pendant l'extension au-delà de la
+  // page trouvée, jamais pour rejeter la page elle-même) : un titre confirmé
+  // par majuscules + gras sur la page trouvée est une preuve bien plus solide
+  // qu'une simple revendication de numéro de page par une autre pièce — voir
+  // le commentaire détaillé à l'appel équivalent dans
+  // printable-submission-document/route.ts.
+  const blind = await locateTitleInFullDocument(pdfBytes, title, options.claimedByOtherPages, options.siblingTitles);
+  if (blind.pages.length) return blind;
+  // Toujours rien trouvé (titre non confirmé par la mise en forme nulle
+  // part) : dernier recours, plus tolérant — voir locateTitleAtPageStarts.
+  const lenient = await locateTitleAtPageStarts(pdfBytes, title);
+  return lenient.pages.length ? lenient : direct;
+}
+
 /**
  * Trouve, dans candidatePages (élargi aux pages voisines, voir plus bas), la
  * page qui nomme vraiment "title" dans son propre titre, puis prend toutes

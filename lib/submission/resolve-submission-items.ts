@@ -27,6 +27,7 @@
 import { splitMergedDaoItems } from "@/lib/submission/split-merged-dao-items";
 import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
 import { sanitizeSubmissionItems, type WorkItemLike } from "@/lib/submission/sanitize-ai-analysis";
+import { resolveFlaggedDuplicateItems } from "@/lib/submission/resolve-duplicate-items";
 import type { TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
 
 export type ResolvedSubmissionItems = {
@@ -43,6 +44,13 @@ export type ResolvedSubmissionItems = {
 // sur la liste FINALE (après découpage), jamais avant, puisque le découpage
 // lui-même peut introduire un doublon de titre (observé en vrai : deux
 // morceaux d'une même pièce fusionnée gardant par erreur le même titre).
+// Enfin (demande explicite de Maxime : un dossier bon DIRECTEMENT, pas
+// seulement signalé comme douteux), on tente de VÉRIFIER et CORRIGER les
+// pièces signalées en double directement dans le DAO (voir
+// resolve-duplicate-items.ts) — toujours sans appel IA, et seulement quand le
+// DAO a déjà dû être rechargé pour une autre raison ou qu'au moins une pièce a
+// été signalée, pour ne jamais payer ce coût sur un dossier sans aucun
+// doublon.
 export async function resolveFinalSubmissionItems(
   rawSubmissionItems: TemplateDetectedItem[],
   workItems: WorkItemLike[],
@@ -51,22 +59,43 @@ export async function resolveFinalSubmissionItems(
   const mightHaveMergedItems = rawSubmissionItems.some((item) => item.template_origin === "dao"
     && knownPagesForItem(item).length > 1);
   let items = rawSubmissionItems;
-  if (mightHaveMergedItems && documentUrl) {
+  // Chargé une seule fois, réutilisé pour le découpage ET la vérification des
+  // doublons ci-dessous (évite de retélécharger deux fois le même DAO, parfois
+  // volumineux, dans le même calcul de liste).
+  let pdfBytes: Uint8Array | null = null;
+  const loadPdfBytes = async (): Promise<Uint8Array | null> => {
+    if (pdfBytes) return pdfBytes;
+    if (!documentUrl) return null;
     try {
       const response = await fetch(documentUrl);
-      if (response.ok) {
-        const pdfBytes = new Uint8Array(await response.arrayBuffer());
-        items = await splitMergedDaoItems(items, pdfBytes);
-      }
+      if (response.ok) pdfBytes = new Uint8Array(await response.arrayBuffer());
     } catch {
-      // DAO original temporairement inaccessible : on continue avec la
-      // liste non découpée plutôt que de bloquer l'affichage/la génération.
+      // DAO original temporairement inaccessible : les appelants ci-dessous
+      // continuent chacun avec leur repli habituel plutôt que d'échouer.
     }
+    return pdfBytes;
+  };
+  if (mightHaveMergedItems) {
+    const bytes = await loadPdfBytes();
+    if (bytes) items = await splitMergedDaoItems(items, bytes);
   }
   const { items: sanitizedItems, removedAsBordereauHeading, flaggedDuplicateTitles, flaggedDuplicateInstructions } =
     sanitizeSubmissionItems(items, workItems);
+  let finalItems: TemplateDetectedItem[] = sanitizedItems as TemplateDetectedItem[];
+  if (flaggedDuplicateTitles.length || flaggedDuplicateInstructions.length) {
+    const bytes = await loadPdfBytes();
+    if (bytes) {
+      try {
+        finalItems = await resolveFlaggedDuplicateItems(finalItems, bytes);
+      } catch {
+        // Échec inattendu de la vérification : on garde la liste simplement
+        // nettoyée/avertie ci-dessus plutôt que de faire échouer tout
+        // l'affichage du dossier pour cette seule étape supplémentaire.
+      }
+    }
+  }
   return {
-    items: sanitizedItems as TemplateDetectedItem[],
+    items: finalItems,
     removedAsBordereauHeading,
     flaggedDuplicateTitles,
     flaggedDuplicateInstructions,
