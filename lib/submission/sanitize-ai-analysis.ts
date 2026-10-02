@@ -58,10 +58,21 @@ export type SubmissionItemLike = {
   instructions?: string;
 };
 
+// BUG corrigé (vérifié en vrai : "Annexe2. Pratiques de fraude et
+// corruption" et "Annexe 2 : Pratiques de fraude et corruption" sont bien le
+// même titre, pourtant pas détectées comme doublon) : quand une lettre est
+// collée à un chiffre sans espace ("Annexe2"), l'ancienne normalisation la
+// gardait comme un seul bloc ("ANNEXE2"), différent du même titre écrit avec
+// un espace ("ANNEXE 2"). Générique par construction (une règle de
+// ponctuation, jamais un mot codé en dur) : on insère toujours un espace
+// entre une lettre et un chiffre collés avant de normaliser, pour que
+// "Annexe2" et "Annexe 2" deviennent strictement identiques.
 function normalizeTitle(value: string) {
   return value
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "")
+    .replace(/([a-zA-Z])([0-9])/g, "$1 $2")
+    .replace(/([0-9])([a-zA-Z])/g, "$1 $2")
     .replace(/[^a-z0-9]+/gi, " ")
     .trim()
     .toUpperCase();

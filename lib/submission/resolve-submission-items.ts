@@ -82,14 +82,19 @@ export async function resolveFinalSubmissionItems(
   const { items: sanitizedItems, removedAsBordereauHeading, flaggedDuplicateTitles, flaggedDuplicateInstructions } =
     sanitizeSubmissionItems(items, workItems);
   let finalItems: TemplateDetectedItem[] = sanitizedItems as TemplateDetectedItem[];
-  // Avant : on ne vérifiait les vraies pages dans le DAO que si le texte
-  // avait déjà signalé un doublon. Désormais, resolveFlaggedDuplicateItems
-  // vérifie TOUTE pièce d'origine "dao" (voir son commentaire de tête) pour
-  // repérer aussi les doublons que le texte seul ne peut pas voir — donc on
-  // la lance dès qu'il existe au moins une pièce "dao", pas seulement quand
-  // le texte a déjà grogné.
-  const hasDaoItems = finalItems.some((item) => item.template_origin === "dao");
-  if (hasDaoItems) {
+  // IMPORTANT (régression de performance vérifiée en vrai, corrigée) : lancer
+  // resolveFlaggedDuplicateItems sur TOUTES les pièces "dao" (sans ce
+  // déclencheur) vérifie aussi les pièces jamais retrouvées nulle part dans
+  // le DAO (ex. un fragment mal extrait) — chacune d'elles fait alors
+  // parcourir le document ENTIER avant de conclure "introuvable", ce qui a
+  // fait tourner la page plusieurs minutes en vrai sur Vercel (constaté en
+  // direct, pas seulement en théorie). On ne lance donc cette vérification
+  // (coûteuse) QUE pour les pièces déjà repérées comme suspectes par le texte
+  // (sanitizeSubmissionItems, rapide, sans lire le DAO) — voir
+  // sanitize-ai-analysis.ts, dont la détection a été élargie (espace
+  // lettre/chiffre) pour repérer aussi les doublons à ponctuation différente
+  // sans avoir besoin de vérifier TOUTES les pièces dans le vrai DAO.
+  if (flaggedDuplicateTitles.length || flaggedDuplicateInstructions.length) {
     const bytes = await loadPdfBytes();
     if (bytes) {
       try {

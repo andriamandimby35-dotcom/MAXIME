@@ -5,23 +5,31 @@
 // dossier affiché et les PDF générés soient bons DIRECTEMENT après l'analyse,
 // pas seulement signalés comme douteux à vérifier à la main.
 //
-// ÉLARGI (deuxième demande de Maxime, "il y a plein de dossier en double
-// encore") : sanitizeSubmissionItems ne repère un doublon QUE si le titre OU
-// les instructions de deux pièces se ressemblent fortement (texte quasi
-// identique). Or certains vrais doublons ont un titre ET des instructions
-// formulés différemment par l'IA (ex. "Annexe 2 : Pratiques de fraude et
-// corruption" / "Annexe2. Pratiques de fraude et corruption" — orthographe et
-// ponctuation différentes), ou un titre complètement différent pour un
-// fragment mal découpé. Ce correctif ne se fie donc plus du tout à la
-// ressemblance du texte : il vérifie directement, pour TOUTE pièce d'origine
-// "dao", la VRAIE page du DAO où son titre se trouve réellement (même méthode
-// fiable déjà utilisée ailleurs : majuscules + gras retrouvés sur la page,
-// voir trim-to-relevant-pages.ts), même si ça veut dire chercher au-delà de la
-// page que l'IA avait donnée. Deux pièces qui se vérifient sur la même vraie
-// page sont FORCÉMENT la même pièce (un DAO ne numérote jamais deux fois la
-// même page sous deux pièces différentes), quel que soit leur texte — c'est
-// la cause racine commune à tous les doublons, pas seulement ceux déjà
-// repérés par leur texte.
+// ÉLARGI UNE PREMIÈRE FOIS (deuxième demande de Maxime, "il y a plein de
+// dossier en double encore"), PUIS CORRIGÉ (régression de performance
+// constatée en vrai) : une première version de ce correctif vérifiait
+// directement, pour TOUTE pièce d'origine "dao" (plus seulement celles déjà
+// signalées par le texte), la VRAIE page du DAO où son titre se trouve
+// réellement — pour repérer aussi les doublons dont le titre ET les
+// instructions sont formulés différemment par l'IA (ex. "Annexe 2 :
+// Pratiques de fraude et corruption" / "Annexe2. Pratiques de fraude et
+// corruption" — orthographe et ponctuation différentes). Mais vérifier TOUTE
+// pièce "dao" veut dire aussi vérifier celles dont le titre ne se retrouve
+// NULLE PART dans le DAO (fragment mal extrait, paraphrase trop différente du
+// vrai titre de page) : chacune d'elles fait parcourir le document ENTIER
+// avant de conclure "introuvable" — ce qui a fait tourner la page du dossier
+// PLUSIEURS MINUTES en vrai sur Vercel (constaté en direct, pas seulement en
+// théorie), au lieu de quelques secondes. Revenu à la vérification limitée
+// aux pièces déjà signalées par le texte (hasDuplicateWarning, rapide, sans
+// lire le DAO) : le cas "Annexe2." / "Annexe 2 :" est maintenant repéré
+// autrement, à la source, en élargissant la normalisation du texte dans
+// sanitizeSubmissionItems (voir sanitize-ai-analysis.ts) pour qu'elle
+// considère ces deux écritures comme le même titre — sans avoir besoin de
+// vérifier TOUTES les pièces dans le vrai DAO à chaque ouverture de page.
+// Deux pièces qui se vérifient sur la même vraie page restent FORCÉMENT la
+// même pièce (un DAO ne numérote jamais deux fois la même page sous deux
+// pièces différentes) — ça reste la cause racine, seul le DÉCLENCHEUR (texte
+// suspect d'abord, jamais "toutes les pièces") a changé.
 //   - Si deux pièces signalées en double se vérifient toutes les deux sur la
 //     MÊME vraie page du DAO : c'est confirmé, une seule pièce suffit — on ne
 //     garde que la première, les autres sont retirées de la liste (vérifié
@@ -41,7 +49,7 @@
 //     avertissement d'origine, par prudence.
 import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
 import { resolveVerifiedPages } from "@/lib/submission/trim-to-relevant-pages";
-import { stripDuplicateWarning } from "@/lib/submission/sanitize-ai-analysis";
+import { hasDuplicateWarning, stripDuplicateWarning } from "@/lib/submission/sanitize-ai-analysis";
 
 type DuplicateCandidateItem = {
   title: string;
@@ -69,13 +77,18 @@ export async function resolveFlaggedDuplicateItems<T extends DuplicateCandidateI
   items: T[],
   pdfBytes: Uint8Array,
 ): Promise<T[]> {
-  // Avant : seulement les pièces déjà signalées en double par le texte
-  // (hasDuplicateWarning). Désormais : TOUTE pièce d'origine "dao" avec au
-  // moins une page connue, pour détecter aussi les doublons que le texte seul
-  // ne pouvait pas voir (voir commentaire en tête de fichier).
+  // IMPORTANT (vérifié en vrai, voir resolve-submission-items.ts) : ne
+  // JAMAIS élargir ce filtre à TOUTE pièce "dao" sans condition — une pièce
+  // dont le titre ne se retrouve nulle part dans le DAO fait parcourir le
+  // document ENTIER avant de conclure "introuvable", et ça a fait tourner la
+  // page plusieurs minutes en vrai sur Vercel. On se limite donc aux pièces
+  // déjà repérées comme suspectes par le texte (sanitizeSubmissionItems,
+  // rapide, sans lire le DAO) — sa détection a été élargie séparément
+  // (espace lettre/chiffre) pour repérer aussi les doublons à ponctuation
+  // différente sans avoir besoin de vérifier TOUTES les pièces ici.
   const flaggedIndexes = items
     .map((item, index) => ({ item, index }))
-    .filter(({ item }) => item.template_origin === "dao");
+    .filter(({ item }) => item.template_origin === "dao" && hasDuplicateWarning(item.instructions));
   if (!flaggedIndexes.length) return items;
 
   type Resolved = { startPage: number; pages: number[] };
