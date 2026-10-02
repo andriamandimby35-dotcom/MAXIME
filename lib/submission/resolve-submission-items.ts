@@ -82,7 +82,14 @@ export async function resolveFinalSubmissionItems(
   const { items: sanitizedItems, removedAsBordereauHeading, flaggedDuplicateTitles, flaggedDuplicateInstructions } =
     sanitizeSubmissionItems(items, workItems);
   let finalItems: TemplateDetectedItem[] = sanitizedItems as TemplateDetectedItem[];
-  if (flaggedDuplicateTitles.length || flaggedDuplicateInstructions.length) {
+  // Avant : on ne vérifiait les vraies pages dans le DAO que si le texte
+  // avait déjà signalé un doublon. Désormais, resolveFlaggedDuplicateItems
+  // vérifie TOUTE pièce d'origine "dao" (voir son commentaire de tête) pour
+  // repérer aussi les doublons que le texte seul ne peut pas voir — donc on
+  // la lance dès qu'il existe au moins une pièce "dao", pas seulement quand
+  // le texte a déjà grogné.
+  const hasDaoItems = finalItems.some((item) => item.template_origin === "dao");
+  if (hasDaoItems) {
     const bytes = await loadPdfBytes();
     if (bytes) {
       try {

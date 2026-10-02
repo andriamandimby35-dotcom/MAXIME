@@ -5,12 +5,23 @@
 // dossier affiché et les PDF générés soient bons DIRECTEMENT après l'analyse,
 // pas seulement signalés comme douteux à vérifier à la main.
 //
-// Correctif, toujours SANS appel IA supplémentaire (coût nul, conforme à la
-// règle d'économie de crédits) : pour chaque pièce signalée, on vérifie
-// directement dans le vrai DAO (même méthode fiable déjà utilisée ailleurs :
-// majuscules + gras retrouvés sur la page, voir trim-to-relevant-pages.ts) où
-// se trouve VRAIMENT son titre, même si ça veut dire chercher au-delà de la
-// page que l'IA avait donnée.
+// ÉLARGI (deuxième demande de Maxime, "il y a plein de dossier en double
+// encore") : sanitizeSubmissionItems ne repère un doublon QUE si le titre OU
+// les instructions de deux pièces se ressemblent fortement (texte quasi
+// identique). Or certains vrais doublons ont un titre ET des instructions
+// formulés différemment par l'IA (ex. "Annexe 2 : Pratiques de fraude et
+// corruption" / "Annexe2. Pratiques de fraude et corruption" — orthographe et
+// ponctuation différentes), ou un titre complètement différent pour un
+// fragment mal découpé. Ce correctif ne se fie donc plus du tout à la
+// ressemblance du texte : il vérifie directement, pour TOUTE pièce d'origine
+// "dao", la VRAIE page du DAO où son titre se trouve réellement (même méthode
+// fiable déjà utilisée ailleurs : majuscules + gras retrouvés sur la page,
+// voir trim-to-relevant-pages.ts), même si ça veut dire chercher au-delà de la
+// page que l'IA avait donnée. Deux pièces qui se vérifient sur la même vraie
+// page sont FORCÉMENT la même pièce (un DAO ne numérote jamais deux fois la
+// même page sous deux pièces différentes), quel que soit leur texte — c'est
+// la cause racine commune à tous les doublons, pas seulement ceux déjà
+// repérés par leur texte.
 //   - Si deux pièces signalées en double se vérifient toutes les deux sur la
 //     MÊME vraie page du DAO : c'est confirmé, une seule pièce suffit — on ne
 //     garde que la première, les autres sont retirées de la liste (vérifié
@@ -30,7 +41,7 @@
 //     avertissement d'origine, par prudence.
 import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
 import { resolveVerifiedPages } from "@/lib/submission/trim-to-relevant-pages";
-import { hasDuplicateWarning, stripDuplicateWarning } from "@/lib/submission/sanitize-ai-analysis";
+import { stripDuplicateWarning } from "@/lib/submission/sanitize-ai-analysis";
 
 type DuplicateCandidateItem = {
   title: string;
@@ -58,9 +69,13 @@ export async function resolveFlaggedDuplicateItems<T extends DuplicateCandidateI
   items: T[],
   pdfBytes: Uint8Array,
 ): Promise<T[]> {
+  // Avant : seulement les pièces déjà signalées en double par le texte
+  // (hasDuplicateWarning). Désormais : TOUTE pièce d'origine "dao" avec au
+  // moins une page connue, pour détecter aussi les doublons que le texte seul
+  // ne pouvait pas voir (voir commentaire en tête de fichier).
   const flaggedIndexes = items
     .map((item, index) => ({ item, index }))
-    .filter(({ item }) => item.template_origin === "dao" && hasDuplicateWarning(item.instructions));
+    .filter(({ item }) => item.template_origin === "dao");
   if (!flaggedIndexes.length) return items;
 
   type Resolved = { startPage: number; pages: number[] };

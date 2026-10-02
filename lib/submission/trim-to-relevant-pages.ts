@@ -534,13 +534,33 @@ function stripLeadingPageNumber(pageText: string): string {
 // d'une autre pièce dès ses 160 premiers caractères. On réutilise les mêmes
 // titres déjà connus des autres pièces (siblingTitles, voir leur usage plus
 // haut dans ce fichier) pour ce contrôle.
-function windowContainsOtherSiblingTitle(windowText: string, normalizedSiblingTitles: string[]): boolean {
-  return normalizedSiblingTitles.some((otherTitle) => otherTitle.length >= 12 && windowText.includes(otherTitle));
+// BUG corrigé (vérifié en vrai : "Annexe2. Pratiques de fraude et
+// corruption", vraiment dupliquée sur la même page 48 que "Annexe 2 :
+// Pratiques de fraude et corruption", ne pouvait plus jamais se confirmer
+// une fois siblingTitles élargi à TOUTES les pièces, voir
+// resolve-duplicate-items.ts) : l'ancien garde-fou rejetait la page dès
+// qu'UN SEUL titre d'une autre pièce apparaissait dans la fenêtre — or la
+// page 48 est le vrai contenu de CES DEUX pièces quasi identiques, donc le
+// titre de l'une s'y retrouve forcément aussi, sans que ce soit un sommaire.
+// Un vrai sommaire (comme celui trouvé page 11 : "A1- IDENTIFICATION DU
+// CANDIDAT A2- CAPACITÉS TECHNIQUES A3- CAPACITÉS FINANCIÈRES...") énumère
+// toujours PLUSIEURS pièces différentes à la suite, jamais une seule : on
+// exige donc de retrouver au moins DEUX autres titres (pas un seul) dans la
+// fenêtre pour conclure que c'est un sommaire — un simple doublon de titre
+// (une seule autre pièce reconnue) ne déclenche plus le rejet. On réutilise
+// la même comparaison tolérante par mots que matchesTitle (pas une simple
+// inclusion de texte exacte) pour ne pas rater un sibling à cause d'un tiret
+// au lieu d'un deux-points, ou d'un pluriel différent.
+function windowContainsOtherSiblingTitle(windowText: string, siblingKeywordSets: string[][]): boolean {
+  const matchingSiblings = siblingKeywordSets.filter((keywords) => matchesTitle(windowText, keywords)).length;
+  return matchingSiblings >= 2;
 }
 async function locateTitleAtPageStarts(pdfBytes: Uint8Array, title: string, siblingTitles: string[] = []): Promise<RelevantPageRange> {
   const keywords = phraseWords(title);
   if (!keywords.length) return { pages: [], title: null };
-  const normalizedSiblingTitles = siblingTitles.map((otherTitle) => normalizeText(otherTitle));
+  const siblingKeywordSets = siblingTitles
+    .filter((otherTitle) => otherTitle.length >= 12)
+    .map((otherTitle) => phraseWords(otherTitle));
   try {
     const doc = await loadPdfDocument(pdfBytes);
     for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
@@ -549,7 +569,7 @@ async function locateTitleAtPageStarts(pdfBytes: Uint8Array, title: string, sibl
       if (
         matchesTitle(windowText, keywords) &&
         !/\bpage\s*\d{1,4}\b/.test(windowText) &&
-        !windowContainsOtherSiblingTitle(windowText, normalizedSiblingTitles)
+        !windowContainsOtherSiblingTitle(windowText, siblingKeywordSets)
       ) {
         return { pages: [pageNumber], title };
       }
@@ -618,11 +638,25 @@ export async function resolveVerifiedPages(
 // celle donnée), mais assez pour exclure une simple mention en passant.
 const MIN_KEYWORD_MATCH_RATIO = 0.85;
 
+// BUG corrigé (vérifié en vrai : "Annexe2. Pratiques de fraude et
+// corruption" ne se retrouvait jamais sur la page 48, qui porte pourtant ce
+// même titre mot pour mot — juste écrit "Annexe 2 :" AVEC un espace entre la
+// lettre et le chiffre) : quand le titre demandé colle une lettre à un
+// chiffre ("Annexe2", "A1Fiche"...) sans espace, l'ancien découpage produisait
+// un seul mot-clé "annexe2", introuvable tel quel dans le texte de la page
+// (qui lui a "annexe 2", avec l'espace). Générique par construction (une
+// simple règle de ponctuation, jamais un mot ni un titre codé en dur) : on
+// insère systématiquement un espace entre une lettre et un chiffre collés
+// (dans les deux sens) avant de découper en mots, pour que "Annexe2" et
+// "Annexe 2" produisent toujours les mêmes mots-clés ("annexe", "2"), quel
+// que soit le DAO ou la pièce concernée.
 function phraseWords(title: string) {
   return title
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "")
     .toLocaleLowerCase("fr-FR")
+    .replace(/([a-z])([0-9])/g, "$1 $2")
+    .replace(/([0-9])([a-z])/g, "$1 $2")
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
     .filter(Boolean);
