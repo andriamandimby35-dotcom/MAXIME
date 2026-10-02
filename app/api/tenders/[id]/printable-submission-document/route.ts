@@ -321,7 +321,7 @@ function buildExecutionPlanningTable(items: PlanningWorkItem[], executionDays: n
 // main dans Supabase, et sans avoir besoin de relancer une analyse du DAO
 // (qui ne sert \u00e0 rien ici : le souci vient du fichier PDF d\u00e9j\u00e0 g\u00e9n\u00e9r\u00e9, jamais
 // de l'analyse elle-m\u00eame).
-const GENERATED_PDF_VERSION = "v9";
+const GENERATED_PDF_VERSION = "v10";
 function pdfStorageName(title: string, kind: string, workerIndex: number) {
   const normalized = title.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 96) || "document";
   return `${kind === "form_to_complete" ? "formulaire" : "piece"}-${normalized}-${workerIndex + 1}-${GENERATED_PDF_VERSION}.pdf`;
@@ -1048,12 +1048,53 @@ async function generatePrintableSubmissionPdf(request: Request, context: { param
           // Titre du document VRAIMENT confirmé (majuscules + gras retrouvés
           // sur la page DAO elle-même) — un plan n'a pas de texte à ce titre,
           // donc pas de titre confirmé par cette méthode pour lui.
-          const { pages: verifiedPages, title: verifiedTitle } = /\bplans?\b/i.test(title)
+          let { pages: verifiedPages, title: verifiedTitle } = /\bplans?\b/i.test(title)
             ? { pages: await expandToContiguousPlanRange(title, candidatePages, analysis?.submission_items ?? [], documentPageCount), title: null as string | null }
             : await extractRelevantPageRange(bytes, candidatePages, detectedTemplate.title ?? title, {
               claimedByOtherPages: otherItemsClaimedPages(analysis?.submission_items ?? [], detectedTemplate.title ?? title),
               siblingTitles: siblingTitlesForThisItem,
             });
+          // BUG trouvé en vérifiant les PDF générés un par un sur un vrai DAO
+          // (demande explicite de Maxime : que l'analyse d'un DAO donne
+          // directement une liste et des PDF corrects, pas seulement
+          // "signalés comme douteux"). Jusqu'ici, quand la page donnée par
+          // l'IA (candidatePages) était carrément la MAUVAISE page — pas
+          // juste légèrement décalée, ce qu'extractRelevantPageRange corrige
+          // déjà en élargissant de ±1 page — son propre titre n'y était
+          // jamais confirmé (verifiedTitle restait null), et on gardait quand
+          // même cette page fausse faute de mieux (verifiedPages inchangé).
+          // Vérifié en vrai sur plusieurs pièces d'un DAO réel : "Annexe 1 :
+          // Modèle de garantie bancaire de bonne exécution" pointait sur les
+          // pages 19, 31 ou 45 selon l'entrée en double, alors que la vraie
+          // page (47) n'était aucune des trois ; "Annexe 2 : Pratiques de
+          // fraude et corruption" pointait sur les pages 32-33 (en réalité
+          // l'acte d'engagement) alors que la vraie page est 48. Dans les deux
+          // cas, le même mécanisme de recherche "à l'aveugle" dans tout le
+          // document (locateTitleInFullDocument, déjà utilisé plus bas quand
+          // l'IA n'a donné AUCUNE page pour une pièce) retrouve la bonne page
+          // sans difficulté, puisqu'il cherche ce même titre confirmé
+          // (majuscules + gras) partout dans le DAO plutôt que dans la seule
+          // plage donnée par l'IA. On étend donc ici ce même filet de
+          // sécurité à ce cas-ci : la page donnée s'avère fausse, on cherche
+          // la vraie ailleurs dans le DAO avant d'abandonner et de garder la
+          // page fausse. Jamais appliqué aux plans (sans texte, donc sans
+          // titre à confirmer par nature — verifiedTitle y est toujours null,
+          // ce qui ne veut rien dire d'anormal pour eux). Générique par
+          // construction (le titre cherché reste un paramètre, jamais codé en
+          // dur) : s'applique pareil à n'importe quelle pièce, sur n'importe
+          // quel DAO.
+          if (!verifiedTitle && !/\bplans?\b/i.test(title)) {
+            try {
+              const blindSearchResult = await locateTitleInFullDocument(bytes, detectedTemplate.title ?? title, otherItemsClaimedPages(analysis?.submission_items ?? [], detectedTemplate.title ?? title), siblingTitlesForThisItem);
+              const locatedPages = pagesNotClaimedByOtherItems(analysis?.submission_items ?? [], detectedTemplate.title ?? title, blindSearchResult.pages);
+              if (locatedPages.length) {
+                verifiedPages = locatedPages;
+                verifiedTitle = blindSearchResult.title;
+              }
+            } catch (blindSearchError) {
+              console.error("Blind full-document search fallback failed (wrong-page recovery)", blindSearchError);
+            }
+          }
           const templateFields = detectedTemplate.fields ?? [];
           let pdf: Buffer;
           let allTableCellsResolvedOnRealPage = false;
