@@ -3,6 +3,39 @@ import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { significantWords } from "@/lib/submission/title-match";
 import { looksLikeBordereauHeading } from "@/lib/submission/bordereau-heading";
 
+type PdfJsDocument = Awaited<ReturnType<typeof getDocument>["promise"]>;
+
+// BUG corrigé (vérifié en vrai : la page "Dossier de soumission" restait
+// bloquée sur "Chargement…" bien plus longtemps qu'avant, juste après
+// l'ajout de resolveFlaggedDuplicateItems dans resolve-duplicate-items.ts) :
+// TOUTES les fonctions de ce fichier reçoivent le même DAO déjà en mémoire
+// (pdfBytes, chargé UNE SEULE FOIS par l'appelant, voir loadPdfBytes dans
+// resolve-submission-items.ts) mais reconstruisaient chacune, à chaque
+// appel, un document PDF.js ENTIÈREMENT NEUF à partir de ces octets
+// (getDocument(...)) — un DAO volumineux (ici ~48 Mo, 268 pages) coûte cher
+// à analyser depuis zéro. Tant que chaque pièce n'appelait qu'UNE fois ce
+// fichier (impression d'une seule pièce à la fois), ce coût restait
+// supportable ; mais resolveFlaggedDuplicateItems appelle désormais
+// resolveVerifiedPages (qui peut lui-même tenter jusqu'à 3 façons de
+// retrouver une pièce) pour CHAQUE pièce signalée en double d'un même DAO —
+// jusqu'à une douzaine sur ce DAO réel — ce qui ré-analysait le même DAO
+// entier jusqu'à plusieurs dizaines de fois DANS LA MÊME requête de page.
+// Corrigé une seule fois ici, pour toutes les fonctions de ce fichier :
+// un simple cache par RÉFÉRENCE d'objet (WeakMap, jamais par contenu —
+// comparer le contenu d'un DAO de plusieurs dizaines de Mo à chaque appel
+// coûterait presque aussi cher que le problème qu'on corrige) suffit,
+// puisque tous les appelants de ce fichier passent déjà le MÊME objet
+// pdfBytes pour un DAO donné, sans jamais le recopier entre deux appels.
+const parsedDocumentCache = new WeakMap<Uint8Array, Promise<PdfJsDocument>>();
+function loadPdfDocument(pdfBytes: Uint8Array): Promise<PdfJsDocument> {
+  let cached = parsedDocumentCache.get(pdfBytes);
+  if (!cached) {
+    cached = getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    parsedDocumentCache.set(pdfBytes, cached);
+  }
+  return cached;
+}
+
 // Une plage de pages tirée d'une référence textuelle ("Pages 31-46, Partie
 // III") ou de numéros extraits par l'IA peut englober plusieurs documents à
 // la suite (table des matières, un autre modèle, PUIS la pièce demandée), OU
@@ -227,7 +260,26 @@ type PageTitle = { titleLine: string | null; heading: string };
 // juste plus bas sur la page. Aucune ligne trouvée : la page n'a pas de
 // titre propre, elle appartient donc au document déjà en cours (voir
 // isStopBoundary plus bas).
-async function pageHeadingLine(doc: Awaited<ReturnType<typeof getDocument>["promise"]>, pageNumber: number): Promise<PageTitle> {
+// Mémorisé par (document, numéro de page), même raison et même sécurité que
+// normalizedPageText ci-dessus : cette fonction est la plus coûteuse du
+// fichier (getTextContent, parfois getOperatorList pour la couleur) et la
+// plus souvent redemandée pour la MÊME page depuis plusieurs pièces
+// signalées en double d'un même DAO.
+const pageHeadingLineCache = new WeakMap<PdfJsDocument, Map<number, Promise<PageTitle>>>();
+async function pageHeadingLine(doc: PdfJsDocument, pageNumber: number): Promise<PageTitle> {
+  let perDoc = pageHeadingLineCache.get(doc);
+  if (!perDoc) {
+    perDoc = new Map();
+    pageHeadingLineCache.set(doc, perDoc);
+  }
+  let cached = perDoc.get(pageNumber);
+  if (!cached) {
+    cached = pageHeadingLineUncached(doc, pageNumber);
+    perDoc.set(pageNumber, cached);
+  }
+  return cached;
+}
+async function pageHeadingLineUncached(doc: PdfJsDocument, pageNumber: number): Promise<PageTitle> {
   const page = await doc.getPage(pageNumber);
   const content = await page.getTextContent();
   const styles = (content.styles ?? {}) as Record<string, { fontFamily?: string }>;
@@ -426,7 +478,7 @@ export async function trimToRelevantStart(pdfBytes: Uint8Array, candidatePages: 
 // n'importe quelle pièce, sur n'importe quel DAO, pas seulement le CCAP.
 export async function locateTitleInFullDocument(pdfBytes: Uint8Array, title: string, claimedByOtherPages?: Set<number>, siblingTitles?: string[]): Promise<RelevantPageRange> {
   try {
-    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const doc = await loadPdfDocument(pdfBytes);
     const allPages = Array.from({ length: doc.numPages }, (_, index) => index + 1);
     return await extractRelevantPageRange(pdfBytes, allPages, title, { returnEmptyIfNotFound: true, claimedByOtherPages, siblingTitles });
   } catch {
@@ -468,7 +520,7 @@ async function locateTitleAtPageStarts(pdfBytes: Uint8Array, title: string): Pro
   const keywords = phraseWords(title);
   if (!keywords.length) return { pages: [], title: null };
   try {
-    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const doc = await loadPdfDocument(pdfBytes);
     for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
       const text = await normalizedPageText(doc, pageNumber);
       const windowText = stripLeadingPageNumber(text).slice(0, LENIENT_PAGE_START_WINDOW);
@@ -633,14 +685,34 @@ function pageContainsSiblingTitle(normalizedPageText: string, normalizedSiblingT
   });
 }
 
-async function normalizedPageText(doc: Awaited<ReturnType<typeof getDocument>["promise"]>, pageNumber: number): Promise<string> {
-  try {
-    const page = await doc.getPage(pageNumber);
-    const content = await page.getTextContent();
-    return normalizeText(content.items.map((item) => ("str" in item ? (item as { str?: string }).str ?? "" : "")).join(" "));
-  } catch {
-    return "";
+// Mémorisé par (document, numéro de page) : même raison que loadPdfDocument
+// plus haut — avec UN SEUL document désormais partagé entre tous les appels
+// sur un même DAO, plusieurs pièces signalées en double (voire plusieurs
+// tentatives de resolveVerifiedPages pour UNE SEULE pièce) redemandaient
+// quand même le texte des MÊMES pages, encore et encore, dans la même
+// requête. Toujours sans danger : le texte d'une page déjà analysée ne
+// change jamais entre deux appels pour le même document.
+const normalizedPageTextCache = new WeakMap<PdfJsDocument, Map<number, Promise<string>>>();
+async function normalizedPageText(doc: PdfJsDocument, pageNumber: number): Promise<string> {
+  let perDoc = normalizedPageTextCache.get(doc);
+  if (!perDoc) {
+    perDoc = new Map();
+    normalizedPageTextCache.set(doc, perDoc);
   }
+  let cached = perDoc.get(pageNumber);
+  if (!cached) {
+    cached = (async () => {
+      try {
+        const page = await doc.getPage(pageNumber);
+        const content = await page.getTextContent();
+        return normalizeText(content.items.map((item) => ("str" in item ? (item as { str?: string }).str ?? "" : "")).join(" "));
+      } catch {
+        return "";
+      }
+    })();
+    perDoc.set(pageNumber, cached);
+  }
+  return cached;
 }
 
 // Comme normalizedPageText, mais SANS mettre en minuscule ni retirer les
@@ -720,7 +792,7 @@ export async function extractRelevantPageRange(
   if (!keywords.length) return { pages: candidatePages, title: null };
   const normalizedSiblingTitles = (options.siblingTitles ?? []).map((otherTitle) => normalizeText(otherTitle)).filter(Boolean);
   try {
-    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const doc = await loadPdfDocument(pdfBytes);
     // La page citée par l'IA (ou par le sommaire du DAO) peut être décalée
     // d'une unité (pagination différente entre le PDF et le sommaire, ou
     // simple erreur de l'IA) : on vérifie donc aussi la page juste avant et
@@ -1009,7 +1081,7 @@ function matchTocEntry(pageText: string, explicitNumber: number | null, toc: Toc
 export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: number[], ownTableTitles?: string[]): Promise<MergedItemSegment[]> {
   if (!sortedPages.length) return [];
   try {
-    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const doc = await loadPdfDocument(pdfBytes);
 
     // RÈGLE GÉNÉRALE (demandée après un cas réel, mais valable pour n'importe
     // quel DAO) : quand le DAO original demande deux tableaux sur DEUX PAGES
@@ -1175,7 +1247,7 @@ export async function splitPagesByOwnTitle(pdfBytes: Uint8Array, sortedPages: nu
 // split-merged-dao-items.ts, passe finale de correction de titre.
 export async function firstPageAnnexeNumber(pdfBytes: Uint8Array, pageNumber: number): Promise<number | null> {
   try {
-    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const doc = await loadPdfDocument(pdfBytes);
     if (pageNumber < 1 || pageNumber > doc.numPages) return null;
     return annexeNumberAtPageStart(await normalizedPageText(doc, pageNumber));
   } catch {
@@ -1208,7 +1280,7 @@ export type ResolvedAnnexeTitle = { number: number; title: string };
 // affiché à Maxime.
 export async function resolveAnnexeTitleForPage(pdfBytes: Uint8Array, pageNumber: number, referenceNumber: number | null = null, allowTitleOnlyMatch = true): Promise<ResolvedAnnexeTitle | null> {
   try {
-    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const doc = await loadPdfDocument(pdfBytes);
     if (pageNumber < 1 || pageNumber > doc.numPages) return null;
     const pageText = await normalizedPageText(doc, pageNumber);
     const explicitNumber = annexeNumberAtPageStart(pageText);
@@ -1275,7 +1347,7 @@ export async function resolveAnnexeTitleForPage(pdfBytes: Uint8Array, pageNumber
 export async function extendDaoItemPages(pdfBytes: Uint8Array, lastKnownPage: number, claimedPages: Set<number>, referenceAnnexeNumber: number | null, maxExtra = 200): Promise<number[]> {
   const extra: number[] = [];
   try {
-    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const doc = await loadPdfDocument(pdfBytes);
     const toc = await extractAnnexeTableOfContents(doc);
     const used = new Set<number>();
     const reference = referenceAnnexeNumber;
@@ -1327,7 +1399,7 @@ export async function extendDaoItemPages(pdfBytes: Uint8Array, lastKnownPage: nu
 // l'annexe 3 alinéa 2") ne doit jamais déclencher de masquage.
 export async function findTrailingBoundaryCutoffY(pdfBytes: Uint8Array, pageNumber: number, ownAnnexeNumber: number | null): Promise<number | null> {
   try {
-    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const doc = await loadPdfDocument(pdfBytes);
     if (pageNumber < 1 || pageNumber > doc.numPages) return null;
     const page = await doc.getPage(pageNumber);
     const content = await page.getTextContent();
@@ -1381,7 +1453,7 @@ export async function findTrailingBoundaryCutoffY(pdfBytes: Uint8Array, pageNumb
 // pièce précédente — voir la passe finale de fusion dans ce même fichier.
 export async function pageHasReliableOwnTitle(pdfBytes: Uint8Array, pageNumber: number): Promise<boolean> {
   try {
-    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const doc = await loadPdfDocument(pdfBytes);
     if (pageNumber < 1 || pageNumber > doc.numPages) return false;
     const { titleLine } = await pageHeadingLine(doc, pageNumber);
     return Boolean(titleLine);
@@ -1400,7 +1472,7 @@ export async function pagesContainingText(pdfBytes: Uint8Array, pages: number[],
   const matches = new Set<number>();
   if (!needle.trim() || !pages.length) return matches;
   try {
-    const doc = await getDocument({ data: pdfBytes.slice(), useSystemFonts: true }).promise;
+    const doc = await loadPdfDocument(pdfBytes);
     for (const pageNumber of pages) {
       if (pageNumber < 1 || pageNumber > doc.numPages) continue;
       const text = await normalizedPageText(doc, pageNumber);
