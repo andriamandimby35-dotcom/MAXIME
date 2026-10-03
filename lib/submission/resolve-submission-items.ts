@@ -63,15 +63,41 @@ export async function resolveFinalSubmissionItems(
   // doublons ci-dessous (évite de retélécharger deux fois le même DAO, parfois
   // volumineux, dans le même calcul de liste).
   let pdfBytes: Uint8Array | null = null;
+  // BUG corrigé (vérifié en vrai : la page du dossier restait bloquée sur
+  // "Chargement…" plusieurs minutes, sans jamais afficher ni erreur ni
+  // résultat) : ce fetch() n'avait AUCUNE limite de temps — si le
+  // téléchargement du DAO (un fichier volumineux) est anormalement lent ou
+  // reste bloqué côté réseau, toute la page attendait indéfiniment, bien
+  // au-delà du temps que prend normalement l'analyse elle-même (quelques
+  // secondes à une trentaine de secondes). On limite désormais ce
+  // téléchargement à TIMEOUT_MS : au-delà, on abandonne proprement et les
+  // appelants ci-dessous continuent avec leur repli habituel (comme pour tout
+  // autre échec de téléchargement), au lieu de bloquer la page indéfiniment.
+  // Un message est journalisé pour qu'on puisse repérer ce cas précis dans
+  // les journaux Vercel plutôt que de le confondre avec une page simplement
+  // lente.
+  const PDF_FETCH_TIMEOUT_MS = 90_000;
   const loadPdfBytes = async (): Promise<Uint8Array | null> => {
     if (pdfBytes) return pdfBytes;
     if (!documentUrl) return null;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PDF_FETCH_TIMEOUT_MS);
     try {
-      const response = await fetch(documentUrl);
+      const response = await fetch(documentUrl, { signal: controller.signal });
       if (response.ok) pdfBytes = new Uint8Array(await response.arrayBuffer());
-    } catch {
-      // DAO original temporairement inaccessible : les appelants ci-dessous
-      // continuent chacun avec leur repli habituel plutôt que d'échouer.
+    } catch (error) {
+      const isTimeout = error instanceof Error && error.name === "AbortError";
+      console.error(
+        isTimeout
+          ? `[resolveFinalSubmissionItems] Téléchargement du DAO abandonné après ${PDF_FETCH_TIMEOUT_MS}ms (documentUrl=${documentUrl})`
+          : `[resolveFinalSubmissionItems] Téléchargement du DAO impossible (documentUrl=${documentUrl})`,
+        error,
+      );
+      // DAO original temporairement inaccessible ou trop lent : les
+      // appelants ci-dessous continuent chacun avec leur repli habituel
+      // plutôt que de bloquer toute la page indéfiniment.
+    } finally {
+      clearTimeout(timeout);
     }
     return pdfBytes;
   };
