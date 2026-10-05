@@ -28,6 +28,7 @@ import { splitMergedDaoItems } from "@/lib/submission/split-merged-dao-items";
 import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
 import { sanitizeSubmissionItems, type WorkItemLike } from "@/lib/submission/sanitize-ai-analysis";
 import { resolveFlaggedDuplicateItems } from "@/lib/submission/resolve-duplicate-items";
+import { mergeSamePieceDuplicates } from "@/lib/submission/merge-same-label-duplicates";
 import type { TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
 
 export type ResolvedSubmissionItems = {
@@ -140,6 +141,9 @@ export async function resolveFinalSubmissionItems(
       }
     }
   }
+  // Dernier filet, texte seul (aucun coût de temps) : même pièce formulée
+  // différemment ("Modèle de planning..." / "Planning...", même étiquette).
+  finalItems = mergeSamePieceDuplicates(finalItems);
   logStep("terminé");
   return {
     items: finalItems,

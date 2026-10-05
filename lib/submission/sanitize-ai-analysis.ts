@@ -84,7 +84,7 @@ export function normalizeTitle(value: string) {
 // une fois normalisé) pour ne jamais déclencher sur une instruction courte et
 // générique qui pourrait légitimement se répéter (ex. "Signer et dater.").
 const MIN_INSTRUCTIONS_LENGTH_FOR_DUPLICATE_CHECK = 30;
-function normalizeInstructions(value: string) {
+export function normalizeInstructions(value: string) {
   return value
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "")
