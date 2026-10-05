@@ -624,6 +624,19 @@ function leadingPieceLabel(title: string): string | null {
   return label;
 }
 
+// Une page dont le texte COMMENCE par "Annexe N" avec un N différent de celui
+// de la pièce en cours est le début d'une AUTRE annexe — même si son titre
+// n'est ni en gras ni en majuscules (vérifié : "ANNEXE 2 : Pratiques de fraude
+// et corruption", page 48, avalée à la suite de "ANNEXE 1 AU CCAP", page 47,
+// quand l'Annexe 2 n'est pas listée comme pièce à part). Volontairement limité
+// aux "Annexe N" (des documents distincts) : un formulaire "A1 à A5" a, lui,
+// légitimement des pages qui commencent par A2, A3...
+function startsOtherAnnexe(pageText: string, ownLabel: string | null): boolean {
+  if (!ownLabel || !ownLabel.startsWith("annexe")) return false;
+  const startLabel = leadingPieceLabel(stripLeadingPageNumber(pageText).slice(0, 40));
+  return Boolean(startLabel && startLabel.startsWith("annexe") && startLabel !== ownLabel);
+}
+
 // BUG corrigé (vérifié en vrai : "Annexe 1 : Modèle de garantie bancaire de
 // bonne exécution", annoncée page 19 par l'IA — qui est en réalité la
 // garantie de SOUMISSION "B 1" — n'était jamais retrouvée à sa vraie page 47,
@@ -759,7 +772,17 @@ export async function resolveVerifiedPages(
   // Toujours rien trouvé (titre non confirmé par la mise en forme nulle
   // part) : dernier recours, plus tolérant — voir locateTitleAtPageStarts.
   const lenient = await locateTitleAtPageStarts(pdfBytes, title, options.siblingTitles, options.claimedByOtherPages);
-  return lenient.pages.length ? lenient : direct;
+  if (!lenient.pages.length) return direct;
+  // La recherche tolérante ne renvoie qu'UNE page (voir son commentaire) : si
+  // cette page fait partie de celles que l'IA annonçait pour cette pièce, on
+  // garde aussi les pages annoncées qui la SUIVENT (vérifié : "Annexe 7 :
+  // Panneau de chantier", annoncée pages 262 à 264, était réduite à la seule
+  // page 262 alors que les deux suivantes appartiennent bien à la pièce).
+  const start = lenient.pages[0];
+  if (lenient.pages.length === 1 && candidatePages.includes(start)) {
+    return { ...lenient, pages: [...new Set([start, ...candidatePages.filter((page) => page > start)])].sort((a, b) => a - b) };
+  }
+  return lenient;
 }
 
 /**
@@ -1064,6 +1087,7 @@ export async function extractRelevantPageRange(
     // toute la plage de départ) sauf pour une recherche à l'aveugle, où
     // "toute la plage" serait le DAO entier — voir options ci-dessus.
     if (startIndex === -1) return { pages: options.returnEmptyIfNotFound ? [] : candidatePages, title: null };
+    const ownAnnexeLabel = leadingPieceLabel(detectedTitle ?? title) ?? leadingPieceLabel(title);
     const kept = [sorted[startIndex]];
     let previousPage = sorted[startIndex];
     let stoppedEarly = false;
@@ -1088,7 +1112,8 @@ export async function extractRelevantPageRange(
         // avant même de se fier à isStopBoundary (qui exige une mise en
         // forme distincte), on vérifie si le titre EXACT d'une autre pièce
         // du dossier apparaît quelque part sur cette page précise.
-        const siblingHit = normalizedSiblingTitles.length > 0 && pageContainsSiblingTitle(await normalizedPageText(doc, pageNumber), normalizedSiblingTitles);
+        const givenPageText = await normalizedPageText(doc, pageNumber);
+        const siblingHit = (normalizedSiblingTitles.length > 0 && pageContainsSiblingTitle(givenPageText, normalizedSiblingTitles)) || (!isIsolatedJump && startsOtherAnnexe(givenPageText, ownAnnexeLabel));
         if (siblingHit) {
           if (isIsolatedJump) { previousPage = pageNumber; continue; } // Page isolée étrangère : simplement ignorée, comme d'habitude.
           stoppedEarly = true;
@@ -1125,7 +1150,7 @@ export async function extractRelevantPageRange(
           const { heading, titleLine } = await pageHeadingLine(doc, pageNumber);
           const pageText = await normalizedPageText(doc, pageNumber);
           const siblingHit = normalizedSiblingTitles.length > 0 && pageContainsSiblingTitle(pageText, normalizedSiblingTitles);
-          if (siblingHit || isStopBoundary(titleLine, heading, referenceHeading, keywords)) break;
+          if (siblingHit || startsOtherAnnexe(pageText, ownAnnexeLabel) || isStopBoundary(titleLine, heading, referenceHeading, keywords)) break;
           // Le contenu réel de cette page ne montre RIEN d'un autre document
           // (ni titre distinct, ni texte d'une pièce connue) : une simple
           // revendication de ce numéro par une autre pièce (souvent
