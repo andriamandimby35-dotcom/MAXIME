@@ -108,11 +108,13 @@ export async function createPrintableSubmissionPdf(title: string, company: Recor
     const ratios = table.column_ratios?.length === columns.length && table.column_ratios.every((value) => value > 0)
       ? table.column_ratios
       : columns.map((column, columnIndex) => {
+          // L'entête est dessiné plus gros que les cases de données et ne peut
+          // pas rétrécir autant : on lui compte une place un peu plus grande.
           const longest = Math.max(
-            cleanText(column ?? "").length,
+            cleanText(column ?? "").length * 1.5,
             ...rows.map((row) => cleanText(String(row[columnIndex] ?? "")).length),
           );
-          return Math.min(60, Math.max(8, longest + 4));
+          return Math.min(110, Math.max(10, longest + 7));
         });
     const ratioSum = ratios.reduce((sum, value) => sum + value, 0) || 1;
     const widths = ratios.map((ratio) => (ratio / ratioSum) * totalWidth);
@@ -121,6 +123,17 @@ export async function createPrintableSubmissionPdf(title: string, company: Recor
     if (y - (TITLE_GAP + ROW_HEIGHT) < BOTTOM_Y) { page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]); y = TOP_Y; }
     page.drawText(cleanText(table.title || "Tableau du DAO"), { x: MARGIN_X, y, size: 12, font: boldFont, color: rgb(0, 0, 0) });
     y -= TITLE_GAP;
+
+    // Taille de police UNIFORME par colonne de données : la plus petite taille
+    // (entre 8 et 6 pt) qui fait tenir le texte le plus long de la colonne,
+    // plutôt qu'une taille différente par ligne (qui donnait un tableau
+    // irrégulier, et un texte de description coupé quand la taille retenue
+    // à l'écran était plus grande que celle calculée ici).
+    const columnFontSizes = columns.map((_, columnIndex) => {
+      const maxWidth = Math.max(1, widths[columnIndex] - 6);
+      const longestAtDefault = Math.max(1, ...rows.map((row) => font.widthOfTextAtSize(cleanText(String(row[columnIndex] ?? "")), 8)));
+      return longestAtDefault > maxWidth ? Math.max(6, 8 * (maxWidth / longestAtDefault)) : 8;
+    });
 
     const drawRow = (values: string[], isHeader: boolean) => {
       if (y - ROW_HEIGHT < BOTTOM_Y) { page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]); y = TOP_Y; }
@@ -141,6 +154,7 @@ export async function createPrintableSubmissionPdf(title: string, company: Recor
         if (fullWidthAtDefault > maxWidth) {
           fontSize = Math.max(6, fontSize * (maxWidth / fullWidthAtDefault));
         }
+        if (!isHeader) fontSize = Math.min(fontSize, columnFontSizes[columnIndex]);
         // Une case d'EN-TÊTE (nom des colonnes) reste fixe, comme avant. Une
         // case de DONNÉE (une ligne de personnel/matériel, un poids, un
         // chiffre d'affaires...) devient une vraie case cliquable — même

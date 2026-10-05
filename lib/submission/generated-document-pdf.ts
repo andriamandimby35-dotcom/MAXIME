@@ -216,19 +216,28 @@ function drawTable(doc: PDFDocument, cursor: Cursor, block: TableBlock, font: PD
   }
   const tableWidth = PAGE_WIDTH - MARGIN * 2;
   const columnCount = block.columns.length || 1;
-  const columnWidth = tableWidth / columnCount;
   const cellPaddingX = 5;
   const allRows = [block.columns, ...block.rows];
+  // Largeur de chaque colonne proportionnelle à son contenu le plus long
+  // (entête comprise), bornée — et non plus identique pour toutes : une
+  // colonne de description se retrouvait aussi étroite qu'une colonne "U" et
+  // son texte était coupé. Règle générale pour tout tableau généré.
+  const columnWeights = Array.from({ length: columnCount }, (_, columnIndex) =>
+    Math.min(110, Math.max(10, Math.max(...allRows.map((row, rowIndex) => String(row[columnIndex] ?? "").length * (rowIndex === 0 ? 1.5 : 1)), 0) + 7)));
+  const weightSum = columnWeights.reduce((sum, value) => sum + value, 0) || 1;
+  const columnWidths = columnWeights.map((weight) => (weight / weightSum) * tableWidth);
+  const columnOffsets = columnWidths.map((_, index) => columnWidths.slice(0, index).reduce((sum, value) => sum + value, 0));
   for (const [rowIndex, row] of allRows.entries()) {
     const isHeader = rowIndex === 0;
     const cellFont = isHeader ? boldFont : font;
-    const wrappedCells = row.map((cell) => wrapPlainText(cell ?? "", columnWidth - cellPaddingX * 2, cellFont, TABLE_FONT_SIZE));
+    const wrappedCells = row.map((cell, columnIndex) => wrapPlainText(cell ?? "", (columnWidths[columnIndex] ?? columnWidths[0]) - cellPaddingX * 2, cellFont, TABLE_FONT_SIZE));
     const rowLineCount = Math.max(1, ...wrappedCells.map((lines) => lines.length));
     const rowHeight = rowLineCount * (TABLE_FONT_SIZE + 3) + TABLE_ROW_PADDING;
     current = ensureSpace(current, doc, rowHeight);
     const rowTopY = current.y;
     for (const [columnIndex, lines] of wrappedCells.entries()) {
-      const cellX = MARGIN + columnIndex * columnWidth + cellPaddingX;
+      const columnWidth = columnWidths[columnIndex] ?? columnWidths[0];
+      const cellX = MARGIN + (columnOffsets[columnIndex] ?? 0) + cellPaddingX;
       const rawValue = (row[columnIndex] ?? "").toString();
       // Une case de la ligne d'en-tête reste du texte fixe (jamais une valeur
       // à modifier). Une case de donnée devient une VRAIE case cliquable
