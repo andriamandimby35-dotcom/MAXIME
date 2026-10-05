@@ -185,7 +185,7 @@ async function computeFinalSubmissionItems(
 
 // À incrémenter à chaque correctif de la logique ci-dessus, pour ne jamais
 // resservir un ancien résultat calculé par une version précédente du code.
-const RESOLVE_CACHE_VERSION = "2026-10-05-a";
+const RESOLVE_CACHE_VERSION = "2026-10-05-b";
 
 class DegradedResultError extends Error {
   constructor(public readonly value: ResolvedSubmissionItems) {
