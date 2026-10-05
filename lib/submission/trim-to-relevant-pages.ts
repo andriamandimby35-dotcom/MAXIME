@@ -555,8 +555,15 @@ function windowContainsOtherSiblingTitle(windowText: string, siblingKeywordSets:
   const matchingSiblings = siblingKeywordSets.filter((keywords) => matchesTitle(windowText, keywords)).length;
   return matchingSiblings >= 2;
 }
-async function locateTitleAtPageStarts(pdfBytes: Uint8Array, title: string, siblingTitles: string[] = []): Promise<RelevantPageRange> {
-  const keywords = phraseWords(title);
+// Mots vides retirés SEULEMENT pour cette recherche tolérante : "le", "de",
+// "et", "d" apparaissent dans n'importe quel texte français (et, via
+// "includes", même à l'intérieur d'autres mots), et suffisaient à eux seuls à
+// faire monter le ratio de mots retrouvés vers le seuil de 85 % — une page
+// sans rapport pouvait alors passer avec seulement 2 vrais mots-clés sur 3.
+const LENIENT_IGNORED_WORDS = new Set(["le", "la", "les", "de", "du", "des", "d", "l", "et", "ou", "un", "une", "au", "aux", "en", "a"]);
+
+async function locateTitleAtPageStarts(pdfBytes: Uint8Array, title: string, siblingTitles: string[] = [], claimedByOtherPages?: Set<number>): Promise<RelevantPageRange> {
+  const keywords = phraseWords(title).filter((word) => !LENIENT_IGNORED_WORDS.has(word));
   if (!keywords.length) return { pages: [], title: null };
   const siblingKeywordSets = siblingTitles
     .filter((otherTitle) => otherTitle.length >= 12)
@@ -566,6 +573,21 @@ async function locateTitleAtPageStarts(pdfBytes: Uint8Array, title: string, sibl
     for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
       const text = await normalizedPageText(doc, pageNumber);
       const windowText = stripLeadingPageNumber(text).slice(0, LENIENT_PAGE_START_WINDOW);
+      // BUG corrigé (vérifié en vrai : "Le modèle de soumission et
+      // d'engagement", dont la vraie page 12 s'appelle "LETTRE DE SOUMISSION",
+      // se faisait attribuer la page 20 — "B 2 – Modèle de caution personnelle
+      // et solidaire de soumission" — parce que ses mots courants ("le", "de",
+      // "et", "d") et deux mots-clés suffisaient à passer le seuil de 85 %) :
+      // cette recherche est le dernier recours, le plus tolérant, donc la
+      // moins fiable — elle ne doit JAMAIS prendre une page qu'une autre pièce
+      // revendique déjà, ni une page dont l'en-tête est ENTIÈREMENT expliqué
+      // par le titre d'une AUTRE pièce alors que celui-ci ne l'est pas
+      // entièrement (une autre pièce y a un meilleur droit).
+      if (claimedByOtherPages?.has(pageNumber)) continue;
+      const ownRatio = keywords.filter((keyword) => keywordAppearsIn(windowText, keyword)).length / keywords.length;
+      const betterClaimedBySibling = ownRatio < 1 && siblingKeywordSets.some((siblingKeywords) =>
+        siblingKeywords.length >= 3 && siblingKeywords.every((keyword) => keywordAppearsIn(windowText, keyword)));
+      if (betterClaimedBySibling) continue;
       if (
         matchesTitle(windowText, keywords) &&
         !/\bpage\s*\d{1,4}\b/.test(windowText) &&
@@ -578,6 +600,100 @@ async function locateTitleAtPageStarts(pdfBytes: Uint8Array, title: string, sibl
   } catch {
     return { pages: [], title: null };
   }
+}
+
+// Numéro de pièce lu au tout début d'un titre ("Annexe 2" -> "annexe2", "A1" ->
+// "a1", "A2 – b)" -> "a2b"), ou null. Même règle que splitLabel de
+// merge-same-label-duplicates.ts (dupliquée ici pour éviter un import
+// circulaire entre les deux fichiers).
+function leadingPieceLabel(title: string): string | null {
+  const tokens = title
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/([a-zA-Z])([0-9])/g, "$1 $2")
+    .replace(/([0-9])([a-zA-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  let label: string | null = null;
+  let used = 0;
+  if (tokens[0] === "annexe" && /^[0-9]+$/.test(tokens[1] ?? "")) { label = `annexe${tokens[1]}`; used = 2; }
+  else if (/^[a-z]$/.test(tokens[0] ?? "") && /^[0-9]+$/.test(tokens[1] ?? "")) { label = `${tokens[0]}${tokens[1]}`; used = 2; }
+  if (!label) return null;
+  if (/^[a-z]$/.test(tokens[used] ?? "") && /^\s*[-–—:.]?\s*[a-z]\s*\)/i.test(title.replace(/^.*?[0-9]+/, "").trim())) label += tokens[used];
+  return label;
+}
+
+// BUG corrigé (vérifié en vrai : "Annexe 1 : Modèle de garantie bancaire de
+// bonne exécution", annoncée page 19 par l'IA — qui est en réalité la
+// garantie de SOUMISSION "B 1" — n'était jamais retrouvée à sa vraie page 47,
+// dont le titre imprimé est "ANNEXE 1 AU CCAP" en gras/majuscules, suivi, en
+// casse normale, de "Modèle de garantie bancaire de bonne exécution") : le
+// titre en majuscules ne contient que le numéro de pièce, jamais assez de mots
+// pour atteindre 85 %, et le texte de la page commence par des notes de bas de
+// page, donc la recherche tolérante "début de page" ne la voit pas non plus.
+// Générique : on cherche, dans tout le document, une page dont le titre en
+// gras/majuscules porte le MÊME numéro de pièce que celui demandé, ET dont les
+// AUTRES mots du titre demandé suivent immédiatement ce numéro dans le texte.
+// Les deux conditions ensemble écartent un sommaire (jamais en gras, cite
+// plusieurs pièces à la suite) et une autre pièce de même numéro (ses mots
+// diffèrent). Jamais une page revendiquée par une autre pièce.
+async function locateByLabelAndFollowingWords(pdfBytes: Uint8Array, title: string, options: { claimedByOtherPages?: Set<number>; siblingTitles?: string[] }): Promise<RelevantPageRange> {
+  const ownLabel = leadingPieceLabel(title);
+  if (!ownLabel) return { pages: [], title: null };
+  const ownWords = phraseWords(title);
+  const labelWordCount = /^annexe\d/.test(ownLabel) || /^[a-z]\d/.test(ownLabel) ? 2 : 2;
+  const rest = ownWords.slice(labelWordCount).filter((word) => !LENIENT_IGNORED_WORDS.has(word));
+  if (rest.length < 3) return { pages: [], title: null };
+  // Sans doublons ni le titre demandé lui-même : une pièce listée deux fois
+  // sous le même titre ne doit pas se compter comme "deux autres pièces".
+  const ownPhrase = ownWords.join(" ");
+  const siblingKeywordSets = [...new Set((options.siblingTitles ?? [])
+    .filter((otherTitle) => otherTitle.length >= 12)
+    .map((otherTitle) => phraseWords(otherTitle).join(" ")))]
+    .filter((phrase) => phrase !== ownPhrase)
+    .map((phrase) => phrase.split(" "));
+  try {
+    const doc = await loadPdfDocument(pdfBytes);
+    for (let page = 1; page <= doc.numPages; page += 1) {
+      if (options.claimedByOtherPages?.has(page)) continue;
+      const { titleLine } = await pageHeadingLine(doc, page);
+      if (!titleLine || leadingPieceLabel(titleLine) !== ownLabel) continue;
+      const text = await normalizedPageText(doc, page);
+      const labelWords = phraseWords(titleLine).slice(0, 2);
+      const match = new RegExp(labelWords.join("\\s*")).exec(text);
+      if (!match) continue;
+      const windowText = text.slice(match.index, match.index + titleLine.length + 40 + rest.join(" ").length * 2);
+      if (!rest.every((word) => keywordAppearsIn(windowText, word))) continue;
+      if (windowContainsOtherSiblingTitle(windowText, siblingKeywordSets)) continue;
+      // Une autre pièce qui porte exactement ce même titre imprimé (ex.
+      // "ANNEXE 1 AU CCAP" listée à part) ne doit pas empêcher de confirmer
+      // la page : on l'écarte des titres "autres pièces" pour cet appel.
+      const printedWords = phraseWords(titleLine).join(" ");
+      const otherSiblings = (options.siblingTitles ?? []).filter((other) => phraseWords(other).join(" ") !== printedWords);
+      const range = await extractRelevantPageRange(pdfBytes, [page], titleLine, { ...options, siblingTitles: otherSiblings });
+      if (!range.title) continue;
+      // Un titre qui ne tient QUE dans la première ligne en gras (ex. "ANNEXE
+      // 1 AU CCAP") laisse la fin de plage sans repère sûr : la page
+      // suivante peut être une AUTRE annexe dont le titre n'est pas en gras
+      // (vérifié : "ANNEXE 2 : Pratiques de fraude..." page 48, avalée dans la
+      // plage de l'Annexe 1). On coupe donc dès qu'une page suivante COMMENCE
+      // par un autre numéro de pièce.
+      const kept: number[] = [];
+      for (const rangePage of range.pages) {
+        if (kept.length) {
+          const startText = stripLeadingPageNumber(await normalizedPageText(doc, rangePage)).slice(0, 40);
+          const startLabel = leadingPieceLabel(startText);
+          if (startLabel && startLabel !== ownLabel) break;
+        }
+        kept.push(rangePage);
+      }
+      return { ...range, pages: kept };
+    }
+  } catch {
+    // Lecture impossible : on laisse les autres recherches décider.
+  }
+  return { pages: [], title: null };
 }
 
 // BUG trouvé en vérifiant les PDF générés un par un sur un vrai DAO (demande
@@ -603,6 +719,30 @@ export async function resolveVerifiedPages(
 ): Promise<RelevantPageRange> {
   const direct = await extractRelevantPageRange(pdfBytes, candidatePages, title, options);
   if (direct.title) return direct;
+  // BUG corrigé (vérifié en vrai : "A1- IDENTIFICATION DU CANDIDAT", annoncée
+  // page 13, se faisait réattribuer la page 11 — simple sommaire de la
+  // PARTIE II qui liste ce même intitulé — alors que le vrai titre imprimé
+  // page 13 est "A1 - FICHE DE RENSEIGNEMENTS RELATIFS AU CANDIDAT") : quand
+  // la page donnée par l'IA porte, en gras et majuscules, le MÊME numéro de
+  // pièce ("A1", "Annexe 2"...) que la pièce demandée, c'est la même pièce
+  // sous un intitulé un peu différent — pas une raison d'aller chercher
+  // ailleurs une page qui répète seulement les mêmes mots.
+  const ownLabel = leadingPieceLabel(title);
+  if (ownLabel) {
+    try {
+      const doc = await loadPdfDocument(pdfBytes);
+      for (const page of candidatePages) {
+        if (page < 1 || page > doc.numPages) continue;
+        const { titleLine } = await pageHeadingLine(doc, page);
+        if (titleLine && leadingPieceLabel(titleLine) === ownLabel) {
+          const sameLabelRange = await extractRelevantPageRange(pdfBytes, [page], titleLine, options);
+          if (sameLabelRange.title) return sameLabelRange;
+        }
+      }
+    } catch {
+      // Lecture impossible : on continue avec les recherches ci-dessous.
+    }
+  }
   // La page donnée ne confirme pas le titre : on cherche ailleurs dans tout
   // le document. Volontairement SANS passer claimedByOtherPages ici pour le
   // filtrage final (locateTitleInFullDocument l'utilise déjà en interne comme
@@ -614,9 +754,11 @@ export async function resolveVerifiedPages(
   // printable-submission-document/route.ts.
   const blind = await locateTitleInFullDocument(pdfBytes, title, options.claimedByOtherPages, options.siblingTitles);
   if (blind.pages.length) return blind;
+  const byLabel = await locateByLabelAndFollowingWords(pdfBytes, title, options);
+  if (byLabel.pages.length) return byLabel;
   // Toujours rien trouvé (titre non confirmé par la mise en forme nulle
   // part) : dernier recours, plus tolérant — voir locateTitleAtPageStarts.
-  const lenient = await locateTitleAtPageStarts(pdfBytes, title, options.siblingTitles);
+  const lenient = await locateTitleAtPageStarts(pdfBytes, title, options.siblingTitles, options.claimedByOtherPages);
   return lenient.pages.length ? lenient : direct;
 }
 

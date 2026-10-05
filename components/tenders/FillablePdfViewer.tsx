@@ -1229,6 +1229,23 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea) {
         background-color: #fff !important;
       }
+      /* BUG corrigé (signalé sur le tableau "Annexe 2 : Modèle de planning
+         d'exécution des travaux", mais valable pour TOUT tableau généré par
+         l'application — voir printable-pdf.ts "case_roster_*" et
+         generated-document-pdf.ts "case_tableau_*") : de petits traits en
+         "L" restaient visibles devant les chiffres et lettres de chaque
+         case. Ce ne sont PAS des carrés ajoutés par une case : ce sont les
+         bouts du QUADRILLAGE du tableau, dessiné par l'application sous la
+         case — le fond blanc forcé juste au-dessus recouvrait le quadrillage
+         presque entièrement et ne laissait apparaître que ses coins. Dans
+         ces tableaux, rien n'est imprimé sous la case (le texte est déjà
+         DANS la case) : un fond blanc n'y sert donc à rien. On le rend
+         transparent uniquement pour ces cases-là (reconnues par le début de
+         leur nom), pour que le quadrillage reste entier partout. */
+      .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea)[name^="case_roster_"],
+      .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea)[name^="case_tableau_"] {
+        background-color: transparent !important;
+      }
       /* BUG corrigé (généralisé à TOUTE case de TEXTE de TOUT document ouvert
          dans ce lecteur — signalé sur le tableau "A2 - Planning d'exécution
          des travaux" mais Maxime a confirmé que d'autres PDF ont le même
