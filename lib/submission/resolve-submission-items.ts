@@ -77,6 +77,11 @@ export async function resolveFinalSubmissionItems(
   // les journaux Vercel plutôt que de le confondre avec une page simplement
   // lente.
   const PDF_FETCH_TIMEOUT_MS = 90_000;
+  // Mesure de temps (diagnostic, visible dans les journaux Vercel) : la page
+  // mettait ~35 s à s'ouvrir sans qu'on sache quelle étape était lente
+  // (téléchargement du DAO, découpage, ou vérification des doublons).
+  const startedAt = Date.now();
+  const logStep = (step: string) => console.log(`[resolveFinalSubmissionItems] ${step} : ${Date.now() - startedAt} ms depuis le début`);
   const loadPdfBytes = async (): Promise<Uint8Array | null> => {
     if (pdfBytes) return pdfBytes;
     if (!documentUrl) return null;
@@ -99,11 +104,13 @@ export async function resolveFinalSubmissionItems(
     } finally {
       clearTimeout(timeout);
     }
+    logStep(`DAO téléchargé (${pdfBytes ? pdfBytes.length : 0} octets)`);
     return pdfBytes;
   };
   if (mightHaveMergedItems) {
     const bytes = await loadPdfBytes();
     if (bytes) items = await splitMergedDaoItems(items, bytes);
+    logStep("découpage des pièces fusionnées terminé");
   }
   const { items: sanitizedItems, removedAsBordereauHeading, flaggedDuplicateTitles, flaggedDuplicateInstructions } =
     sanitizeSubmissionItems(items, workItems);
@@ -132,6 +139,7 @@ export async function resolveFinalSubmissionItems(
       }
     }
   }
+  logStep("terminé");
   return {
     items: finalItems,
     removedAsBordereauHeading,
