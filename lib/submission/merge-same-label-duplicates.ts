@@ -99,6 +99,15 @@ function richness(item: MergeableItem): number {
 // de travail" pages 258-260 et un fragment "NY ORINASA ( L'ENTREPRISE" page
 // 261, même texte d'instructions). Les pages sont alors réunies.
 function sameInstructionsAdjacentPages(a: MergeableItem, b: MergeableItem): boolean {
+  // GARDE-FOU (régression constatée en vrai : "A2 : CAPACITES TECHNIQUES"
+  // page 14 et "A2 – b) Moyen en personnel" page 15 ont reçu la même phrase
+  // d'instructions générique de l'IA, et la seconde — avec son tableau de
+  // personnel — avait disparu dans la première) : une pièce portant une
+  // ÉTIQUETTE numérotée ("A2", "Annexe 3", "B2"...) est toujours une pièce à
+  // part entière du DAO, distincte de sa voisine même si l'IA a recopié les
+  // mêmes instructions. Cette règle ne s'applique donc qu'à deux pièces SANS
+  // étiquette (typiquement un titre fragmentaire mal lu par l'IA).
+  if (splitLabel(a.title || "") || splitLabel(b.title || "")) return false;
   const instrA = normalizeInstructions(stripDuplicateWarning(a.instructions) ?? "");
   const instrB = normalizeInstructions(stripDuplicateWarning(b.instructions) ?? "");
   if (instrA.length < 30 || instrA !== instrB) return false;
