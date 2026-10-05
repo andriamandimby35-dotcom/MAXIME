@@ -92,8 +92,25 @@ function richness(item: MergeableItem): number {
   return (item.fields?.length ?? 0) * 100000 + (stripDuplicateWarning(item.instructions)?.length ?? 0);
 }
 
+// Deux pièces aux instructions IDENTIQUES mot pour mot (30 caractères minimum,
+// hors avertissement de doublon) dont les pages se touchent ou se chevauchent
+// (l'une finit page N, l'autre commence page N ou N+1) sont les deux moitiés
+// d'UN SEUL document de plusieurs pages (observé en vrai : "Contrat individuel
+// de travail" pages 258-260 et un fragment "NY ORINASA ( L'ENTREPRISE" page
+// 261, même texte d'instructions). Les pages sont alors réunies.
+function sameInstructionsAdjacentPages(a: MergeableItem, b: MergeableItem): boolean {
+  const instrA = normalizeInstructions(stripDuplicateWarning(a.instructions) ?? "");
+  const instrB = normalizeInstructions(stripDuplicateWarning(b.instructions) ?? "");
+  if (instrA.length < 30 || instrA !== instrB) return false;
+  const pagesA = knownPagesForItem(a);
+  const pagesB = knownPagesForItem(b);
+  if (!pagesA.length || !pagesB.length) return false;
+  return pagesA.some((pageA) => pagesB.some((pageB) => Math.abs(pageA - pageB) <= 1));
+}
+
 function samePiece(a: MergeableItem, b: MergeableItem): boolean {
   if (normalizeTitle(a.title || "") === normalizeTitle(b.title || "") && a.kind === b.kind) return true;
+  if (sameInstructionsAdjacentPages(a, b)) return true;
   const labelA = splitLabel(a.title || "");
   const labelB = splitLabel(b.title || "");
   if (!labelA || !labelB || labelA.label !== labelB.label) return false;
@@ -107,6 +124,7 @@ function samePiece(a: MergeableItem, b: MergeableItem): boolean {
 export function mergeSamePieceDuplicates<T extends MergeableItem>(items: T[]): T[] {
   const dropped = new Set<number>();
   const merged = new Set<number>();
+  const unionPages = new Map<number, number[]>();
   const candidates = items
     .map((item, index) => ({ item, index }))
     .filter(({ item }) => item.template_origin === "dao" && (item.title || "").trim().length > 0);
@@ -119,6 +137,10 @@ export function mergeSamePieceDuplicates<T extends MergeableItem>(items: T[]): T
       const [keep, drop] = richness(items[i]) >= richness(items[j]) ? [i, j] : [j, i];
       dropped.add(drop);
       merged.add(keep);
+      if (sameInstructionsAdjacentPages(items[i], items[j])) {
+        const union = [...new Set([...(unionPages.get(keep) ?? knownPagesForItem(items[keep])), ...knownPagesForItem(items[drop])])].sort((x, y) => x - y);
+        unionPages.set(keep, union);
+      }
     }
   }
   if (!dropped.size) return items;
@@ -136,6 +158,8 @@ export function mergeSamePieceDuplicates<T extends MergeableItem>(items: T[]): T
     .map((item, index) => ({ item, index }))
     .filter(({ index }) => !dropped.has(index))
     .map(({ item, index }) => {
+      const pages = unionPages.get(index);
+      if (pages) item = { ...item, template_page_numbers: pages, source_reference: `Pages ${pages.join(", ")}` };
       // L'avertissement "doublon" n'a plus de raison d'être sur une pièce
       // gardée après fusion, tant qu'aucune autre pièce restante ne porte
       // encore le même titre ou les mêmes instructions.
