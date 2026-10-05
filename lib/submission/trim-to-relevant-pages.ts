@@ -562,7 +562,7 @@ function windowContainsOtherSiblingTitle(windowText: string, siblingKeywordSets:
 // sans rapport pouvait alors passer avec seulement 2 vrais mots-clés sur 3.
 const LENIENT_IGNORED_WORDS = new Set(["le", "la", "les", "de", "du", "des", "d", "l", "et", "ou", "un", "une", "au", "aux", "en", "a"]);
 
-async function locateTitleAtPageStarts(pdfBytes: Uint8Array, title: string, siblingTitles: string[] = [], claimedByOtherPages?: Set<number>): Promise<RelevantPageRange> {
+async function locateTitleAtPageStarts(pdfBytes: Uint8Array, title: string, siblingTitles: string[] = [], claimedByOtherPages?: Set<number>, onlyPages?: number[]): Promise<RelevantPageRange> {
   const keywords = phraseWords(title).filter((word) => !LENIENT_IGNORED_WORDS.has(word));
   if (!keywords.length) return { pages: [], title: null };
   const siblingKeywordSets = siblingTitles
@@ -570,7 +570,9 @@ async function locateTitleAtPageStarts(pdfBytes: Uint8Array, title: string, sibl
     .map((otherTitle) => phraseWords(otherTitle));
   try {
     const doc = await loadPdfDocument(pdfBytes);
-    for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
+    const pagesToScan = onlyPages ?? Array.from({ length: doc.numPages }, (_, index) => index + 1);
+    for (const pageNumber of pagesToScan) {
+      if (pageNumber < 1 || pageNumber > doc.numPages) continue;
       const text = await normalizedPageText(doc, pageNumber);
       const windowText = stripLeadingPageNumber(text).slice(0, LENIENT_PAGE_START_WINDOW);
       // BUG corrigé (vérifié en vrai : "Le modèle de soumission et
@@ -946,15 +948,36 @@ function isSommaireStylePageReference(normalizedPageText: string, matchEnd: numb
 // séparé du texte complet de la page évite de le retélécharger deux fois
 // (une fois ici, une fois dans pageHeadingLine) : l'appelant fournit déjà le
 // texte normalisé, calculé une seule fois par page.
+// Comparaison tolérante à la ponctuation (tiret court/long, deux-points,
+// espace manquant entre une lettre et un chiffre : "Annexe2." / "Annexe 2 :")
+// et à la fin du titre (pluriel, mot ajouté ou retiré : "MARCHES PUBLICS" /
+// "MARCHES PUBLIC", vérifié en vrai sur la page 18 du DAO, "A5 – LITIGES...",
+// qui n'était alors pas reconnue comme début d'une autre pièce, si bien que
+// la pièce A4 débordait sur elle). On ne compare donc que le DÉBUT du titre
+// (45 caractères, assez long pour distinguer deux titres voisins comme
+// "...bonne exécution" / "...soumission"), après avoir réduit la ponctuation.
+const SIBLING_TITLE_PREFIX_LENGTH = 45;
+function squashForTitleMatch(value: string): string {
+  return value
+    .replace(/([a-z])([0-9])/g, "$1 $2")
+    .replace(/([0-9])([a-z])/g, "$1 $2")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
 function pageContainsSiblingTitle(normalizedPageText: string, normalizedSiblingTitles: string[]) {
+  const squashedPage = ` ${squashForTitleMatch(normalizedPageText)} `;
   return normalizedSiblingTitles.some((otherTitle) => {
     if (otherTitle.length < 12) return false;
+    const squashedTitle = squashForTitleMatch(otherTitle).slice(0, SIBLING_TITLE_PREFIX_LENGTH).trim();
+    if (squashedTitle.length < 12) return false;
+    const needle = ` ${squashedTitle}`;
     let searchFrom = 0;
     for (;;) {
-      const index = normalizedPageText.indexOf(otherTitle, searchFrom);
+      const index = squashedPage.indexOf(needle, searchFrom);
       if (index === -1) return false;
-      const matchEnd = index + otherTitle.length;
-      if (!isSommaireStylePageReference(normalizedPageText, matchEnd)) return true;
+      const matchEnd = index + needle.length;
+      // Fin de titre : on ne vérifie "Page N" que sur la suite immédiate.
+      if (!isSommaireStylePageReference(squashedPage, matchEnd)) return true;
       searchFrom = matchEnd; // Simple citation de sommaire : on continue de chercher une VRAIE occurrence.
     }
   });
@@ -1835,7 +1858,8 @@ export async function scanDividerPages(pdfBytes: Uint8Array, budgetMs = 20_000):
         const withoutPageNumber = items[0] && /^\d{1,4}$/.test((items[0].str ?? "").trim()) ? items.slice(1) : items;
         const totalChars = withoutPageNumber.reduce((sum, item) => sum + (item.str ?? "").trim().length, 0);
         if (!withoutPageNumber.length || totalChars > 1500) continue;
-        if (!/^(?:partie|section|volume|livre)\s+(?:[ivxlcdm]+|\d+)\b/i.test((withoutPageNumber[0].str ?? "").trim())) continue;
+        // Le numéro de page imprimé peut être collé au titre ("1PARTIE II – ...").
+        if (!/^\d{0,4}\s*(?:partie|section|volume|livre)\s+(?:[ivxlcdm]+|\d+)\b/i.test((withoutPageNumber[0].str ?? "").trim())) continue;
         // Regroupe les morceaux de texte d'une même ligne visuelle (même y,
         // à 2 points près), de haut en bas puis de gauche à droite.
         const rows: { y: number; parts: { x: number; text: string }[] }[] = [];
@@ -1898,4 +1922,11 @@ export async function extendPagesUntilNextTitle(
     // Lecture impossible : on garde au moins la page de départ.
   }
   return kept;
+}
+
+// Même recherche tolérante que locateTitleAtPageStarts, mais restreinte à une
+// liste de pages précise (ex. les pages situées APRÈS une page intercalaire de
+// partie, pour ne jamais retomber sur l'intercalaire qui liste ce même titre).
+export async function locateTitleAtPageStartsIn(pdfBytes: Uint8Array, title: string, pages: number[], siblingTitles: string[] = []): Promise<RelevantPageRange> {
+  return locateTitleAtPageStarts(pdfBytes, title, siblingTitles, undefined, pages);
 }
