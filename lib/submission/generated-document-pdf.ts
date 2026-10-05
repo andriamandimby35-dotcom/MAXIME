@@ -1,4 +1,4 @@
-import { PDFDocument, PDFFont, PDFForm, PDFPage, rgb } from "pdf-lib";
+import { PDFDocument, PDFFont, PDFForm, PDFPage, StandardFonts, rgb } from "pdf-lib";
 import { embedUnicodeFonts } from "@/lib/submission/pdf-font";
 
 // NOUVELLE approche de génération de pièces (Lettre de soumission, garanties,
@@ -85,9 +85,15 @@ function wrapRuns(runs: TextRun[], maxWidth: number, font: PDFFont, boldFont: PD
 
 type Cursor = { page: PDFPage; y: number };
 
+// Largeur réelle des pages du document en cours de génération : celle d'un A4,
+// élargie seulement si un tableau a besoin de plus de place pour que ses
+// colonnes montrent leur texte en entier (voir computeTableLayout). Le texte
+// courant (paragraphes) continue, lui, à se couper à la largeur A4.
+let activePageWidth = PAGE_WIDTH;
+
 function ensureSpace(cursor: Cursor, doc: PDFDocument, needed: number): Cursor {
   if (cursor.y - needed >= MARGIN) return cursor;
-  const page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+  const page = doc.addPage([activePageWidth, PAGE_HEIGHT]);
   return { page, y: PAGE_HEIGHT - MARGIN };
 }
 
@@ -207,25 +213,42 @@ function wrapPlainText(text: string, maxWidth: number, font: PDFFont, fontSize: 
   return lines.length ? lines : [""];
 }
 
-function drawTable(doc: PDFDocument, cursor: Cursor, block: TableBlock, font: PDFFont, boldFont: PDFFont, form: PDFForm, counter: FieldCounter): Cursor {
+// Les colonnes s'ADAPTENT au contenu, la taille du texte ne change JAMAIS : une
+// case de tableau s'affiche à l'écran en 11 pt (Times, réglage par défaut de
+// l'application). Chaque colonne reçoit donc la largeur de son texte le plus
+// long mesuré avec cette police et cette taille, plus la marge interne de la
+// case ; si la somme dépasse la zone utile d'un A4, c'est la PAGE qui
+// s'élargit. Règle générale, identique à celle de printable-pdf.ts.
+const TABLE_SCREEN_FONT_SIZE = 11;
+const TABLE_CELL_SIDE_PADDING = 30;
+function computeTableLayout(block: TableBlock, timesFont: PDFFont, headerFont: PDFFont): { widths: number[]; tableWidth: number } {
+  const baseWidth = PAGE_WIDTH - MARGIN * 2;
+  const columnCount = block.columns.length || 1;
+  const measure = (fontToUse: PDFFont, text: string, size: number) => {
+    try { return fontToUse.widthOfTextAtSize(text, size); } catch { return text.length * size * 0.55; }
+  };
+  const needed = Array.from({ length: columnCount }, (_, columnIndex) => {
+    const headerWidth = measure(headerFont, String(block.columns[columnIndex] ?? ""), TABLE_FONT_SIZE);
+    const dataWidth = Math.max(0, ...block.rows.map((row) => measure(timesFont, String(row[columnIndex] ?? ""), TABLE_SCREEN_FONT_SIZE)));
+    return Math.min(900, Math.max(headerWidth, dataWidth) + TABLE_CELL_SIDE_PADDING);
+  });
+  const neededSum = needed.reduce((sum, value) => sum + value, 0) || 1;
+  if (neededSum <= baseWidth) return { widths: needed.map((value) => (value / neededSum) * baseWidth), tableWidth: baseWidth };
+  return { widths: needed, tableWidth: neededSum };
+}
+
+function drawTable(doc: PDFDocument, cursor: Cursor, block: TableBlock, font: PDFFont, boldFont: PDFFont, form: PDFForm, counter: FieldCounter, layout: { widths: number[]; tableWidth: number }): Cursor {
   let current = cursor;
   if (block.title) {
     current = ensureSpace(current, doc, LINE_HEIGHT + 4);
     current.page.drawText(block.title, { x: MARGIN, y: current.y - BODY_FONT_SIZE, size: BODY_FONT_SIZE, font: boldFont, color: rgb(0, 0, 0) });
     current = { page: current.page, y: current.y - LINE_HEIGHT - 4 };
   }
-  const tableWidth = PAGE_WIDTH - MARGIN * 2;
+  const tableWidth = layout.tableWidth;
   const columnCount = block.columns.length || 1;
   const cellPaddingX = 5;
   const allRows = [block.columns, ...block.rows];
-  // Largeur de chaque colonne proportionnelle à son contenu le plus long
-  // (entête comprise), bornée — et non plus identique pour toutes : une
-  // colonne de description se retrouvait aussi étroite qu'une colonne "U" et
-  // son texte était coupé. Règle générale pour tout tableau généré.
-  const columnWeights = Array.from({ length: columnCount }, (_, columnIndex) =>
-    Math.min(110, Math.max(10, Math.max(...allRows.map((row, rowIndex) => String(row[columnIndex] ?? "").length * (rowIndex === 0 ? 1.5 : 1)), 0) + 7)));
-  const weightSum = columnWeights.reduce((sum, value) => sum + value, 0) || 1;
-  const columnWidths = columnWeights.map((weight) => (weight / weightSum) * tableWidth);
+  const columnWidths = layout.widths.length === columnCount ? layout.widths : Array.from({ length: columnCount }, () => tableWidth / columnCount);
   const columnOffsets = columnWidths.map((_, index) => columnWidths.slice(0, index).reduce((sum, value) => sum + value, 0));
   for (const [rowIndex, row] of allRows.entries()) {
     const isHeader = rowIndex === 0;
@@ -314,7 +337,17 @@ export async function renderGeneratedDocumentPdf(blocks: DocumentBlock[]): Promi
   const { font, boldFont } = await embedUnicodeFonts(doc, { subset: false });
   const form = doc.getForm();
   const fieldCounter: FieldCounter = { current: 0 };
-  let cursor: Cursor = { page: doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]), y: PAGE_HEIGHT - MARGIN };
+  const timesFont = await doc.embedFont(StandardFonts.TimesRoman);
+  const tableLayouts = new Map<TableBlock, { widths: number[]; tableWidth: number }>();
+  let documentPageWidth = PAGE_WIDTH;
+  for (const block of blocks) {
+    if (block.kind !== "table") continue;
+    const layout = computeTableLayout(block, timesFont, boldFont);
+    tableLayouts.set(block, layout);
+    documentPageWidth = Math.max(documentPageWidth, Math.ceil(layout.tableWidth + MARGIN * 2));
+  }
+  activePageWidth = documentPageWidth;
+  let cursor: Cursor = { page: doc.addPage([activePageWidth, PAGE_HEIGHT]), y: PAGE_HEIGHT - MARGIN };
   for (const block of blocks) {
     switch (block.kind) {
       case "heading":
@@ -325,7 +358,7 @@ export async function renderGeneratedDocumentPdf(blocks: DocumentBlock[]): Promi
         cursor = { page: cursor.page, y: cursor.y - 8 }; // espace entre paragraphes
         break;
       case "table":
-        cursor = drawTable(doc, cursor, block, font, boldFont, form, fieldCounter);
+        cursor = drawTable(doc, cursor, block, font, boldFont, form, fieldCounter, tableLayouts.get(block) ?? computeTableLayout(block, timesFont, boldFont));
         break;
       case "spacer":
         cursor = ensureSpace(cursor, doc, block.height ?? LINE_HEIGHT);
