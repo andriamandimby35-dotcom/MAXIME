@@ -32,6 +32,23 @@ export function looksLikeBordereauHeading(title: string): boolean {
     // numérotation typique d'un lot de bordereau, jamais celle d'une pièce de
     // soumission (qui porte un intitulé comme "Annexe 7", "A2", "B1", jamais
     // un chiffre romain seul).
-    /^[IVXLCDM]{1,6}\s*[-–—.)]/i.test(trimmed)
+    startsWithRomanLotNumber(trimmed)
   );
+}
+
+// BUG corrigé (vérifié sur un vrai DAO : la pièce « C- CAHIER DES CLAUSES
+// ADMINISTRATIVES PARTICULIERES (CCAP) » disparaissait de la liste, prise pour
+// un lot de bordereau de prix) : « C- », « D- », « L- » ou « M- » sont avant
+// tout les lettres d'une simple liste de rubriques (« A- Acte d'engagement »,
+// « B- Localisation », « C- CCAP »...), jamais le numéro d'un lot de bordereau
+// (aucun bordereau ne compte 100, 500, 50 ou 1000 lots). Une lettre seule ne
+// compte donc comme chiffre romain que si c'est I, V ou X ; avec 2 lettres ou
+// plus (« II », « VII », « XII »...) le comportement reste inchangé. Règle
+// générale de ponctuation/numérotation, aucun titre codé en dur.
+function startsWithRomanLotNumber(title: string): boolean {
+  const match = /^([IVXLCDM]{1,6})\s*[-–—.)]/i.exec(title);
+  if (!match) return false;
+  const token = match[1];
+  if (token.length === 1 && !/^[IVX]$/i.test(token)) return false;
+  return true;
 }
