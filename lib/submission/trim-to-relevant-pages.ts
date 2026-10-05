@@ -1791,3 +1791,61 @@ export async function pagesWithTitleNearby(pdfBytes: Uint8Array, pages: number[]
     return matches;
   }
 }
+
+// Une page "intercalaire" de partie du DAO ("PARTIE III – MARCHES ET
+// FORMULAIRES" suivie de la liste des pièces de cette partie : "A- Acte
+// d'engagement", "B- Localisation du Site", "Annexe 1 : ...") est la liste
+// OFFICIELLE, écrite par le DAO lui-même, des pièces qui suivent. Lue
+// directement dans le PDF (aucun appel IA, aucun coût de crédits), elle sert
+// de filet de sécurité quand l'analyse a oublié une pièce que le DAO annonce
+// pourtant noir sur blanc (voir recover-listed-pieces.ts). Générique par
+// construction : aucun titre ni numéro de page codé en dur.
+//
+// Une page intercalaire = très peu de texte ET qui COMMENCE par un mot de
+// division ("Partie", "Section", "Volume", "Livre") suivi d'un numéro. Une
+// vraie page de contenu qui commence par "PARTIE I - REGLEMENT..." (plusieurs
+// milliers de caractères) n'est jamais prise pour un intercalaire.
+export type DividerPage = { page: number; heading: string; lines: string[] };
+
+export async function scanDividerPages(pdfBytes: Uint8Array, budgetMs = 20_000): Promise<DividerPage[]> {
+  const found: DividerPage[] = [];
+  const startedAt = Date.now();
+  try {
+    const doc = await loadPdfDocument(pdfBytes);
+    for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
+      if (Date.now() - startedAt > budgetMs) break;
+      try {
+        const page = await doc.getPage(pageNumber);
+        const content = await page.getTextContent();
+        type RawItem = { str?: string; transform?: number[] };
+        const items = (content.items as RawItem[]).filter((item) => (item.str ?? "").trim());
+        const withoutPageNumber = items[0] && /^\d{1,4}$/.test((items[0].str ?? "").trim()) ? items.slice(1) : items;
+        const totalChars = withoutPageNumber.reduce((sum, item) => sum + (item.str ?? "").trim().length, 0);
+        if (!withoutPageNumber.length || totalChars > 1500) continue;
+        if (!/^(?:partie|section|volume|livre)\s+(?:[ivxlcdm]+|\d+)\b/i.test((withoutPageNumber[0].str ?? "").trim())) continue;
+        // Regroupe les morceaux de texte d'une même ligne visuelle (même y,
+        // à 2 points près), de haut en bas puis de gauche à droite.
+        const rows: { y: number; parts: { x: number; text: string }[] }[] = [];
+        for (const item of withoutPageNumber) {
+          const y = item.transform?.[5] ?? 0;
+          const x = item.transform?.[4] ?? 0;
+          const row = rows.find((candidate) => Math.abs(candidate.y - y) <= 2);
+          if (row) row.parts.push({ x, text: (item.str ?? "").trim() });
+          else rows.push({ y, parts: [{ x, text: (item.str ?? "").trim() }] });
+        }
+        const lines = rows
+          .sort((a, b) => b.y - a.y)
+          .map((row) => row.parts.sort((a, b) => a.x - b.x).map((part) => part.text).join(" ").replace(/\s+/g, " ").trim())
+          .filter(Boolean);
+        if (lines.length && /^\d{1,4}$/.test(lines[lines.length - 1])) lines.pop();
+        if (lines.length < 2) continue;
+        found.push({ page: pageNumber, heading: lines[0], lines: lines.slice(1) });
+      } catch {
+        // Page illisible : simplement ignorée.
+      }
+    }
+  } catch {
+    // PDF illisible : aucun intercalaire, le filet de sécurité ne fait rien.
+  }
+  return found;
+}

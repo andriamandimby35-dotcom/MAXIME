@@ -28,6 +28,7 @@ import { splitMergedDaoItems } from "@/lib/submission/split-merged-dao-items";
 import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
 import { sanitizeSubmissionItems, type WorkItemLike } from "@/lib/submission/sanitize-ai-analysis";
 import { resolveFlaggedDuplicateItems } from "@/lib/submission/resolve-duplicate-items";
+import { addMissingPiecesListedByDao } from "@/lib/submission/recover-listed-pieces";
 import { findSameLabelPairs, mergeRelabeledPiecesUsingDao, mergeSamePieceDuplicates } from "@/lib/submission/merge-same-label-duplicates";
 import { createHash } from "crypto";
 import { unstable_cache } from "next/cache";
@@ -171,6 +172,26 @@ async function computeFinalSubmissionItems(
       degraded = true;
     }
   }
+  // Dernier filet (sans aucun appel IA) : une pièce que le DAO annonce lui-même
+  // sur sa page intercalaire de partie ("B- Localisation du Site", "C- CCAP",
+  // "Annexe 02 : ...") mais que l'analyse a oubliée est retrouvée dans le PDF
+  // et ajoutée avec sa vraie page (voir recover-listed-pieces.ts). Toujours
+  // placé EN DERNIER, après tous les regroupements ci-dessus, pour ne jamais
+  // être refusionné à tort avec une autre pièce.
+  {
+    const bytes = await loadPdfBytes();
+    if (bytes) {
+      try {
+        finalItems = await addMissingPiecesListedByDao(finalItems, bytes);
+      } catch (error) {
+        console.error("[resolveFinalSubmissionItems] ajout des pièces annoncées par le DAO échoué", error);
+        degraded = true;
+      }
+      logStep("pièces annoncées par le DAO vérifiées");
+    } else {
+      degraded = true;
+    }
+  }
   logStep("terminé");
   return {
     value: {
@@ -185,7 +206,7 @@ async function computeFinalSubmissionItems(
 
 // À incrémenter à chaque correctif de la logique ci-dessus, pour ne jamais
 // resservir un ancien résultat calculé par une version précédente du code.
-const RESOLVE_CACHE_VERSION = "2026-10-05-f";
+const RESOLVE_CACHE_VERSION = "2026-10-05-g";
 
 class DegradedResultError extends Error {
   constructor(public readonly value: ResolvedSubmissionItems) {
