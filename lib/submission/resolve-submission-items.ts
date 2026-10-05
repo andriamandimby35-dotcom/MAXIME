@@ -132,7 +132,8 @@ export async function resolveFinalSubmissionItems(
     if (bytes) {
       try {
         finalItems = await resolveFlaggedDuplicateItems(finalItems, bytes);
-      } catch {
+      } catch (error) {
+        console.error("[resolveFinalSubmissionItems] vérification des doublons échouée", error);
         // Échec inattendu de la vérification : on garde la liste simplement
         // nettoyée/avertie ci-dessus plutôt que de faire échouer tout
         // l'affichage du dossier pour cette seule étape supplémentaire.

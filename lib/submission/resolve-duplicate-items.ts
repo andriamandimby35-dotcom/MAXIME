@@ -49,7 +49,7 @@
 //     avertissement d'origine, par prudence.
 import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
 import { resolveVerifiedPages } from "@/lib/submission/trim-to-relevant-pages";
-import { hasDuplicateWarning, stripDuplicateWarning } from "@/lib/submission/sanitize-ai-analysis";
+import { hasDuplicateWarning, stripDuplicateWarning, normalizeTitle } from "@/lib/submission/sanitize-ai-analysis";
 
 type DuplicateCandidateItem = {
   title: string;
@@ -57,6 +57,7 @@ type DuplicateCandidateItem = {
   template_origin?: string;
   template_page_numbers?: number[];
   source_reference?: string | null;
+  fields?: unknown[];
 };
 
 // Même seuil que siblingTitlesFor dans printable-submission-document/route.ts
@@ -103,12 +104,13 @@ export async function resolveFlaggedDuplicateItems<T extends DuplicateCandidateI
       if (result.title && result.pages.length) {
         resolved.set(index, { startPage: result.pages[0], pages: result.pages });
       }
-    } catch {
+      console.log(`[resolveFlaggedDuplicateItems] "${item.title}" (pages connues ${candidatePages.join(",")}) -> ${result.title && result.pages.length ? `vérifiée page(s) ${result.pages.join(",")}` : "introuvable dans le DAO"}`);
+    } catch (error) {
       // Page illisible ou DAO temporairement inaccessible pour CETTE pièce :
       // elle garde son avertissement d'origine, jamais de supposition.
+      console.error(`[resolveFlaggedDuplicateItems] vérification impossible pour "${item.title}"`, error);
     }
   }
-  if (!resolved.size) return items;
 
   // Regroupe les pièces signalées dont la vraie page de départ, une fois
   // vérifiée, est identique : vraiment la même pièce détectée plusieurs fois.
@@ -119,6 +121,10 @@ export async function resolveFlaggedDuplicateItems<T extends DuplicateCandidateI
     groups.set(info.startPage, group);
   }
 
+  // Richesse d'une pièce : plus de champs à compléter, puis instructions plus
+  // longues — sert à garder la meilleure des copies d'une même pièce.
+  const richness = (item: T) => (item.fields?.length ?? 0) * 100000 + (stripDuplicateWarning(item.instructions)?.length ?? 0);
+  const richest = (indexes: number[]) => indexes.reduce((best, index) => (richness(items[index]) > richness(items[best]) ? index : best), indexes[0]);
   const dropped = new Set<number>();
   for (const indexes of groups.values()) {
     if (indexes.length < 2) continue; // Vérifiée seule sur sa propre page : pas un doublon réel, voir plus bas.
@@ -126,13 +132,51 @@ export async function resolveFlaggedDuplicateItems<T extends DuplicateCandidateI
     // donnée par l'IA, avant correction) contenait déjà la vraie page — elle
     // n'a pas eu besoin d'être corrigée, donc l'IA avait probablement choisi
     // le titre le plus fidèle pour elle. À défaut, la première du groupe.
-    const keepIndex = indexes.find((index) => knownPagesForItem(items[index]).includes(resolved.get(index)!.startPage)) ?? indexes[0];
+    // Parmi celles-là (ou, à défaut, parmi toutes), on garde la plus riche :
+    // une copie générique sans champs ne doit pas l'emporter sur une copie
+    // complète, juste parce qu'elle est première dans la liste.
+    const matchingClaimed = indexes.filter((index) => knownPagesForItem(items[index]).includes(resolved.get(index)!.startPage));
+    const keepIndex = richest(matchingClaimed.length ? matchingClaimed : indexes);
     for (const index of indexes) if (index !== keepIndex) dropped.add(index);
+  }
+
+  // REPLI (cause racine d'un doublon observé en vrai : "Annexe 8 : Modèle
+  // plaque TALIM" et "Annexe 8 - Modèle plaque TALIM", toutes deux page 265,
+  // restées côte à côte parce que l'une des deux n'avait pas pu être
+  // retrouvée dans le DAO) : deux pièces signalées avec le MÊME titre
+  // (même normalisation que la détection) ET au moins une page connue en
+  // commun sont forcément la même pièce — un DAO ne place jamais deux pièces
+  // différentes de même titre sur la même page. Ce repli n'a besoin d'aucune
+  // lecture du DAO. Si les deux ont été VÉRIFIÉES sur des pages de départ
+  // différentes, on ne touche à rien (vraies pièces distinctes). On garde la
+  // pièce la plus riche (plus de champs, puis instructions plus longues).
+  const mergedByFallback = new Set<number>();
+  const flaggedLive = flaggedIndexes.map(({ index }) => index).filter((index) => !dropped.has(index));
+  for (let a = 0; a < flaggedLive.length; a++) {
+    for (let b = a + 1; b < flaggedLive.length; b++) {
+      const i = flaggedLive[a];
+      const j = flaggedLive[b];
+      if (dropped.has(i) || dropped.has(j)) continue;
+      if (normalizeTitle(items[i].title || "") !== normalizeTitle(items[j].title || "")) continue;
+      const resolvedI = resolved.get(i);
+      const resolvedJ = resolved.get(j);
+      if (resolvedI && resolvedJ && resolvedI.startPage !== resolvedJ.startPage) continue;
+      const pagesI = resolvedI?.pages ?? knownPagesForItem(items[i]);
+      const pagesJ = resolvedJ?.pages ?? knownPagesForItem(items[j]);
+      if (!pagesI.some((page) => pagesJ.includes(page))) continue;
+      const [keep, drop] = richness(items[i]) >= richness(items[j]) ? [i, j] : [j, i];
+      dropped.add(drop);
+      mergedByFallback.add(keep);
+    }
   }
 
   const result: T[] = [];
   items.forEach((item, index) => {
     if (dropped.has(index)) return;
+    if (mergedByFallback.has(index) && !resolved.has(index)) {
+      result.push({ ...item, instructions: stripDuplicateWarning(item.instructions) });
+      return;
+    }
     const info = resolved.get(index);
     if (!info) {
       result.push(item);

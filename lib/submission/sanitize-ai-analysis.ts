@@ -67,7 +67,7 @@ export type SubmissionItemLike = {
 // ponctuation, jamais un mot codé en dur) : on insère toujours un espace
 // entre une lettre et un chiffre collés avant de normaliser, pour que
 // "Annexe2" et "Annexe 2" deviennent strictement identiques.
-function normalizeTitle(value: string) {
+export function normalizeTitle(value: string) {
   return value
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "")
