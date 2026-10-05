@@ -1232,7 +1232,8 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
       /* BUG corrigé (signalé sur le tableau "Annexe 2 : Modèle de planning
          d'exécution des travaux", mais valable pour TOUT tableau généré par
          l'application — voir printable-pdf.ts "case_roster_*" et
-         generated-document-pdf.ts "case_tableau_*") : de petits traits en
+         generated-document-pdf.ts "case_tableau_*" et "valeur_generee_*" : toute
+         case dont la page est entièrement construite par l'application) : de petits traits en
          "L" restaient visibles devant les chiffres et lettres de chaque
          case. Ce ne sont PAS des carrés ajoutés par une case : ce sont les
          bouts du QUADRILLAGE du tableau, dessiné par l'application sous la
@@ -1243,7 +1244,8 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
          transparent uniquement pour ces cases-là (reconnues par le début de
          leur nom), pour que le quadrillage reste entier partout. */
       .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea)[name^="case_roster_"],
-      .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea)[name^="case_tableau_"] {
+      .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea)[name^="case_tableau_"],
+      .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea)[name^="valeur_generee_"] {
         background-color: transparent !important;
       }
       /* BUG corrigé (généralisé à TOUTE case de TEXTE de TOUT document ouvert
