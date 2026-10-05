@@ -1580,3 +1580,47 @@ export async function pagesContainingText(pdfBytes: Uint8Array, pages: number[],
     return matches;
   }
 }
+
+// Variante STRICTE de pagesContainingText : le titre ne compte comme présent
+// sur une page que si ses mots se retrouvent TOUS (au moins ratio, 85 % par
+// défaut) dans une même courte fenêtre de texte, pas simplement éparpillés
+// n'importe où sur la page. pagesContainingText (sac de mots sur toute la
+// page, seuil 70 %) est volontairement tolérante pour rattacher un tableau à
+// un segment ; ici, il faut au contraire pouvoir dire "ce titre n'est PAS sur
+// cette page" (ex. la page 45 d'un CCAP parle de garantie de bonne exécution
+// dans un paragraphe, sans être le modèle de garantie lui-même).
+export async function pagesWithTitleNearby(pdfBytes: Uint8Array, pages: number[], title: string, minRatio = 0.85): Promise<Set<number>> {
+  const matches = new Set<number>();
+  const tokenize = (value: string) => value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/([a-zA-Z])([0-9])/g, "$1 $2")
+    .replace(/([0-9])([a-zA-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  const stop = new Set(["de", "du", "des", "la", "le", "les", "l", "d", "et", "au", "aux", "un", "une", "en", "a"]);
+  const titleWords = [...new Set(tokenize(title).filter((word) => !stop.has(word)).map((word) => word.replace(/s$/, "")))];
+  if (titleWords.length < 2 || !pages.length) return matches;
+  const windowSize = Math.max(12, titleWords.length * 3);
+  try {
+    const doc = await loadPdfDocument(pdfBytes);
+    for (const pageNumber of pages) {
+      if (pageNumber < 1 || pageNumber > doc.numPages) continue;
+      const tokens = tokenize(await normalizedPageText(doc, pageNumber)).map((word) => word.replace(/s$/, ""));
+      const wanted = new Set(titleWords);
+      const counts = new Map<string, number>();
+      let distinct = 0;
+      const add = (word: string) => { if (!wanted.has(word)) return; const c = (counts.get(word) ?? 0) + 1; counts.set(word, c); if (c === 1) distinct += 1; };
+      const remove = (word: string) => { if (!wanted.has(word)) return; const c = (counts.get(word) ?? 0) - 1; counts.set(word, c); if (c === 0) distinct -= 1; };
+      for (let index = 0; index < tokens.length; index++) {
+        add(tokens[index]);
+        if (index >= windowSize) remove(tokens[index - windowSize]);
+        if (distinct / titleWords.length >= minRatio) { matches.add(pageNumber); break; }
+      }
+    }
+    return matches;
+  } catch {
+    return matches;
+  }
+}

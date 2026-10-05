@@ -29,6 +29,7 @@
 // instructions plus longues) : une copie générique "Joindre le document" ne
 // doit jamais l'emporter sur le vrai formulaire à compléter.
 import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
+import { pagesWithTitleNearby } from "@/lib/submission/trim-to-relevant-pages";
 import {
   hasDuplicateWarning,
   normalizeInstructions,
@@ -65,7 +66,7 @@ function words(value: string): string[] {
 // Étiquette de pièce au tout début du titre : "annexe 2" -> "annexe2",
 // "A1" -> "a1", "A2 – b)" -> "a2b". Renvoie aussi le reste du titre. Une
 // pièce sans étiquette claire n'est jamais concernée (label = null).
-function splitLabel(title: string): { label: string; rest: string[] } | null {
+export function splitLabel(title: string): { label: string; rest: string[] } | null {
   const tokens = words(title);
   if (!tokens.length) return null;
   let label: string | null = null;
@@ -143,5 +144,80 @@ export function mergeSamePieceDuplicates<T extends MergeableItem>(items: T[]): T
       const instr = normalizeInstructions(stripDuplicateWarning(item.instructions) ?? "");
       const stillDuplicated = (title && (titleCount.get(title) ?? 0) > 1) || (instr.length >= 30 && (instructionCount.get(instr) ?? 0) > 1);
       return stillDuplicated ? item : { ...item, instructions: stripDuplicateWarning(item.instructions) };
+    });
+}
+
+// Paires de pièces de MÊME étiquette ("Annexe 1"...) sans aucune page connue en
+// commun : candidates à la vérification dans le DAO ci-dessous. Calcul 100 %
+// texte, pour ne charger/lire le DAO que s'il existe vraiment une telle paire.
+export function findSameLabelPairs<T extends MergeableItem>(items: T[]): Array<[number, number]> {
+  const pairs: Array<[number, number]> = [];
+  const dao = items.map((item, index) => ({ item, index })).filter(({ item }) => item.template_origin === "dao");
+  for (let a = 0; a < dao.length; a++) {
+    for (let b = a + 1; b < dao.length; b++) {
+      const labelA = splitLabel(dao[a].item.title || "");
+      const labelB = splitLabel(dao[b].item.title || "");
+      if (!labelA || !labelB || labelA.label !== labelB.label) continue;
+      const pagesA = knownPagesForItem(dao[a].item);
+      const pagesB = knownPagesForItem(dao[b].item);
+      if (!pagesA.length || !pagesB.length || pagesA.some((page) => pagesB.includes(page))) continue;
+      pairs.push([dao[a].index, dao[b].index]);
+    }
+  }
+  return pairs;
+}
+
+// BUG corrigé (observé en vrai) : "Annexe 1 : Modèle de garantie bancaire de
+// bonne exécution" (page 45 selon l'IA) et "ANNEXE 1 AU CCAP" (page 47) sont
+// en réalité UNE seule pièce — le vrai DAO titre la page 47 "ANNEXE 1 AU CCAP
+// Modèle de garantie bancaire de bonne exécution" — mais leurs titres ne
+// partagent presque aucun mot, et la page 45 annoncée par l'IA est fausse
+// (aucun rapport avec une garantie), donc ni la vérification de page ni les
+// règles purement textuelles ne les rapprochaient.
+//
+// Règle générale (aucun titre codé en dur) : pour deux pièces de même
+// étiquette sur des pages différentes, si le TITRE COMPLET de l'une n'apparaît
+// pas sur ses propres pages annoncées MAIS apparaît sur les pages de l'autre,
+// alors elle n'est que l'autre pièce, mal paginée : on n'en garde qu'une (la
+// plus riche en contenu) avec les pages de celle qui s'est VÉRIFIÉE dans le
+// DAO. Si le titre n'apparaît sur aucune des deux, ou apparaît déjà sur ses
+// propres pages, on ne touche à rien. Ne lit que les quelques pages annoncées
+// de ces paires (jamais le document entier).
+export async function mergeRelabeledPiecesUsingDao<T extends MergeableItem>(items: T[], pdfBytes: Uint8Array): Promise<T[]> {
+  const pairs = findSameLabelPairs(items);
+  if (!pairs.length) return items;
+  const dropped = new Set<number>();
+  const pagesOverride = new Map<number, number[]>();
+  for (const [i, j] of pairs) {
+    if (dropped.has(i) || dropped.has(j)) continue;
+    const pagesI = pagesOverride.get(i) ?? knownPagesForItem(items[i]);
+    const pagesJ = pagesOverride.get(j) ?? knownPagesForItem(items[j]);
+    let suspect: number | null = null;
+    let other: number | null = null;
+    try {
+      for (const [a, b, pagesA, pagesB] of [[i, j, pagesI, pagesJ], [j, i, pagesJ, pagesI]] as Array<[number, number, number[], number[]]>) {
+        const title = items[a].title || "";
+        const onOwnPages = await pagesWithTitleNearby(pdfBytes, pagesA, title);
+        if (onOwnPages.size) continue;
+        const onOtherPages = await pagesWithTitleNearby(pdfBytes, pagesB, title);
+        if (onOtherPages.size) { suspect = a; other = b; break; }
+      }
+    } catch {
+      continue;
+    }
+    if (suspect === null || other === null) continue;
+    const [keep, drop] = richness(items[suspect]) > richness(items[other]) ? [suspect, other] : [other, suspect];
+    dropped.add(drop);
+    // La pièce gardée reprend les pages de celle qui s'est vérifiée.
+    pagesOverride.set(keep, pagesOverride.get(other) ?? knownPagesForItem(items[other]));
+  }
+  if (!dropped.size) return items;
+  return items
+    .map((item, index) => ({ item, index }))
+    .filter(({ index }) => !dropped.has(index))
+    .map(({ item, index }) => {
+      const pages = pagesOverride.get(index);
+      if (!pages) return item;
+      return { ...item, template_page_numbers: pages, source_reference: `Pages ${pages.join(", ")}`, instructions: stripDuplicateWarning(item.instructions) };
     });
 }

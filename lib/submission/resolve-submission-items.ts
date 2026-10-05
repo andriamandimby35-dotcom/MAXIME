@@ -28,7 +28,9 @@ import { splitMergedDaoItems } from "@/lib/submission/split-merged-dao-items";
 import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
 import { sanitizeSubmissionItems, type WorkItemLike } from "@/lib/submission/sanitize-ai-analysis";
 import { resolveFlaggedDuplicateItems } from "@/lib/submission/resolve-duplicate-items";
-import { mergeSamePieceDuplicates } from "@/lib/submission/merge-same-label-duplicates";
+import { findSameLabelPairs, mergeRelabeledPiecesUsingDao, mergeSamePieceDuplicates } from "@/lib/submission/merge-same-label-duplicates";
+import { createHash } from "crypto";
+import { unstable_cache } from "next/cache";
 import type { TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
 
 export type ResolvedSubmissionItems = {
@@ -52,11 +54,15 @@ export type ResolvedSubmissionItems = {
 // DAO a déjà dû être rechargé pour une autre raison ou qu'au moins une pièce a
 // été signalée, pour ne jamais payer ce coût sur un dossier sans aucun
 // doublon.
-export async function resolveFinalSubmissionItems(
+async function computeFinalSubmissionItems(
   rawSubmissionItems: TemplateDetectedItem[],
   workItems: WorkItemLike[],
   documentUrl: string | null | undefined,
-): Promise<ResolvedSubmissionItems> {
+): Promise<{ value: ResolvedSubmissionItems; degraded: boolean }> {
+  // Vrai si le DAO était nécessaire mais n'a pas pu être téléchargé : le
+  // résultat est alors un repli partiel, qu'il ne faut JAMAIS mettre en cache
+  // (voir resolveFinalSubmissionItems plus bas).
+  let degraded = false;
   const mightHaveMergedItems = rawSubmissionItems.some((item) => item.template_origin === "dao"
     && knownPagesForItem(item).length > 1);
   let items = rawSubmissionItems;
@@ -111,6 +117,7 @@ export async function resolveFinalSubmissionItems(
   if (mightHaveMergedItems) {
     const bytes = await loadPdfBytes();
     if (bytes) items = await splitMergedDaoItems(items, bytes);
+    else degraded = true;
     logStep("découpage des pièces fusionnées terminé");
   }
   const { items: sanitizedItems, removedAsBordereauHeading, flaggedDuplicateTitles, flaggedDuplicateInstructions } =
@@ -135,20 +142,90 @@ export async function resolveFinalSubmissionItems(
         finalItems = await resolveFlaggedDuplicateItems(finalItems, bytes);
       } catch (error) {
         console.error("[resolveFinalSubmissionItems] vérification des doublons échouée", error);
+        degraded = true;
         // Échec inattendu de la vérification : on garde la liste simplement
         // nettoyée/avertie ci-dessus plutôt que de faire échouer tout
         // l'affichage du dossier pour cette seule étape supplémentaire.
       }
+    } else {
+      degraded = true;
     }
   }
   // Dernier filet, texte seul (aucun coût de temps) : même pièce formulée
   // différemment ("Modèle de planning..." / "Planning...", même étiquette).
   finalItems = mergeSamePieceDuplicates(finalItems);
+  // Même étiquette ("Annexe 1"), pages différentes, titre complet introuvable
+  // sur les pages annoncées mais présent sur celles de l'autre : même pièce
+  // mal paginée (voir merge-same-label-duplicates.ts). Ne lit le DAO que s'il
+  // existe réellement une telle paire.
+  if (findSameLabelPairs(finalItems).length) {
+    const bytes = await loadPdfBytes();
+    if (bytes) {
+      try {
+        finalItems = await mergeRelabeledPiecesUsingDao(finalItems, bytes);
+      } catch (error) {
+        degraded = true;
+        console.error("[resolveFinalSubmissionItems] rapprochement des pièces mal paginées échoué", error);
+      }
+    } else {
+      degraded = true;
+    }
+  }
   logStep("terminé");
   return {
-    items: finalItems,
-    removedAsBordereauHeading,
-    flaggedDuplicateTitles,
-    flaggedDuplicateInstructions,
+    value: {
+      items: finalItems,
+      removedAsBordereauHeading,
+      flaggedDuplicateTitles,
+      flaggedDuplicateInstructions,
+    },
+    degraded,
   };
+}
+
+// À incrémenter à chaque correctif de la logique ci-dessus, pour ne jamais
+// resservir un ancien résultat calculé par une version précédente du code.
+const RESOLVE_CACHE_VERSION = "2026-10-05-a";
+
+class DegradedResultError extends Error {
+  constructor(public readonly value: ResolvedSubmissionItems) {
+    super("Résultat partiel (DAO inaccessible), non mis en cache.");
+  }
+}
+
+// Même résultat qu'avant, mais calculé UNE SEULE FOIS par analyse : la page du
+// dossier mettait ~36 s à s'ouvrir à chaque visite (téléchargement de 48 Mo,
+// lecture de 268 pages, vérifications dans le DAO), alors que la réponse ne
+// change que si l'analyse IA ou ce code changent. La clé de cache est une
+// empreinte de TOUT ce qui peut changer le résultat (analyse, bordereau,
+// adresse du DAO, version du code) : une nouvelle analyse ou un correctif
+// produit une nouvelle clé, donc un nouveau calcul, jamais un vieux résultat.
+// Un résultat partiel (DAO inaccessible sur le moment) n'est jamais mis en
+// cache : l'erreur lancée à dessein l'en empêche, et on rend le résultat
+// partiel tel quel pour cette visite seulement.
+export async function resolveFinalSubmissionItems(
+  rawSubmissionItems: TemplateDetectedItem[],
+  workItems: WorkItemLike[],
+  documentUrl: string | null | undefined,
+): Promise<ResolvedSubmissionItems> {
+  const fingerprint = createHash("sha256")
+    .update(JSON.stringify([RESOLVE_CACHE_VERSION, rawSubmissionItems, workItems, documentUrl ?? null]))
+    .digest("hex");
+  const cached = unstable_cache(
+    async () => {
+      const { value, degraded } = await computeFinalSubmissionItems(rawSubmissionItems, workItems, documentUrl);
+      if (degraded) throw new DegradedResultError(value);
+      return value;
+    },
+    ["resolve-final-submission-items", RESOLVE_CACHE_VERSION, fingerprint],
+  );
+  try {
+    return await cached();
+  } catch (error) {
+    if (error instanceof DegradedResultError) return error.value;
+    // Le cache lui-même n'est pas disponible (ex. hors serveur Next) ou le
+    // calcul a échoué : on recalcule directement, comme avant l'ajout du cache.
+    console.error("[resolveFinalSubmissionItems] cache indisponible, calcul direct", error);
+    return (await computeFinalSubmissionItems(rawSubmissionItems, workItems, documentUrl)).value;
+  }
 }
