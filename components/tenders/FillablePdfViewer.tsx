@@ -1226,6 +1226,23 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         --input-hover-border-color: transparent !important;
         --input-focus-border-color: transparent !important;
       }
+      /* BUG corrigé (généralisé à TOUT document ouvert dans ce lecteur) : les
+         lignes du quadrillage se décalaient "petit à petit" par rapport au
+         texte des cases, de plus en plus en descendant dans la page. Cause
+         mesurée dans un vrai navigateur : pdf.js donne à chaque page une
+         bordure transparente de 9px et compte sur une boîte "content-box" ;
+         le style global de l'application impose "border-box" partout, donc
+         le DESSIN de la page (canevas) rétrécissait de 18px (ex. 861 au lieu
+         de 879 de large) alors que la couche des cases gardait la taille
+         complète : les cases étaient posées sur une page 2 % plus grande que
+         ce qu'on voyait, d'où un écart qui grandissait avec la hauteur. On
+         supprime cette bordure et cette marge (inutiles ici) pour que dessin
+         et cases aient exactement la même taille et le même point de départ. */
+      .fillable-pdf-viewer .pdfViewer .page {
+        border: 0 !important;
+        margin: 0 !important;
+        box-sizing: content-box !important;
+      }
       .fillable-pdf-viewer .textWidgetAnnotation :is(input, textarea) {
         background-color: #fff !important;
       }
