@@ -356,13 +356,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     // haut : le DOM peut afficher une taille RÉTRÉCIE par pdf.js si la case
     // est plus petite que la police, alors que savedFieldStyles garde la
     // valeur exacte enregistrée, quelle que soit la taille de la case.
-    // Les cases des TABLEAUX générés par l'application (case_roster_*,
-    // case_tableau_*) gardent toujours la taille de police calculée à la
-    // création du PDF pour que le texte tienne dans la colonne (6 à 8 pt) :
-    // le réglage par défaut de 11 pt, pensé pour les pages d'origine du DAO,
-    // coupait les descriptions longues.
-    const isGeneratedTableField = /^(case_roster_|case_tableau_)/.test(fieldName);
-    const savedStyle = restoreSavedStyle || isGeneratedTableField ? entry.savedFieldStyles?.get(fieldName) : undefined;
+    const savedStyle = restoreSavedStyle ? entry.savedFieldStyles?.get(fieldName) : undefined;
     const created: FieldOverride = {
       pageNumber: entry.pageNumber,
       leftPercent: parseFloat(section.style.left) || 0,
@@ -867,7 +861,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
         // mémoire pour que ensureOverride (lui, synchrone) puisse s'en servir
         // instantanément au moment où l'utilisateur touche une case.
         let savedFieldStyles: PageEntry["savedFieldStyles"] = null;
-        {
+        if (restoreSavedStyle) {
           try {
             const annotations = await page.getAnnotations();
             const map = new Map<string, { fontSizePt: number; color: string | null }>();

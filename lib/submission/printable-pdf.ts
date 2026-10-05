@@ -1,4 +1,4 @@
-import { PDFDocument, rgb } from "pdf-lib";
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { sanitizeForPdf } from "./dao-template-pdf";
 import { embedUnicodeFonts } from "./pdf-font";
 
@@ -77,10 +77,60 @@ export async function createPrintableSubmissionPdf(title: string, company: Recor
     "", "Lieu et date :", "", "Signature et cachet :", "", "",
   ].flatMap((line) => wrapLine(cleanText(line)));
 
-  let page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+  // --- Largeur des colonnes : elles s'ADAPTENT au contenu, la taille du texte
+  // ne change JAMAIS. Une case de tableau s'affiche à l'écran en 11 pt (Times,
+  // réglage par défaut de l'application) : chaque colonne doit donc être assez
+  // large pour le texte le plus long qu'elle contient, mesuré avec cette même
+  // police et cette même taille (plus la marge interne de la case). Si la
+  // somme dépasse la largeur d'une page A4, c'est la PAGE qui s'élargit (le
+  // lecteur l'ajuste ensuite à l'écran) — jamais le texte qui rétrécit ni qui
+  // se coupe. Les proportions mesurées sur le vrai DAO (column_ratios) restent
+  // utilisées tant que le contenu y tient. Règle générale, valable pour tout
+  // tableau généré, quel que soit le DAO.
+  const timesFont = await doc.embedFont(StandardFonts.TimesRoman);
+  const SCREEN_FONT_SIZE = 11;
+  const CELL_SIDE_PADDING = 30;
+  const BASE_TABLE_WIDTH = 487;
+  const layouts = new Map<PrintableTable, { widths: number[]; tableWidth: number }>();
+  let pageWidth = PAGE_WIDTH;
+  for (const table of tables) {
+    const columns = table.columns.slice(0, 6);
+    if (!columns.length) continue;
+    const rows = table.rows.length ? table.rows : [columns.map(() => "")];
+    const needed = columns.map((column, columnIndex) => {
+      const dataWidth = Math.max(0, ...rows.map((row) => {
+        const text = cleanText(String(row[columnIndex] ?? ""));
+        try { return timesFont.widthOfTextAtSize(text, SCREEN_FONT_SIZE); } catch { return text.length * 6; }
+      }));
+      let headerWidth = 0;
+      try { headerWidth = font.widthOfTextAtSize(cleanText(column ?? ""), 8); } catch { headerWidth = cleanText(column ?? "").length * 5; }
+      return Math.min(900, Math.max(dataWidth, headerWidth) + CELL_SIDE_PADDING);
+    });
+    const neededSum = needed.reduce((sum, value) => sum + value, 0);
+    const ratios = table.column_ratios?.length === columns.length && table.column_ratios.every((value) => value > 0) ? table.column_ratios : null;
+    const ratioSum = ratios ? ratios.reduce((sum, value) => sum + value, 0) || 1 : 1;
+    const ratioWidths = ratios ? ratios.map((ratio) => (ratio / ratioSum) * BASE_TABLE_WIDTH) : null;
+    let widths: number[];
+    let tableWidth: number;
+    if (ratioWidths && ratioWidths.every((width, index) => width >= needed[index])) {
+      widths = ratioWidths;
+      tableWidth = BASE_TABLE_WIDTH;
+    } else if (neededSum <= BASE_TABLE_WIDTH) {
+      // Tout tient : la place en trop est répartie au prorata des besoins.
+      widths = needed.map((value) => (value / neededSum) * BASE_TABLE_WIDTH);
+      tableWidth = BASE_TABLE_WIDTH;
+    } else {
+      widths = needed;
+      tableWidth = neededSum;
+    }
+    layouts.set(table, { widths, tableWidth });
+    pageWidth = Math.max(pageWidth, Math.ceil(tableWidth + MARGIN_X * 2));
+  }
+
+  let page = doc.addPage([pageWidth, PAGE_HEIGHT]);
   let y = TOP_Y;
   for (const line of lines) {
-    if (y < BOTTOM_Y) { page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]); y = TOP_Y; }
+    if (y < BOTTOM_Y) { page = doc.addPage([pageWidth, PAGE_HEIGHT]); y = TOP_Y; }
     if (line.trim()) page.drawText(line, { x: MARGIN_X, y, size: 11, font, color: rgb(0, 0, 0) });
     y -= 17;
   }
@@ -97,46 +147,15 @@ export async function createPrintableSubmissionPdf(title: string, company: Recor
     const columns = table.columns.slice(0, 6);
     if (!columns.length) continue;
     const rows = table.rows.length ? table.rows : [columns.map(() => "")];
-    const totalWidth = 487;
-    // Sans proportions mesurées sur le vrai DAO, on ne divise PLUS la largeur à
-    // égalité : une colonne de description ("Installation de chantier...") se
-    // retrouvait aussi étroite qu'une colonne "U" ou "N°", et son texte était
-    // coupé à l'écran (signalé sur le planning d'exécution). Chaque colonne
-    // reçoit une part proportionnelle à son contenu le plus long (entête
-    // comprise), bornée pour qu'aucune ne devienne ni minuscule ni énorme.
-    // Règle générale pour TOUT tableau généré sans proportions fournies.
-    const ratios = table.column_ratios?.length === columns.length && table.column_ratios.every((value) => value > 0)
-      ? table.column_ratios
-      : columns.map((column, columnIndex) => {
-          // L'entête est dessiné plus gros que les cases de données et ne peut
-          // pas rétrécir autant : on lui compte une place un peu plus grande.
-          const longest = Math.max(
-            cleanText(column ?? "").length * 1.5,
-            ...rows.map((row) => cleanText(String(row[columnIndex] ?? "")).length),
-          );
-          return Math.min(110, Math.max(10, longest + 7));
-        });
-    const ratioSum = ratios.reduce((sum, value) => sum + value, 0) || 1;
-    const widths = ratios.map((ratio) => (ratio / ratioSum) * totalWidth);
+    const { widths, tableWidth } = layouts.get(table)!;
     const offsets = widths.reduce<number[]>((acc, width, index) => [...acc, (acc[index - 1] ?? 0) + (index === 0 ? 0 : widths[index - 1])], []);
 
-    if (y - (TITLE_GAP + ROW_HEIGHT) < BOTTOM_Y) { page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]); y = TOP_Y; }
+    if (y - (TITLE_GAP + ROW_HEIGHT) < BOTTOM_Y) { page = doc.addPage([pageWidth, PAGE_HEIGHT]); y = TOP_Y; }
     page.drawText(cleanText(table.title || "Tableau du DAO"), { x: MARGIN_X, y, size: 12, font: boldFont, color: rgb(0, 0, 0) });
     y -= TITLE_GAP;
 
-    // Taille de police UNIFORME par colonne de données : la plus petite taille
-    // (entre 8 et 6 pt) qui fait tenir le texte le plus long de la colonne,
-    // plutôt qu'une taille différente par ligne (qui donnait un tableau
-    // irrégulier, et un texte de description coupé quand la taille retenue
-    // à l'écran était plus grande que celle calculée ici).
-    const columnFontSizes = columns.map((_, columnIndex) => {
-      const maxWidth = Math.max(1, widths[columnIndex] - 6);
-      const longestAtDefault = Math.max(1, ...rows.map((row) => font.widthOfTextAtSize(cleanText(String(row[columnIndex] ?? "")), 8)));
-      return longestAtDefault > maxWidth ? Math.max(6, 8 * (maxWidth / longestAtDefault)) : 8;
-    });
-
     const drawRow = (values: string[], isHeader: boolean) => {
-      if (y - ROW_HEIGHT < BOTTOM_Y) { page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]); y = TOP_Y; }
+      if (y - ROW_HEIGHT < BOTTOM_Y) { page = doc.addPage([pageWidth, PAGE_HEIGHT]); y = TOP_Y; }
       values.forEach((value, columnIndex) => {
         const width = widths[columnIndex];
         const x = MARGIN_X + offsets[columnIndex];
@@ -154,7 +173,6 @@ export async function createPrintableSubmissionPdf(title: string, company: Recor
         if (fullWidthAtDefault > maxWidth) {
           fontSize = Math.max(6, fontSize * (maxWidth / fullWidthAtDefault));
         }
-        if (!isHeader) fontSize = Math.min(fontSize, columnFontSizes[columnIndex]);
         // Une case d'EN-TÊTE (nom des colonnes) reste fixe, comme avant. Une
         // case de DONNÉE (une ligne de personnel/matériel, un poids, un
         // chiffre d'affaires...) devient une vraie case cliquable — même
