@@ -22,7 +22,7 @@
 //    Annexe 3, 2., puce) n'est jamais traitée comme une pièce.
 import { findBestTitleMatch } from "@/lib/submission/title-match";
 import { knownPagesForItem } from "@/lib/submission/parse-page-reference";
-import { extractRelevantPageRange, resolveVerifiedPages, scanDividerPages, type DividerPage } from "@/lib/submission/trim-to-relevant-pages";
+import { extendPagesUntilNextTitle, extractRelevantPageRange, resolveVerifiedPages, scanDividerPages, type DividerPage } from "@/lib/submission/trim-to-relevant-pages";
 import type { TemplateDetectedItem } from "@/lib/submission/build-dossier-items";
 
 const SUBMISSION_PART = /march[eé]|formulaire|soumission|mod[eè]le|engagement|contrat|annexe/i;
@@ -86,15 +86,21 @@ export async function addMissingPiecesListedByDao(
         if (start <= divider.page || dividerPages.has(start)) continue;
         // Déjà couverte par une pièce détectée qui démarre sur cette page.
         if (knownFirstPages().has(start)) continue;
+        // Titre retrouvé seulement par la recherche tolérante : on ne connaît
+        // que la première page, la pièce en occupe souvent plusieurs (ex.
+        // Annexe 2 = pages 48 et 49) : on lit les pages suivantes.
+        const pages = range.pages.length > 1
+          ? range.pages
+          : await extendPagesUntilNextTitle(pdfBytes, start, entry, { siblingTitles, stopPages: dividerPages });
         result.push({
           kind: "document_to_provide",
           title: entry,
-          source_reference: `Page ${start}`,
+          source_reference: pages.length > 1 ? `Pages ${pages[0]}-${pages[pages.length - 1]}` : `Page ${start}`,
           instructions: "Pièce annoncée par le DAO : lisez-la, paraphez ou signez-la si nécessaire, puis joignez-la à votre soumission.",
           required: true,
           fields: [],
           template_origin: "dao",
-          template_page_numbers: [start],
+          template_page_numbers: pages,
         });
       } catch (error) {
         console.error(`[addMissingPiecesListedByDao] ligne ignorée (${entry})`, error);

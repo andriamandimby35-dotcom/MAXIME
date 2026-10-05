@@ -780,7 +780,20 @@ export async function resolveVerifiedPages(
   // page 262 alors que les deux suivantes appartiennent bien à la pièce).
   const start = lenient.pages[0];
   if (lenient.pages.length === 1 && candidatePages.includes(start)) {
-    return { ...lenient, pages: [...new Set([start, ...candidatePages.filter((page) => page > start)])].sort((a, b) => a - b) };
+    const announced = [...new Set([start, ...candidatePages.filter((page) => page > start)])].sort((a, b) => a - b);
+    // Les pages annoncées peuvent aussi s'arrêter trop tôt (ex. Annexe 7
+    // annoncée 262-263 alors qu'elle occupe aussi la 264, ou Annexe 2 annoncée
+    // 48 alors qu'elle occupe 48 et 49) : on lit les pages qui suivent.
+    const lastAnnounced = announced[announced.length - 1];
+    const more = await extendPagesUntilNextTitle(pdfBytes, lastAnnounced, title, { siblingTitles: options.siblingTitles });
+    return { ...lenient, pages: [...announced, ...more.slice(1)] };
+  }
+  // Sinon on ne connaît que la première page : on lit les pages suivantes
+  // (voir extendPagesUntilNextTitle) pour ne pas couper une pièce de
+  // plusieurs pages après sa première (ex. Annexe 2 = pages 48 et 49).
+  if (lenient.pages.length === 1) {
+    const extended = await extendPagesUntilNextTitle(pdfBytes, start, title, { siblingTitles: options.siblingTitles });
+    return { ...lenient, pages: extended };
   }
   return lenient;
 }
@@ -1848,4 +1861,41 @@ export async function scanDividerPages(pdfBytes: Uint8Array, budgetMs = 20_000):
     // PDF illisible : aucun intercalaire, le filet de sécurité ne fait rien.
   }
   return found;
+}
+
+// Quand le titre d'une pièce n'est retrouvé que par la recherche tolérante
+// (titre pas en gras/majuscules, ex. « ANNEXE 2 : Pratiques de fraude... »),
+// on ne connaît que SA PREMIÈRE page — alors qu'elle en occupe souvent
+// plusieurs (vérifié en vrai : Annexe 2 « Pratiques de fraude et corruption »
+// = pages 48 ET 49). On lit donc les pages suivantes et on les garde tant
+// qu'aucun signal de nouvelle pièce n'apparaît : page-intercalaire d'une
+// partie (stopPages), autre « annexe N », titre exact d'une autre pièce
+// connue, ou nouveau vrai titre de page. Mêmes règles d'arrêt que
+// l'extension habituelle de extractRelevantPageRange, générique pour tout DAO.
+export async function extendPagesUntilNextTitle(
+  pdfBytes: Uint8Array,
+  startPage: number,
+  title: string,
+  options: { siblingTitles?: string[]; stopPages?: Set<number>; maxExtra?: number } = {},
+): Promise<number[]> {
+  const kept = [startPage];
+  try {
+    const doc = await loadPdfDocument(pdfBytes);
+    const keywords = phraseWords(title);
+    const ownLabel = leadingPieceLabel(title);
+    const normalizedSiblingTitles = (options.siblingTitles ?? []).map((otherTitle) => normalizeText(otherTitle)).filter(Boolean);
+    const maxExtra = options.maxExtra ?? 60;
+    for (let pageNumber = startPage + 1; pageNumber <= doc.numPages && kept.length <= maxExtra; pageNumber += 1) {
+      if (options.stopPages?.has(pageNumber)) break;
+      const pageText = await normalizedPageText(doc, pageNumber);
+      if (startsOtherAnnexe(pageText, ownLabel)) break;
+      if (normalizedSiblingTitles.length > 0 && pageContainsSiblingTitle(pageText, normalizedSiblingTitles)) break;
+      const { titleLine, heading } = await pageHeadingLine(doc, pageNumber);
+      if (titleLine && !matchesTitle(heading, keywords)) break;
+      kept.push(pageNumber);
+    }
+  } catch {
+    // Lecture impossible : on garde au moins la page de départ.
+  }
+  return kept;
 }
