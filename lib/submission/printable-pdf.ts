@@ -98,9 +98,22 @@ export async function createPrintableSubmissionPdf(title: string, company: Recor
     if (!columns.length) continue;
     const rows = table.rows.length ? table.rows : [columns.map(() => "")];
     const totalWidth = 487;
+    // Sans proportions mesurées sur le vrai DAO, on ne divise PLUS la largeur à
+    // égalité : une colonne de description ("Installation de chantier...") se
+    // retrouvait aussi étroite qu'une colonne "U" ou "N°", et son texte était
+    // coupé à l'écran (signalé sur le planning d'exécution). Chaque colonne
+    // reçoit une part proportionnelle à son contenu le plus long (entête
+    // comprise), bornée pour qu'aucune ne devienne ni minuscule ni énorme.
+    // Règle générale pour TOUT tableau généré sans proportions fournies.
     const ratios = table.column_ratios?.length === columns.length && table.column_ratios.every((value) => value > 0)
       ? table.column_ratios
-      : columns.map(() => 1);
+      : columns.map((column, columnIndex) => {
+          const longest = Math.max(
+            cleanText(column ?? "").length,
+            ...rows.map((row) => cleanText(String(row[columnIndex] ?? "")).length),
+          );
+          return Math.min(60, Math.max(8, longest + 4));
+        });
     const ratioSum = ratios.reduce((sum, value) => sum + value, 0) || 1;
     const widths = ratios.map((ratio) => (ratio / ratioSum) * totalWidth);
     const offsets = widths.reduce<number[]>((acc, width, index) => [...acc, (acc[index - 1] ?? 0) + (index === 0 ? 0 : widths[index - 1])], []);
