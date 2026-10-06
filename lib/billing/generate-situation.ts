@@ -349,7 +349,7 @@ export async function computeSituationDraft(
     } else {
       // Avec devis : seul le non classé de la période (transport, main d'œuvre,
       // autres dépenses ; les achats de matériaux sont déjà dans les lignes du
-      // devis) est ajouté à ce qui a déjà été facturé en « Autre », avec la marge.
+      // devis) est ajouté, multiplié par la marge, à ce qui a déjà été facturé en « Autre ».
       currentAmount = previousOtherAmount + roundAr(autreCostForPeriod * (1 + marginPercent / 100));
     }
     const previousAmount = previousOtherAmount;
