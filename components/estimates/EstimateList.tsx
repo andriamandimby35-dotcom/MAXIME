@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { formatAr } from "@/components/money";
@@ -64,52 +63,71 @@ export function EstimateList({ estimates, imported = [] }: { estimates: Estimate
       : `Marge enregistrée, mais le PDF externe n'a pas été remplacé : ${pdfPayload.error || "erreur inconnue"}`);
   }
 
-  const badge = (text: string) => <span style={{ display: "inline-block", marginLeft: 8, padding: "1px 8px", borderRadius: 999, background: "#e7f3ec", color: "#14532d", fontSize: ".68rem", fontWeight: 700, verticalAlign: "middle" }}>{text}</span>;
+  const stop = (event: React.SyntheticEvent) => event.stopPropagation();
+  const metricStrong: React.CSSProperties = { fontSize: ".9rem", wordBreak: "break-word" };
+  const actionsStyle: React.CSSProperties = { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", margin: "14px 0" };
+  const metricsStyle: React.CSSProperties = { gridTemplateColumns: "repeat(2,minmax(0,1fr))" };
+  const cardProps = (href: string) => ({
+    className: "projectDirectoryCard",
+    style: { cursor: "pointer" } as React.CSSProperties,
+    role: "link",
+    tabIndex: 0,
+    onClick: () => router.push(href),
+    onKeyDown: (event: React.KeyboardEvent) => { if (event.key === "Enter" && event.target === event.currentTarget) router.push(href); },
+  });
 
   return <main className="estimateListPage">
-    <div className="pageHead"><div><h1>Devis</h1><p>Un même chiffrage enregistre deux versions séparées : interne privée et soumission externe.</p></div><AddEstimateChooser /></div>
+    <div className="pageHead"><div><h1>Devis</h1><p>Un même chiffrage enregistre deux versions séparées : interne privée et soumission externe. Cliquez sur un devis pour l’ouvrir.</p></div><AddEstimateChooser /></div>
     {message && <p className="notice">{message}</p>}
-    <section className="panel tablePanel estimateListTable">
-      <table>
-        <thead><tr><th>Devis / DAO</th><th>Coût interne</th><th>Marge externe</th><th>Bénéfice attendu</th><th>Montant soumission</th><th>Versions</th></tr></thead>
-        <tbody>
-          {entries.length ? entries.map((entry) => {
-            if (entry.kind === "dao") {
-              const row = entry.row;
-              const profit = row.markupBase * row.margin / 100;
-              const externalTotal = row.externalBase + profit;
-              return <tr key={`dao-${row.id}`} className="estimateListRow">
-                <td data-label="Devis / DAO"><Link href={`/estimates/${row.id}`}><strong>{row.label}</strong></Link>{badge("DAO")}<br /><small>{row.createdAt ? new Date(row.createdAt).toLocaleDateString("fr-FR") : ""}</small></td>
-                <td data-label="Coût interne">{formatAr(row.internalTotal)}</td>
-                <td data-label="Marge externe"><label className="estimateMargin"><input type="number" min="0" step="0.1" value={row.margin} onChange={(event) => setRows((current) => current.map((item) => item.id === row.id ? { ...item, margin: Number(event.target.value) || 0 } : item))} onBlur={(event) => void saveMargin(row.id, event.target.value)} /> %</label></td>
-                <td className="estimateProfit" data-label="Bénéfice attendu">{formatAr(profit)}</td>
-                <td data-label="Montant soumission"><strong>{formatAr(externalTotal)}</strong><small className="estimateUnitNote">prix des matériaux non majorés</small></td>
-                <td data-label="Versions"><div className="estimateActions">
-                  <Link className="tenderButton" href={`/estimates/${row.id}`}>Gérer les deux versions</Link>
-                  <button type="button" className="tenderButton" onClick={() => void openPdf(entry, "internal")}>PDF interne</button>
-                  <button type="button" className="tenderButton tenderButtonPrimary" onClick={() => void openPdf(entry, "external")}>PDF externe</button>
-                  <button type="button" className="text-red-700 underline" onClick={() => void deleteEntry(entry)}>Supprimer</button>
-                </div></td>
-              </tr>;
-            }
+    {entries.length === 0 ? (
+      <section className="projectEmptyCard"><h2>Aucun devis</h2><p>Créez un devis depuis un DAO analysé, ou ajoutez-en un par PDF.</p></section>
+    ) : (
+      <section className="projectDirectoryGrid" aria-label="Liste des devis">
+        {entries.map((entry) => {
+          if (entry.kind === "dao") {
             const row = entry.row;
-            const partial = row.missingInternal > 0 && row.internalTotal > 0;
-            return <tr key={`pdf-${row.id}`} className="estimateListRow">
-              <td data-label="Devis / DAO"><Link href={`/estimates/imported/${row.id}`}><strong>{row.name}</strong></Link>{badge("PDF")}<br /><small>{row.createdAt ? new Date(row.createdAt).toLocaleDateString("fr-FR") : ""} · {row.lines} lignes</small></td>
-              <td data-label="Coût interne">{row.internalTotal > 0 ? formatAr(row.internalTotal) : "—"}{partial ? <small className="estimateUnitNote">{row.missingInternal} prix à remplir</small> : null}{row.internalTotal <= 0 && row.missingInternal > 0 ? <small className="estimateUnitNote">{row.missingInternal} prix à remplir</small> : null}</td>
-              <td data-label="Marge externe">{row.marginPercent !== null ? `${row.marginPercent.toLocaleString("fr-FR")} %` : "—"}<small className="estimateUnitNote">calculée</small></td>
-              <td className="estimateProfit" data-label="Bénéfice attendu">{row.profit !== null ? formatAr(row.profit) : "—"}</td>
-              <td data-label="Montant soumission"><strong>{row.externalTotal > 0 ? formatAr(row.externalTotal) : "—"}</strong><small className="estimateUnitNote">devis importé</small></td>
-              <td data-label="Versions"><div className="estimateActions">
-                <Link className="tenderButton" href={`/estimates/imported/${row.id}`}>Gérer les deux versions</Link>
+            const profit = row.markupBase * row.margin / 100;
+            const externalTotal = row.externalBase + profit;
+            return <div key={`dao-${row.id}`} {...cardProps(`/estimates/${row.id}`)}>
+              <span className="projectCardLabel">DEVIS · DAO</span>
+              <h2 style={{ fontSize: "1.25rem" }}>{row.label}</h2>
+              <p className="projectCardLocation" style={{ minHeight: 0 }}>{row.createdAt ? new Date(row.createdAt).toLocaleDateString("fr-FR") : ""}</p>
+              <div className="projectCardMetrics" style={metricsStyle}>
+                <span><strong style={metricStrong}>{formatAr(row.internalTotal)}</strong>coût interne</span>
+                <span onClick={stop} onKeyDown={stop}>
+                  <strong style={metricStrong}><label className="estimateMargin"><input type="number" min="0" step="0.1" value={row.margin} onChange={(event) => setRows((current) => current.map((item) => item.id === row.id ? { ...item, margin: Number(event.target.value) || 0 } : item))} onBlur={(event) => void saveMargin(row.id, event.target.value)} /> %</label></strong>marge externe
+                </span>
+                <span><strong style={{ ...metricStrong, color: "#145b35" }}>{formatAr(profit)}</strong>bénéfice attendu</span>
+                <span><strong style={metricStrong}>{formatAr(externalTotal)}</strong>montant soumission</span>
+              </div>
+              <div style={actionsStyle} onClick={stop} onKeyDown={stop}>
                 <button type="button" className="tenderButton" onClick={() => void openPdf(entry, "internal")}>PDF interne</button>
                 <button type="button" className="tenderButton tenderButtonPrimary" onClick={() => void openPdf(entry, "external")}>PDF externe</button>
                 <button type="button" className="text-red-700 underline" onClick={() => void deleteEntry(entry)}>Supprimer</button>
-              </div></td>
-            </tr>;
-          }) : <tr><td colSpan={6} className="empty">Aucun devis. Créez un devis depuis un DAO analysé, ou ajoutez-en un par PDF.</td></tr>}
-        </tbody>
-      </table>
-    </section>
+              </div>
+              <span className="projectOpenButton">Gérer les deux versions →</span>
+            </div>;
+          }
+          const row = entry.row;
+          return <div key={`pdf-${row.id}`} {...cardProps(`/estimates/imported/${row.id}`)}>
+            <span className="projectCardLabel">DEVIS · PDF</span>
+            <h2 style={{ fontSize: "1.25rem" }}>{row.name}</h2>
+            <p className="projectCardLocation" style={{ minHeight: 0 }}>{row.createdAt ? new Date(row.createdAt).toLocaleDateString("fr-FR") : ""} · {row.lines} lignes</p>
+            <div className="projectCardMetrics" style={metricsStyle}>
+              <span><strong style={metricStrong}>{row.internalTotal > 0 ? formatAr(row.internalTotal) : "—"}</strong>coût interne{row.missingInternal > 0 ? ` · ${row.missingInternal} prix à remplir` : ""}</span>
+              <span><strong style={metricStrong}>{row.marginPercent !== null ? `${row.marginPercent.toLocaleString("fr-FR")} %` : "—"}</strong>marge (calculée)</span>
+              <span><strong style={{ ...metricStrong, color: "#145b35" }}>{row.profit !== null ? formatAr(row.profit) : "—"}</strong>bénéfice attendu</span>
+              <span><strong style={metricStrong}>{row.externalTotal > 0 ? formatAr(row.externalTotal) : "—"}</strong>montant du devis importé</span>
+            </div>
+            <div style={actionsStyle} onClick={stop} onKeyDown={stop}>
+              <button type="button" className="tenderButton" onClick={() => void openPdf(entry, "internal")}>PDF interne</button>
+              <button type="button" className="tenderButton tenderButtonPrimary" onClick={() => void openPdf(entry, "external")}>PDF externe</button>
+              <button type="button" className="text-red-700 underline" onClick={() => void deleteEntry(entry)}>Supprimer</button>
+            </div>
+            <span className="projectOpenButton">Gérer les deux versions →</span>
+          </div>;
+        })}
+      </section>
+    )}
   </main>;
 }
