@@ -19,6 +19,10 @@ export async function POST(request: Request) {
     name?: string;
     location?: string;
     tasks?: string[];
+    price_lines?: Array<{ category?: string; subcategory?: string; designation?: string; unit?: string; quantity?: number; unit_price?: number }>;
+    contract_amount?: number | string | null;
+    margin_kind?: string;
+    margin_value?: number | string | null;
   };
 
   const supabase = await createServerClient();
@@ -105,7 +109,62 @@ export async function POST(request: Request) {
       if (tasksError) return NextResponse.json({ error: tasksError.message }, { status: 400 });
     }
 
-    return NextResponse.json({ ok: true, projectId });
+    // Prix lus dans le devis PDF : copiés dans le bordereau du chantier (prix
+    // client). Ils servent au montant certifié et à la facturation.
+    let warning: string | undefined;
+    const priceLines = (body.price_lines ?? []).filter((line) => String(line.designation ?? "").trim() && Number(line.unit_price) > 0);
+    if (priceLines.length > 0) {
+      // created_at croissant d'une milliseconde par ligne : garde l'ordre du
+      // devis (catégories et lignes) quand on relit le bordereau.
+      const baseTime = Date.now();
+      const rows = priceLines.map((line, index) => {
+        const quantity = Number(line.quantity) > 0 ? Number(line.quantity) : 1;
+        const unitPrice = Number(line.unit_price);
+        return {
+          organization_id: member.organization_id,
+          project_id: projectId,
+          position: String(index + 1),
+          designation: String(line.designation).trim(),
+          unit: String(line.unit ?? "").trim() || null,
+          quantity,
+          unit_price: null,
+          external_unit_price: unitPrice,
+          total: Math.round(quantity * unitPrice * 100) / 100,
+          is_internal: false,
+          created_at: new Date(baseTime + index).toISOString(),
+          category: String(line.category ?? "").trim() || null,
+          subcategory: String(line.subcategory ?? "").trim() || null,
+        };
+      });
+      let { error: itemsError } = await supabase.from("project_price_items").insert(rows);
+      if (itemsError && /category|subcategory/.test(itemsError.message)) {
+        // Fichier SQL des titres pas encore exécuté : on enregistre sans eux.
+        ({ error: itemsError } = await supabase.from("project_price_items").insert(rows.map(({ category: _c, subcategory: _s, ...rest }) => rest)));
+      }
+      if (itemsError) warning = `Chantier créé, mais les prix du devis n'ont pas pu être enregistrés : ${itemsError.message}`;
+    } else {
+      // Pas de prix dans le devis : prix de l'offre et/ou marge attendue
+      // donnés à la main (facultatifs).
+      const parse = (value: unknown) => {
+        const text = String(value ?? "").replace(/\s/g, "").replace(",", ".");
+        if (text === "") return null;
+        const n = Number(text);
+        return Number.isFinite(n) ? n : null;
+      };
+      const contract = parse(body.contract_amount);
+      // Prix et marge sont exclusifs : si les deux arrivent, le prix fixe gagne.
+      const marginValue = contract !== null && contract > 0 ? null : parse(body.margin_value);
+      if ((contract !== null && contract > 0) || marginValue !== null) {
+        const { error: settingsError } = await supabase.from("projects").update({
+          contract_amount: contract !== null && contract > 0 ? contract : null,
+          expected_margin_percent: marginValue !== null && body.margin_kind !== "amount" ? marginValue : null,
+          expected_margin_amount: marginValue !== null && body.margin_kind === "amount" ? marginValue : null,
+        }).eq("id", projectId);
+        if (settingsError) warning = "Chantier créé, mais le prix et la marge n'ont pas pu être enregistrés (le fichier SQL « 20261006_project_pricing.sql » doit d'abord être exécuté dans Supabase). Tu pourras les saisir ensuite dans Factures & paiements.";
+      }
+    }
+
+    return NextResponse.json({ ok: true, projectId, warning });
   }
 
   const estimateId = body.estimateId;

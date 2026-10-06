@@ -3,6 +3,7 @@ import { getCompanyProfileForPdf } from "@/lib/organization-profile";
 import { generateOfficialEstimatePdf, type OfficialPdfRow } from "@/lib/estimates/official-pdf";
 import { createOrSyncProjectFromEstimate } from "@/lib/projects/create-project-from-estimate";
 import { createServerClient } from "@/lib/supabase/server";
+import { computeExternalUnitPrices, targetBeforeTax } from "@/lib/estimates/external-pricing";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -75,7 +76,7 @@ async function generateOfficialPdfResponse(
 
   const { data: estimate, error: estimateError } = await supabase
     .from("estimates")
-    .select("id,organization_id,dao_template_id,client_name,created_at,profit_margin_percent")
+    .select("*")
     .eq("id", estimateId)
     .eq("organization_id", member.organization_id)
     .maybeSingle();
@@ -123,7 +124,21 @@ async function generateOfficialPdfResponse(
     group.entries.push({ reference: "", title: currentSection, total: currentSubtotal });
     recapGroups.set(groupKey, group);
   };
-  const marginMultiplier = mode === "external" ? 1 + (Number(estimate.profit_margin_percent) || 0) / 100 : 1;
+  // Prix du devis externe : même coefficient pour tous les postes, arrondi à
+  // 100 Ar ; en mode « montant total fixé », ajusté pour que le total soit
+  // exactement la somme attendue (voir lib/estimates/external-pricing.ts).
+  const pricedLines = lines.filter((line) => rowType(line) === "item");
+  const pricedInputs = pricedLines.map((line) => ({
+    quantity: numberFrom(line, ["Quantité", "QuantitÃ©", "QuantitÃƒÂ©", "Quantite", "quantite"]),
+    baseUnitPrice: numberFrom(line, ["Prix unitaire", "prix_unitaire"]),
+  }));
+  const pricedBase = pricedInputs.reduce((sum, item) => sum + item.quantity * item.baseUnitPrice, 0);
+  const targetTtc = estimate.pricing_mode === "target_total" ? Number(estimate.target_client_total) || 0 : 0;
+  const exactBeforeTax = targetTtc > 0 && pricedBase > 0 ? targetBeforeTax(targetTtc) : null;
+  const effectiveMarginPercent = exactBeforeTax !== null ? (exactBeforeTax / pricedBase - 1) * 100 : Number(estimate.profit_margin_percent) || 0;
+  const externalUnitPrices = mode === "external" ? computeExternalUnitPrices(pricedInputs, effectiveMarginPercent, exactBeforeTax) : [];
+  const externalPriceByLine = new Map<LineData, number>();
+  pricedLines.forEach((line, index) => externalPriceByLine.set(line, externalUnitPrices[index]));
   for (const line of lines) {
     const type = rowType(line);
     const designation = textFrom(line, ["Désignation", "DÃ©signation", "DÃƒÂ©signation", "Designation", "designation"]);
@@ -150,7 +165,7 @@ async function generateOfficialPdfResponse(
     // tous les postes du devis externe, y compris aux prix composés ; le
     // détail de leurs matériaux demeure lui enregistré au coût réel.
     const unitPrice = mode === "external"
-      ? Math.round(baseUnitPrice * marginMultiplier * 100) / 100
+      ? (externalPriceByLine.get(line) ?? Math.round(baseUnitPrice * (1 + effectiveMarginPercent / 100)))
       : baseUnitPrice;
     const storedTotal = numberFrom(line, ["Total", "total"]);
     const total = mode === "external" ? quantity * unitPrice : (storedTotal || quantity * unitPrice);

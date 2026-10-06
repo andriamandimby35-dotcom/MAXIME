@@ -2,6 +2,8 @@ import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { BillingProjectDetail } from "./billing-project-detail";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
+import { loadProjectFinance } from "@/lib/billing/project-finance";
+import { getContext } from "@/lib/organization";
 
 export default async function BillingProjectPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -29,6 +31,10 @@ export default async function BillingProjectPage({ params }: { params: Promise<{
     .eq("organization_id", organizationId)
     .maybeSingle();
   if (!project) notFound();
+
+  const { memberRole } = await getContext();
+  const isAdmin = memberRole === "admin" || memberRole === "owner";
+  const finance = await loadProjectFinance(supabase, organizationId, id);
 
   const [tenderResult, paymentsResult, claimsResult] = await Promise.all([
     project.source_tender_id
@@ -61,6 +67,19 @@ export default async function BillingProjectPage({ params }: { params: Promise<{
         tender={tenderResult.data ?? null}
         payments={paymentsResult.data ?? []}
         claims={claimsResult.data ?? []}
+        isAdmin={isAdmin}
+        pricing={{
+          mode: finance.pricing.mode,
+          certified: finance.pricing.certified,
+          realCost: finance.pricing.realCost,
+          margin: finance.pricing.margin,
+          marginPercent: finance.pricing.marginPercent,
+          expectedCost: finance.pricing.expectedCost,
+          hasDevis: finance.devisTotal > 0,
+          contractAmount: finance.settings.contractAmount ?? null,
+          settingsMarginPercent: finance.settings.marginPercent ?? null,
+          settingsMarginAmount: finance.settings.marginAmount ?? null,
+        }}
       />
     </>
   );

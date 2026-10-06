@@ -25,6 +25,8 @@ type EstimateSummary = {
   status?: string;
   total?: number | string | null;
   profit_margin_percent?: number | string | null;
+  pricing_mode?: string | null;
+  target_client_total?: number | string | null;
   created_at?: string;
 };
 
@@ -627,8 +629,15 @@ export default function EstimateBuilder({
     setDaoColumns(columns);
     setEstimateId(estimate.id);
     setProfitMarginPercent(Number(estimate.profit_margin_percent) || 0);
-    setExternalPricingMode("percentage");
-    setTargetClientTotal("");
+    // Marge OU montant total fixé : on rouvre le devis dans le mode enregistré.
+    const savedTarget = Number(estimate.target_client_total) || 0;
+    if (estimate.pricing_mode === "target_total" && savedTarget > 0) {
+      setExternalPricingMode("target_total");
+      setTargetClientTotal(String(savedTarget));
+    } else {
+      setExternalPricingMode("percentage");
+      setTargetClientTotal("");
+    }
     const loadedLines: EstimateLineData[] = (lines ?? []).map((line) => ({
       ...(line.data as EstimateLineData),
       [LINE_ID_KEY]: line.id,
@@ -1183,7 +1192,10 @@ export default function EstimateBuilder({
     setMessage("Aperçu du devis externe activé : les prix internes ne sont pas modifiés et aucun PDF n'est créé.");
   }
 
-  async function saveProfitMargin(value: string) {
+  // `target` : montant total TTC fixé (mode « montant total fixé »). Il est
+  // enregistré tel quel, pour que le devis externe tombe exactement dessus ;
+  // sans `target`, c'est le mode « marge » et tout montant fixé est effacé.
+  async function saveProfitMargin(value: string, target?: number) {
     const candidate = Number(value);
     const margin = Number.isFinite(candidate) ? candidate : 0;
     setProfitMarginPercent(margin);
@@ -1191,10 +1203,29 @@ export default function EstimateBuilder({
       setMessage("Marge conservée dans le brouillon : elle sera enregistrée avec le devis.");
       return;
     }
-    const response = await fetch(`/api/estimates/${estimateId}/margin`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profit_margin_percent: margin }) });
+    const response = await fetch(`/api/estimates/${estimateId}/margin`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profit_margin_percent: margin, pricing_mode: target ? "target_total" : "percentage", target_client_total: target ?? null }),
+    });
     if (!response.ok) { setMessage("Marge non enregistrée."); return; }
     const pdfResponse = await fetch(`/api/estimates/${estimateId}/official-pdf`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ save: true, mode: "external" }) });
     setMessage(pdfResponse.ok ? "Marge enregistrée : le PDF externe a été remplacé. Le devis interne conserve ses prix exacts." : "Marge enregistrée, mais régénération du PDF externe impossible.");
+  }
+
+  // À la création du devis : enregistre le mode choisi (marge ou montant fixé)
+  // avant la fabrication des PDF, pour qu'ils utilisent le bon calcul.
+  async function persistExternalPricing(id: string) {
+    const isTarget = externalPricingMode === "target_total" && Number(targetClientTotal) > 0;
+    await fetch(`/api/estimates/${id}/margin`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        profit_margin_percent: Math.max(0, financialSummary.appliedMarginPercent),
+        pricing_mode: isTarget ? "target_total" : "percentage",
+        target_client_total: isTarget ? Number(targetClientTotal) : null,
+      }),
+    }).catch(() => undefined);
   }
 
   async function saveTargetClientTotal(value: string) {
@@ -1207,7 +1238,7 @@ export default function EstimateBuilder({
       return;
     }
     const calculatedMargin = ((target / 1.08) / financialSummary.externalBase - 1) * 100;
-    await saveProfitMargin(String(calculatedMargin));
+    await saveProfitMargin(String(calculatedMargin), target);
   }
 
   const daoCategoryChoices = useMemo(() => {
@@ -2273,6 +2304,7 @@ export default function EstimateBuilder({
       setHistory((current) => current.filter((estimate) => !extraDuplicateIds.includes(estimate.id)));
     }
 
+    await persistExternalPricing(targetEstimateId);
     setEstimateId(targetEstimateId);
     setHistory((current) => [
       {
@@ -2633,7 +2665,7 @@ export default function EstimateBuilder({
             <p className="estimatePanelEyebrow">Devis externe</p>
             <h3>Marge ou prix cible</h3>
             <p className="estimatePanelDescription">
-              Choisissez une marge par poste ou indiquez le montant total TTC attendu pour la soumission.
+              Choisissez UNE seule des deux façons : une marge en %, ou le montant total TTC attendu (l’application calcule alors la marge à appliquer). Prix arrondis à 100 Ar.
             </p>
             <label className="estimateMargin">
               <span>Calcul du devis externe</span>
@@ -2645,8 +2677,8 @@ export default function EstimateBuilder({
                   if (mode === "target_total" && !targetClientTotal) setTargetClientTotal(String(Math.round(financialSummary.clientTotal)));
                 }}
               >
-                <option value="percentage">Appliquer une marge (%)</option>
-                <option value="target_total">Fixer un montant total</option>
+                <option value="percentage">Je donne la marge (%)</option>
+                <option value="target_total">Je donne le montant total attendu</option>
               </select>
               {externalPricingMode === "percentage" ? (
                 <input type="number" step="0.1" value={profitMarginPercent} onChange={(event) => setProfitMarginPercent(Number(event.target.value) || 0)} onBlur={(event) => void saveProfitMargin(event.target.value)} aria-label="Marge du devis externe" />

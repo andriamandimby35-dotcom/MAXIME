@@ -10,6 +10,8 @@ type LinePayload = {
   unit_price?: number | null;
   previous_quantity?: number;
   current_quantity?: number;
+  category?: string;
+  subcategory?: string;
 };
 
 export async function POST(request: Request) {
@@ -60,6 +62,8 @@ export async function POST(request: Request) {
       unit_price: unitPrice,
       previous_quantity: previousQuantity,
       current_quantity: currentQuantity,
+      category: String(line.category || "").trim() || null,
+      subcategory: String(line.subcategory || "").trim() || null,
     };
   });
 
@@ -100,19 +104,25 @@ export async function POST(request: Request) {
   // cette facture ou une précédente est supprimée ensuite.
   await supabase.from("projects").update({ next_claim_seq: (Number(project.next_claim_seq) || 1) + 1 }).eq("id", project.id);
 
-  const { error: itemsError } = await supabase.from("progress_claim_items").insert(
-    normalizedLines.map((line) => ({
-      organization_id: member.organization_id,
-      progress_claim_id: claim.id,
-      position: line.position,
-      designation: line.designation,
-      unit: line.unit,
-      contract_quantity: line.contract_quantity,
-      unit_price: line.unit_price,
-      previous_quantity: line.previous_quantity,
-      current_quantity: line.current_quantity,
-    })),
-  );
+  const itemRows = normalizedLines.map((line) => ({
+    organization_id: member.organization_id,
+    progress_claim_id: claim.id,
+    position: line.position,
+    designation: line.designation,
+    unit: line.unit,
+    contract_quantity: line.contract_quantity,
+    unit_price: line.unit_price,
+    previous_quantity: line.previous_quantity,
+    current_quantity: line.current_quantity,
+    category: line.category,
+    subcategory: line.subcategory,
+  }));
+  let { error: itemsError } = await supabase.from("progress_claim_items").insert(itemRows);
+  if (itemsError && /category|subcategory/.test(itemsError.message)) {
+    // Fichier SQL des titres pas encore exécuté : la facture est enregistrée
+    // sans les titres de catégorie (affichage à plat).
+    ({ error: itemsError } = await supabase.from("progress_claim_items").insert(itemRows.map(({ category: _c, subcategory: _s, ...rest }) => rest)));
+  }
   if (itemsError) {
     // On retire l'entête déjà créée plutôt que de laisser une facture sans
     // aucune ligne, impossible à corriger depuis l'écran normal.

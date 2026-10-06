@@ -16,6 +16,9 @@ export type SituationPdfLine = {
   previousAmount: number;
   currentAmount: number;
   amountThisTime: number;
+  /** Titre de catégorie et de sous-catégorie du devis (facultatifs). */
+  category?: string;
+  subcategory?: string;
 };
 
 export type SituationPdfInput = {
@@ -47,7 +50,7 @@ const RIGHT = 30;
 const TOP = 30;
 const BOTTOM = 30;
 const TABLE_WIDTH = PAGE_WIDTH - LEFT - RIGHT; // 781.89
-const COLUMN_WIDTHS = [24, 206, 38, 58, 78, 66, 88, 88, 135.89]; // somme = TABLE_WIDTH
+const COLUMN_WIDTHS = [24, 184, 34, 52, 72, 62, 48, 84, 84, 137.89]; // somme = TABLE_WIDTH
 
 function cleanText(value: unknown) {
   return String(value ?? "").replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
@@ -90,6 +93,14 @@ function qty(value: number | null) {
   if (value === null) return "—";
   return new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 3 }).format(Number(value) || 0);
 }
+// Avancement d'une ligne du devis, en % : quantité réalisée / quantité du
+// marché (cette quantité réalisée vient elle-même de l'avancement du planning).
+// Les lignes de dépenses (sans quantité de marché) n'ont pas d'avancement.
+function progressLabel(line: SituationPdfLine) {
+  if (line.kind !== "devis" || !line.contractQuantity || line.contractQuantity <= 0) return "—";
+  const percent = Math.max(0, Math.min(100, (line.currentQuantity / line.contractQuantity) * 100));
+  return `${new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 1 }).format(percent)} %`;
+}
 function binaryBytes(value: string) {
   const bytes = new Uint8Array(value.length);
   for (let index = 0; index < value.length; index += 1) bytes[index] = value.charCodeAt(index) & 0xff;
@@ -114,7 +125,7 @@ export function generateProgressClaimPdf(input: SituationPdfInput) {
   let page: PageCommands = { draw: [], lines: [], fills: [] };
   let y = 0;
   const addText = (text: string, x: number, baseline: number, size = 9, bold = false) => page.draw.push({ text, x, y: baseline, size, bold });
-  const headerLabels = ["N°", "DÉSIGNATION", "UNITÉ", "QTÉ MARCHÉ", "PRIX UNITAIRE", "QTÉ RÉALISÉE", "MONTANT CUMULÉ", "DÉJÀ FACTURÉ", "À FACTURER"];
+  const headerLabels = ["N°", "DÉSIGNATION", "UNITÉ", "QTÉ MARCHÉ", "PRIX UNITAIRE", "QTÉ RÉALISÉE", "AVANCEMENT", "MONTANT CUMULÉ", "DÉJÀ FACTURÉ", "À FACTURER"];
   const drawTableHeader = () => {
     const height = 24;
     page.fills.push({ x: LEFT, y: y - height + 5, width: TABLE_WIDTH, height, gray: 0.9 });
@@ -150,13 +161,80 @@ export function generateProgressClaimPdf(input: SituationPdfInput) {
 
   newPage();
   let sectionShown = false;
+  // Catégories et sous-catégories du devis : on les reprend ici comme sur le
+  // devis (titre, lignes, sous-total avec avancement en %). Les lignes sans
+  // catégorie (anciennes factures, dépenses diverses) restent à plat.
+  type Acc = { title: string; current: number; previous: number; thisTime: number; contract: number };
+  const newAcc = (title: string): Acc => ({ title, current: 0, previous: 0, thisTime: 0, contract: 0 });
+  const columnX = (index: number) => LEFT + COLUMN_WIDTHS.slice(0, index).reduce((sum, width) => sum + width, 0);
+  let currentCategory = "";
+  let currentSubcategory = "";
+  let categoryAcc: Acc | null = null;
+  let subcategoryAcc: Acc | null = null;
+
+  const drawHeading = (title: string, level: 1 | 2) => {
+    const height = level === 1 ? 20 : 17;
+    ensureSpace(height + 34);
+    page.fills.push({ x: LEFT, y: y - height + 5, width: TABLE_WIDTH, height, gray: level === 1 ? 0.86 : 0.94 });
+    addText(title, LEFT + (level === 1 ? 6 : 16), y - 10, level === 1 ? 8.5 : 7.8, true);
+    horizontalLine(y - height + 5, level === 1 ? 0.6 : 0.4);
+    y -= height;
+  };
+  const drawSubtotal = (acc: Acc, label: string, level: 1 | 2) => {
+    const height = 19;
+    ensureSpace(height);
+    page.fills.push({ x: LEFT, y: y - height + 5, width: TABLE_WIDTH, height, gray: level === 1 ? 0.88 : 0.95 });
+    const text = `${label} ${acc.title}`;
+    wrapText(text, COLUMN_WIDTHS[1] + COLUMN_WIDTHS[2] + COLUMN_WIDTHS[3] + COLUMN_WIDTHS[4] + COLUMN_WIDTHS[5] - 8, 7.4).slice(0, 1)
+      .forEach((line) => addText(line, LEFT + COLUMN_WIDTHS[0] + 3, y - 10, 7.4, true));
+    const percent = acc.contract > 0 ? Math.max(0, Math.min(100, (acc.current / acc.contract) * 100)) : null;
+    addText(percent === null ? "—" : `${new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 1 }).format(percent)} %`, columnX(6) + 3, y - 10, 7.2, true);
+    addText(money(acc.current), columnX(7) + 3, y - 10, 7.2, true);
+    addText(money(acc.previous), columnX(8) + 3, y - 10, 7.2, true);
+    addText(money(acc.thisTime), columnX(9) + 3, y - 10, 7.2, true);
+    horizontalLine(y - height + 5, level === 1 ? 0.6 : 0.4);
+    y -= height;
+  };
+  const closeSubcategory = () => {
+    if (subcategoryAcc) drawSubtotal(subcategoryAcc, "Sous-total", 2);
+    subcategoryAcc = null;
+    currentSubcategory = "";
+  };
+  const closeCategory = () => {
+    closeSubcategory();
+    if (categoryAcc) drawSubtotal(categoryAcc, "Total", 1);
+    categoryAcc = null;
+    currentCategory = "";
+  };
+
   for (const line of input.lines) {
-    if (line.kind === "depense" && !sectionShown) {
+    const category = cleanText(line.category);
+    const subcategory = cleanText(line.subcategory);
+    if (category || subcategory) {
+      if (category && category !== currentCategory) {
+        closeCategory();
+        currentCategory = category;
+        categoryAcc = newAcc(category);
+        drawHeading(category, 1);
+      }
+      if (subcategory !== currentSubcategory) {
+        closeSubcategory();
+        if (subcategory) {
+          currentSubcategory = subcategory;
+          subcategoryAcc = newAcc(subcategory);
+          drawHeading(subcategory, 2);
+        }
+      }
+    } else if (currentCategory || currentSubcategory) {
+      closeCategory();
+    }
+
+    if (line.kind === "depense" && !sectionShown && !category) {
       sectionShown = true;
       ensureSpace(24);
       const height = 20;
       page.fills.push({ x: LEFT, y: y - height + 5, width: TABLE_WIDTH, height, gray: 0.86 });
-      addText("DÉPENSES DIVERSES", LEFT + 6, y - 10, 8.5, true);
+      addText(input.lines.some((l) => l.kind === "devis") ? "DÉPENSES DIVERSES" : "DÉTAIL DES TRAVAUX ET FOURNITURES", LEFT + 6, y - 10, 8.5, true);
       horizontalLine(y - height + 5, 0.6); y -= height;
     }
     const designationLines = wrapText(line.designation, COLUMN_WIDTHS[1] - 6, 7.4);
@@ -165,20 +243,30 @@ export function generateProgressClaimPdf(input: SituationPdfInput) {
     const values = [
       String(line.position), "", line.unit, qty(line.contractQuantity),
       line.unitPrice === null ? "—" : money(line.unitPrice),
-      qty(line.currentQuantity), money(line.currentAmount), money(line.previousAmount), money(line.amountThisTime),
+      qty(line.currentQuantity), progressLabel(line), money(line.currentAmount), money(line.previousAmount), money(line.amountThisTime),
     ];
     let x = LEFT;
     values.forEach((value, index) => { if (index !== 1) addText(value, x + 3, y - 10, 7, false); x += COLUMN_WIDTHS[index]; });
     designationLines.forEach((text, index) => addText(text, LEFT + COLUMN_WIDTHS[0] + 3, y - 10 - index * 9, 7.4));
     horizontalLine(y - height + 4, 0.4);
     y -= height;
+
+    const contractAmount = line.kind === "devis" && line.contractQuantity && line.unitPrice ? line.contractQuantity * line.unitPrice : 0;
+    for (const acc of [categoryAcc, subcategoryAcc]) {
+      if (!acc) continue;
+      acc.current += line.currentAmount;
+      acc.previous += line.previousAmount;
+      acc.thisTime += line.amountThisTime;
+      acc.contract += contractAmount;
+    }
   }
+  closeCategory();
 
   ensureSpace(30);
   const totalHeight = 22;
   page.fills.push({ x: LEFT, y: y - totalHeight + 5, width: TABLE_WIDTH, height: totalHeight, gray: 0.82 });
   addText("TOTAL À FACTURER SUR CETTE FACTURE", LEFT + COLUMN_WIDTHS[0] + 5, y - 12, 9, true);
-  addText(money(input.grossAmount), LEFT + TABLE_WIDTH - COLUMN_WIDTHS[8] + 4, y - 12, 9, true);
+  addText(money(input.grossAmount), LEFT + TABLE_WIDTH - COLUMN_WIDTHS[9] + 4, y - 12, 9, true);
   horizontalLine(y - totalHeight + 5, 1); y -= totalHeight + 16;
 
   const summaryRows: Array<[string, string, boolean]> = [

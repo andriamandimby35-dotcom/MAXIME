@@ -12,11 +12,12 @@ function extractResponseText(payload: { output_text?: string; output?: Array<{ c
 
 // Étape "automatique" de la création d'un chantier : on donne directement un
 // PDF de devis (pas forcément un devis déjà enregistré dans Sébastien), et on
-// en extrait uniquement la liste des travaux à réaliser pour construire le
-// planning du chantier. Les prix ne sont ni lus ni conservés, et le PDF
-// lui-même n'est pas enregistré : cette route ne fait qu'analyser, la
-// création du chantier se fait ensuite via /api/projects (mode "manual"),
-// avec la liste vérifiée/corrigée par l'utilisateur.
+// en extrait la liste des travaux à réaliser (planning du chantier) ET, quand
+// le devis en contient, les prix par catégorie / ligne (utilisés ensuite pour
+// le montant certifié et la facturation client). Le PDF lui-même n'est pas
+// enregistré : cette route ne fait qu'analyser, la création du chantier se
+// fait ensuite via /api/projects (mode "manual"), avec la liste et les prix
+// vérifiés/corrigés par l'utilisateur.
 export async function POST(request: Request) {
   const supabase = await createServerClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -83,7 +84,8 @@ export async function POST(request: Request) {
       max_output_tokens: 32000,
       instructions: [
         "Tu lis un devis de travaux de bâtiment (BTP) à Madagascar.",
-        "Ignore complètement les prix, quantités en unité de prix, montants, totaux et marges : ils ne servent à rien ici.",
+        "Pour la liste 'works' (planning), ignore les prix et les montants : seuls les travaux comptent.",
+        "En plus, remplis 'price_lines' avec chaque ligne CHIFFRÉE du devis, dans l'ordre du document : category = titre de la catégorie ou du lot principal auquel la ligne appartient (chaîne vide s'il n'y en a pas), subcategory = titre de la sous-catégorie ou sous-section à l'intérieur de cette catégorie (chaîne vide s'il n'y en a pas), exactement comme écrits dans le devis, designation = le même titre court que dans 'works', unit = unité écrite, quantity = quantité, unit_price = prix unitaire en Ariary tel qu'écrit dans le devis. N'inclus jamais une ligne de titre, de sous-total ou de total dans price_lines. N'invente JAMAIS un prix : si le devis ne contient aucun prix, 'price_lines' est un tableau vide. 'devis_total' = le total général du devis s'il est écrit, sinon null.",
         "Extrais la liste des travaux à réaliser : chaque poste ou ligne de travail réel devient une entrée.",
         "Donne un titre court et clair pour chaque travail (sans numérotation ni prix).",
         "Ignore les lignes qui ne sont que des titres de section, des sous-totaux ou des totaux : elles ne sont pas des travaux.",
@@ -115,8 +117,25 @@ export async function POST(request: Request) {
               project_name: { type: "string" },
               location: { type: "string" },
               works: { type: "array", items: { type: "string" } },
+              price_lines: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    category: { type: "string" },
+                    subcategory: { type: "string" },
+                    designation: { type: "string" },
+                    unit: { type: "string" },
+                    quantity: { type: ["number", "null"] },
+                    unit_price: { type: ["number", "null"] },
+                  },
+                  required: ["category", "subcategory", "designation", "unit", "quantity", "unit_price"],
+                },
+              },
+              devis_total: { type: ["number", "null"] },
             },
-            required: ["project_name", "location", "works"],
+            required: ["project_name", "location", "works", "price_lines", "devis_total"],
           },
         },
       },
@@ -160,7 +179,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: `Réponse IA vide${reasonNote}. Réessayez.` }, { status: 502 });
   }
 
-  let parsed: { project_name?: string; location?: string; works?: string[] };
+  let parsed: { project_name?: string; location?: string; works?: string[]; price_lines?: Array<{ category?: string; subcategory?: string; designation?: string; unit?: string; quantity?: number | null; unit_price?: number | null }>; devis_total?: number | null };
   try {
     parsed = JSON.parse(outputText);
   } catch {
@@ -185,9 +204,24 @@ export async function POST(request: Request) {
   const works = (parsed.works ?? []).map((title) => title.trim()).filter(Boolean);
   if (!works.length) return NextResponse.json({ error: "Aucun travail n'a pu être identifié dans ce PDF." }, { status: 422 });
 
+  // Lignes chiffrées : on ne garde que celles qui ont vraiment un prix
+  // unitaire (jamais de prix deviné) ; une quantité absente compte pour 1.
+  const priceLines = (parsed.price_lines ?? [])
+    .map((line) => ({
+      category: String(line.category ?? "").trim(),
+      subcategory: String(line.subcategory ?? "").trim(),
+      designation: String(line.designation ?? "").trim(),
+      unit: String(line.unit ?? "").trim(),
+      quantity: Number(line.quantity) > 0 ? Number(line.quantity) : 1,
+      unit_price: Number(line.unit_price) || 0,
+    }))
+    .filter((line) => line.designation && line.unit_price > 0);
+
   return NextResponse.json({
     works,
     project_name: (parsed.project_name || "").trim(),
     location: (parsed.location || "").trim(),
+    price_lines: priceLines,
+    devis_total: Number(parsed.devis_total) > 0 ? Number(parsed.devis_total) : null,
   });
 }

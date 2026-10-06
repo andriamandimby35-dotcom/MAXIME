@@ -29,11 +29,23 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     .eq("id", id).eq("organization_id", member.organization_id).maybeSingle();
   if (claimError || !claim) return NextResponse.json({ error: "Facture introuvable dans votre organisation." }, { status: 404 });
 
-  const { data: items } = await supabase
+  type ItemRow = { position: number; designation: string; unit: string; contract_quantity: number | string; unit_price: number | string; previous_quantity: number | string; current_quantity: number | string; category?: string | null; subcategory?: string | null };
+  let items: ItemRow[] | null = null;
+  const withTitles = await supabase
     .from("progress_claim_items")
-    .select("position,designation,unit,contract_quantity,unit_price,previous_quantity,current_quantity")
+    .select("position,designation,unit,contract_quantity,unit_price,previous_quantity,current_quantity,category,subcategory")
     .eq("progress_claim_id", id)
     .order("position", { ascending: true });
+  if (!withTitles.error) items = withTitles.data as ItemRow[];
+  else {
+    // Colonnes de titres pas encore créées (fichier SQL non exécuté) : facture à plat.
+    const plain = await supabase
+      .from("progress_claim_items")
+      .select("position,designation,unit,contract_quantity,unit_price,previous_quantity,current_quantity")
+      .eq("progress_claim_id", id)
+      .order("position", { ascending: true });
+    items = plain.data as ItemRow[] | null;
+  }
 
   // Le nom du client est figé sur la facture au moment de sa création (voir
   // POST /api/billing/claims) : on ne le relit plus depuis le DAO ici, pour
@@ -69,6 +81,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       previousAmount,
       currentAmount,
       amountThisTime: Math.round((currentAmount - previousAmount) * 100) / 100,
+      category: item.category || undefined,
+      subcategory: item.subcategory || undefined,
     };
   });
 

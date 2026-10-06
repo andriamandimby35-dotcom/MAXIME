@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useState } from "react";
+import { FormEvent, Fragment, useState } from "react";
 import { useRouter } from "next/navigation";
 import { certifiedAmount } from "@/lib/billing";
 import { usePdfViewer } from "@/components/PdfViewerProvider";
+import { overpaidAmount } from "@/lib/billing/pricing";
 
 type Project = { id: string; project_code: string | null; name: string; location: string | null; budget_amount: number | string | null; status: string | null; source_estimate_id: string | null; manual_margin_percent: number | string | null };
 type Payment = { id: string; progress_claim_id: string | null; payment_date: string; amount: number | string; method: string; reference: string | null; payment_type: string };
@@ -28,6 +29,8 @@ type DraftLine = {
   amountThisTime: number;
   matchedTaskTitle?: string | null;
   needsReview?: boolean;
+  category?: string;
+  subcategory?: string;
 };
 
 type Draft = {
@@ -50,12 +53,25 @@ type Draft = {
   unmatchedCount: number;
 };
 
+type PricingInfo = {
+  mode: "fixed" | "floating" | "none";
+  certified: number;
+  realCost: number;
+  margin: number;
+  marginPercent: number | null;
+  expectedCost: number | null;
+  hasDevis: boolean;
+  contractAmount: number | null;
+  settingsMarginPercent: number | null;
+  settingsMarginAmount: number | null;
+};
+
 const ariary = new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 0 });
 const today = new Date().toISOString().slice(0, 10);
 const paymentTypeLabel: Record<string, string> = { avancement: "Avancement", attachement: "Attachement", solde: "Solde de fin de travaux" };
 const claimStatusLabel: Record<string, string> = { draft: "Brouillon", submitted: "Envoyée", approved: "Approuvée", partially_paid: "Partiellement payée", paid: "Payée", rejected: "Refusée" };
 
-export function BillingProjectDetail({ project, tender, payments, claims }: { project: Project; tender: Tender | null; payments: Payment[]; claims: Claim[] }) {
+export function BillingProjectDetail({ project, tender, payments, claims, isAdmin, pricing }: { project: Project; tender: Tender | null; payments: Payment[]; claims: Claim[]; isAdmin: boolean; pricing: PricingInfo }) {
   const router = useRouter();
   const { openPdf } = usePdfViewer();
   const [busy, setBusy] = useState(false);
@@ -79,10 +95,67 @@ export function BillingProjectDetail({ project, tender, payments, claims }: { pr
   const [issueDateInput, setIssueDateInput] = useState(today);
 
   const netClaimsTotal = claims.filter((claim) => claim.status !== "rejected").reduce((sum, claim) => sum + Number(claim.net_amount || 0), 0);
-  const certified = claims.length > 0 ? netClaimsTotal : certifiedAmount(Number(project.budget_amount) || 0);
+  // Certifié = ce que le client doit payer (devis, prix de l'offre, ou
+  // dépenses réelles + marge attendue). Sans aucune information de prix, on
+  // garde l'ancien calcul.
+  const certified = pricing.mode !== "none"
+    ? pricing.certified
+    : claims.length > 0 ? netClaimsTotal : certifiedAmount(Number(project.budget_amount) || 0);
   const received = payments.reduce((sum, item) => sum + Number(item.amount || 0), 0);
   const outstanding = Math.max(0, certified - received);
   const percent = certified > 0 ? Math.min(100, Math.round((received / certified) * 100)) : 0;
+  const overpaid = overpaidAmount(certified, received);
+
+  const [editingPaymentId, setEditingPaymentId] = useState<string | null>(null);
+  const [editPayment, setEditPayment] = useState({ payment_date: today, amount: "0", payment_type: "avancement", method: "bank_transfer", reference: "" });
+  // Prix de l'offre OU marge attendue, jamais les deux : l'application doit
+  // savoir sans ambiguïté lequel est fixe.
+  const [pricingForm, setPricingForm] = useState({
+    kind: (pricing.contractAmount ? "price" : pricing.settingsMarginPercent !== null || pricing.settingsMarginAmount !== null ? "margin" : "price") as "price" | "margin",
+    contract_amount: pricing.contractAmount ? String(pricing.contractAmount) : "",
+    margin_kind: pricing.settingsMarginAmount !== null && pricing.settingsMarginPercent === null ? "amount" : "percent",
+    margin_value: pricing.settingsMarginPercent !== null ? String(pricing.settingsMarginPercent) : pricing.settingsMarginAmount !== null ? String(pricing.settingsMarginAmount) : "",
+  });
+  const [pricingMessage, setPricingMessage] = useState("");
+
+  function startEditPayment(payment: Payment) {
+    setEditingPaymentId(payment.id);
+    setEditPayment({ payment_date: payment.payment_date.slice(0, 10), amount: String(Number(payment.amount)), payment_type: payment.payment_type, method: payment.method, reference: payment.reference ?? "" });
+  }
+
+  async function saveEditedPayment() {
+    if (!editingPaymentId) return;
+    setBusy(true); setMessage("");
+    const response = await fetch(`/api/billing/payments/${editingPaymentId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(editPayment),
+    });
+    const result = await response.json().catch(() => ({}));
+    setBusy(false);
+    if (!response.ok) return setMessage(result.error ?? "Modification impossible.");
+    setEditingPaymentId(null);
+    setMessage("Paiement modifié.");
+    router.refresh();
+  }
+
+  async function savePricing() {
+    setBusy(true); setPricingMessage("");
+    const response = await fetch(`/api/billing/projects/${project.id}/pricing`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contract_amount: pricingForm.kind === "price" ? pricingForm.contract_amount : "",
+        margin_kind: pricingForm.margin_kind,
+        margin_value: pricingForm.kind === "margin" ? pricingForm.margin_value : "",
+      }),
+    });
+    const result = await response.json().catch(() => ({}));
+    setBusy(false);
+    if (!response.ok) return setPricingMessage(result.error ?? "Enregistrement impossible.");
+    setPricingMessage("Prix et marge enregistrés.");
+    router.refresh();
+  }
 
   async function submitPayment(event: FormEvent) {
     event.preventDefault();
@@ -177,6 +250,8 @@ export function BillingProjectDetail({ project, tender, payments, claims }: { pr
           unit_price: line.unitPrice,
           previous_quantity: line.previousQuantity,
           current_quantity: line.currentQuantity,
+          category: line.category,
+          subcategory: line.subcategory,
         })),
       }),
     });
@@ -217,11 +292,63 @@ export function BillingProjectDetail({ project, tender, payments, claims }: { pr
 
       <div className="stats billingStats">
         <article><span>Montant certifié</span><strong>{ariary.format(certified)} Ar</strong></article>
-        <article><span>Paiements reçus</span><strong>{ariary.format(received)} Ar</strong></article>
+        <article style={overpaid > 0 ? { background: "#fdecec", border: "2px solid #c0392b" } : undefined}>
+          <span style={overpaid > 0 ? { color: "#b3261e" } : undefined}>Paiements reçus</span>
+          <strong style={overpaid > 0 ? { color: "#b3261e" } : undefined}>{ariary.format(received)} Ar</strong>
+        </article>
         <article><span>Reste à encaisser</span><strong>{ariary.format(outstanding)} Ar</strong></article>
         <article><span>Encaissé</span><strong>{percent} %</strong></article>
       </div>
       <div className="progress"><span style={{ width: `${percent}%` }} /></div>
+
+      {overpaid > 0 && (
+        <p className="notice" style={{ marginTop: "12px", background: "#fdecec", color: "#b3261e", fontWeight: 700 }}>
+          Erreur : les paiements reçus dépassent le montant certifié de {ariary.format(overpaid)} Ar.
+          {isAdmin ? " Corrige ou annule le paiement fautif dans la liste ci-dessous (bouton « Modifier »)." : " Demande à l'administrateur de corriger le paiement."}
+        </p>
+      )}
+
+      {pricing.mode !== "none" && (
+        <p style={{ marginTop: "10px", fontSize: ".9rem", color: "#555" }}>
+          Dépenses réelles payées : <strong>{ariary.format(pricing.realCost)} Ar</strong>
+          {" · "}Marge actuelle : <strong>{ariary.format(pricing.margin)} Ar{pricing.marginPercent !== null ? ` (${pricing.marginPercent.toFixed(1)} % des dépenses)` : ""}</strong>
+          {pricing.mode === "fixed" ? " · Prix fixe : seule la marge change quand les dépenses changent." : " · Prix = dépenses réelles + marge attendue."}
+        </p>
+      )}
+
+      {isAdmin && !pricing.hasDevis && (
+        <div className="panel" style={{ marginTop: "16px" }}>
+          <h3 style={{ marginTop: 0 }}>Prix et marge de ce chantier</h3>
+          <p style={{ fontSize: ".85rem", color: "#666" }}>
+            Ce chantier n'a pas de devis chiffré. Choisis <strong>une seule</strong> des deux façons :
+            le <strong>prix de l'offre</strong> (somme fixe que le client paie, seule ta marge change selon les dépenses ; on facture selon l'avancement du planning)
+            ou la <strong>marge attendue</strong> (le prix suit alors les dépenses réelles).
+          </p>
+          <div style={{ display: "flex", gap: "18px", flexWrap: "wrap", margin: "8px 0" }}>
+            <label style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+              <input type="radio" name="pricingKind" checked={pricingForm.kind === "price"} onChange={() => setPricingForm({ ...pricingForm, kind: "price" })} /> Prix de l'offre (fixe)
+            </label>
+            <label style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+              <input type="radio" name="pricingKind" checked={pricingForm.kind === "margin"} onChange={() => setPricingForm({ ...pricingForm, kind: "margin" })} /> Marge attendue
+            </label>
+          </div>
+          {pricingForm.kind === "price" ? (
+            <label>Prix de l'offre (Ar)<input type="number" min="0" value={pricingForm.contract_amount} onChange={(e) => setPricingForm({ ...pricingForm, contract_amount: e.target.value })} placeholder="Ex : 10000000" /></label>
+          ) : (
+            <label>Marge attendue
+              <span style={{ display: "flex", gap: "8px" }}>
+                <input type="number" step="0.1" value={pricingForm.margin_value} onChange={(e) => setPricingForm({ ...pricingForm, margin_value: e.target.value })} placeholder={pricingForm.margin_kind === "percent" ? "Ex : 20" : "Ex : 2000000"} />
+                <select value={pricingForm.margin_kind} onChange={(e) => setPricingForm({ ...pricingForm, margin_kind: e.target.value })}>
+                  <option value="percent">%</option>
+                  <option value="amount">Ar (bénéfice)</option>
+                </select>
+              </span>
+            </label>
+          )}
+          <button type="button" className="button" disabled={busy} onClick={() => void savePricing()}>Enregistrer le prix / la marge</button>
+          {pricingMessage && <p className="notice" style={{ marginTop: "10px" }}>{pricingMessage}</p>}
+        </div>
+      )}
 
       {message && <p className="notice" style={{ marginTop: "16px" }}>{message}</p>}
 
@@ -276,21 +403,31 @@ export function BillingProjectDetail({ project, tender, payments, claims }: { pr
                 <thead>
                   <tr>
                     <th>Désignation</th><th>Unité</th><th>Qté marché</th><th>Prix unitaire</th>
-                    <th>Qté/montant réalisé</th><th>Déjà facturé</th><th>À facturer</th>
+                    <th>Qté/montant réalisé</th><th>Avancement</th><th>Déjà facturé</th><th>À facturer</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {draft.lines.map((line, index) => (
-                    <tr key={index}>
+                  {draft.lines.map((line, index) => {
+                    const previous = draft.lines[index - 1];
+                    const newCategory = Boolean(line.category) && line.category !== previous?.category;
+                    const newSubcategory = Boolean(line.subcategory) && (newCategory || line.subcategory !== previous?.subcategory);
+                    return (
+                    <Fragment key={index}>
+                    {newCategory && <tr><td colSpan={8} style={{ background: "#e3ebe5", fontWeight: 800 }}>{line.category}</td></tr>}
+                    {newSubcategory && <tr><td colSpan={8} style={{ background: "#f0f4f1", fontWeight: 700, paddingLeft: "22px" }}>{line.subcategory}</td></tr>}
+                    <tr>
                       <td>{line.designation}{line.needsReview && <span className="pill" style={{ marginLeft: "6px", background: "#fbeee0" }}>non reconnue</span>}</td>
                       <td>{line.unit}</td>
                       <td>{line.contractQuantity === null ? "—" : line.contractQuantity}</td>
                       <td>{line.unitPrice === null ? "—" : `${ariary.format(line.unitPrice)} Ar`}</td>
                       <td>{ariary.format(line.currentAmount)} Ar</td>
+                      <td>{line.kind === "devis" && line.contractQuantity ? `${Math.max(0, Math.min(100, (line.currentQuantity / line.contractQuantity) * 100)).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} %` : "—"}</td>
                       <td>{ariary.format(line.previousAmount)} Ar</td>
                       <td><strong>{ariary.format(line.amountThisTime)} Ar</strong></td>
                     </tr>
-                  ))}
+                    </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -352,10 +489,31 @@ export function BillingProjectDetail({ project, tender, payments, claims }: { pr
                 <td><strong>{ariary.format(Number(payment.amount))} Ar</strong></td>
                 <td>{payment.method}</td>
                 <td>{payment.reference ?? "—"}</td>
-                <td><button type="button" className="dangerButton" disabled={busy} onClick={() => void cancelPayment(payment.id)}>Annuler</button></td>
+                <td style={{ display: "flex", gap: "8px" }}>
+                  {isAdmin && <button type="button" className="ghostButton" disabled={busy} onClick={() => startEditPayment(payment)}>Modifier</button>}
+                  <button type="button" className="dangerButton" disabled={busy} onClick={() => void cancelPayment(payment.id)}>Annuler</button>
+                </td>
               </tr>
             ))}</tbody>
           </table>
+          {editingPaymentId && (
+            <div className="panel" style={{ marginTop: "12px", background: "#fbf6e8" }}>
+              <strong>Modifier le paiement</strong>
+              <div className="formPair" style={{ marginTop: "8px" }}>
+                <label>Date<input type="date" value={editPayment.payment_date} onChange={(e) => setEditPayment({ ...editPayment, payment_date: e.target.value })} /></label>
+                <label>Montant (Ar)<input type="number" min="0" value={editPayment.amount} onChange={(e) => setEditPayment({ ...editPayment, amount: e.target.value })} /></label>
+              </div>
+              <div className="formPair">
+                <label>Origine<select value={editPayment.payment_type} onChange={(e) => setEditPayment({ ...editPayment, payment_type: e.target.value })}><option value="avancement">Avancement</option><option value="attachement">Attachement</option><option value="solde">Solde de fin de travaux</option></select></label>
+                <label>Mode<select value={editPayment.method} onChange={(e) => setEditPayment({ ...editPayment, method: e.target.value })}><option value="bank_transfer">Virement bancaire</option><option value="cheque">Chèque</option><option value="cash">Espèces</option><option value="mobile_money">Mobile Money</option><option value="other">Autre</option></select></label>
+              </div>
+              <label>Référence<input value={editPayment.reference} onChange={(e) => setEditPayment({ ...editPayment, reference: e.target.value })} /></label>
+              <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
+                <button type="button" className="button" disabled={busy} onClick={() => void saveEditedPayment()}>Enregistrer la modification</button>
+                <button type="button" className="ghostButton" onClick={() => setEditingPaymentId(null)}>Annuler</button>
+              </div>
+            </div>
+          )}
           {!payments.length && <p className="emptyState">Aucun paiement enregistré pour ce chantier.</p>}
         </div>
       </div>

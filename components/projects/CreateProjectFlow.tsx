@@ -19,6 +19,16 @@ export function CreateProjectFlow() {
   const [taskInput, setTaskInput] = useState("");
   const [fromPdf, setFromPdf] = useState(false);
 
+  // Prix lus dans le devis PDF (utilisés pour le montant certifié et la
+  // facturation). Sans prix dans le devis, l'administrateur peut indiquer le
+  // prix de l'offre et/ou la marge attendue (facultatif).
+  type PriceLine = { category: string; subcategory: string; designation: string; unit: string; quantity: number; unit_price: number };
+  const [priceLines, setPriceLines] = useState<PriceLine[]>([]);
+  const [priceKind, setPriceKind] = useState<"none" | "price" | "margin">("none");
+  const [contractAmount, setContractAmount] = useState("");
+  const [marginKind, setMarginKind] = useState<"percent" | "amount">("percent");
+  const [marginValue, setMarginValue] = useState("");
+
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
 
@@ -34,6 +44,11 @@ export function CreateProjectFlow() {
     setFromPdf(false);
     setPdfFile(null);
     setAnalyzing(false);
+    setPriceLines([]);
+    setPriceKind("none");
+    setContractAmount("");
+    setMarginKind("percent");
+    setMarginValue("");
   }
 
   function addTask() {
@@ -54,7 +69,7 @@ export function CreateProjectFlow() {
     const form = new FormData();
     form.append("file", pdfFile);
     const response = await fetch("/api/projects/extract-tasks-from-pdf", { method: "POST", body: form });
-    const payload = await response.json().catch(() => ({})) as { error?: string; works?: string[]; project_name?: string; location?: string; upstream_status?: number; details?: string };
+    const payload = await response.json().catch(() => ({})) as { error?: string; works?: string[]; project_name?: string; location?: string; price_lines?: PriceLine[]; upstream_status?: number; details?: string };
     setAnalyzing(false);
     if (!response.ok || !payload.works) {
       // Diagnostic temporaire : on affiche aussi la réponse brute du moteur IA
@@ -66,6 +81,7 @@ export function CreateProjectFlow() {
     setName(payload.project_name || "");
     setLocation(payload.location || "");
     setTasks(payload.works);
+    setPriceLines(payload.price_lines ?? []);
     setFromPdf(true);
     setStep("review");
   }
@@ -77,10 +93,10 @@ export function CreateProjectFlow() {
     const response = await fetch("/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "manual", name, location, tasks }),
+      body: JSON.stringify({ mode: "manual", name, location, tasks, price_lines: priceLines, contract_amount: priceKind === "price" ? contractAmount : "", margin_kind: marginKind, margin_value: priceKind === "margin" ? marginValue : "" }),
     });
     const payload = await response.json().catch(() => ({})) as {
-      error?: string; code?: string; details?: string; hint?: string; projectId?: string;
+      error?: string; code?: string; details?: string; hint?: string; projectId?: string; warning?: string;
       diagAppUserId?: string; diagDbSees?: unknown; diagRpcError?: string | null;
     };
     if (!response.ok || !payload.projectId) {
@@ -125,7 +141,7 @@ export function CreateProjectFlow() {
         {step === "upload" && <>
           <h2 className="font-bold text-xl mb-4">Nouveau chantier — depuis un PDF</h2>
           <p style={{ marginBottom: 14, color: "#6b776f" }}>
-            Ajoutez le PDF d&apos;un devis déjà fait. Les travaux à réaliser en seront extraits automatiquement ; les prix ne sont pas utilisés.
+            Ajoutez le PDF d&apos;un devis déjà fait. Les travaux à réaliser en seront extraits automatiquement, ainsi que les prix s&apos;il y en a (ils serviront au montant certifié et à la facture du client).
           </p>
           <input
             type="file"
@@ -171,6 +187,43 @@ export function CreateProjectFlow() {
             <button type="button" className="tenderButton" onClick={addTask}>+ Ajouter un travail</button>
           </div>
 
+
+          <strong style={{ display: "block", margin: "16px 0 8px" }}>Prix du chantier</strong>
+          {priceLines.length > 0 ? (
+            <div style={{ padding: "10px 12px", border: "1px solid #cfe3d4", borderRadius: 10, background: "#f3faf5", fontSize: 13 }}>
+              <p style={{ margin: 0 }}>
+                Prix lus dans le devis : <strong>{priceLines.length} ligne(s)</strong>, total{" "}
+                <strong>{new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 0 }).format(priceLines.reduce((sum, line) => sum + line.quantity * line.unit_price, 0))} Ar</strong>.
+              </p>
+              <p style={{ margin: "6px 0 0", color: "#6b776f" }}>Ce total sera le montant que le client doit payer (certifié). Les lignes servent à la facture, avec l&apos;avancement du planning.</p>
+            </div>
+          ) : (
+            <div style={{ display: "grid", gap: 8 }}>
+              <p style={{ margin: 0, color: "#6b776f", fontSize: 13 }}>
+                Aucun prix dans ce devis (ou chantier manuel). Facultatif : indiquez <strong>soit</strong> le prix de l&apos;offre (somme fixe), <strong>soit</strong> la marge attendue (pas les deux). Vous pourrez le faire plus tard dans « Factures &amp; paiements ».
+              </p>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}><input type="radio" name="priceKind" checked={priceKind === "price"} onChange={() => setPriceKind("price")} /> Prix de l&apos;offre (fixe)</label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}><input type="radio" name="priceKind" checked={priceKind === "margin"} onChange={() => setPriceKind("margin")} /> Marge attendue</label>
+              </div>
+              {priceKind === "price" && (
+                <label>Prix général de l&apos;offre (Ar)
+                  <input type="number" min="0" value={contractAmount} onChange={(event) => setContractAmount(event.target.value)} placeholder="Ex. 10000000" />
+                </label>
+              )}
+              {priceKind === "margin" && (
+                <label>Marge attendue
+                  <span style={{ display: "flex", gap: 8 }}>
+                    <input type="number" step="0.1" value={marginValue} onChange={(event) => setMarginValue(event.target.value)} placeholder={marginKind === "percent" ? "Ex. 20" : "Ex. 2000000"} />
+                    <select value={marginKind} onChange={(event) => setMarginKind(event.target.value as "percent" | "amount")}>
+                      <option value="percent">%</option>
+                      <option value="amount">Ar (bénéfice)</option>
+                    </select>
+                  </span>
+                </label>
+              )}
+            </div>
+          )}
           {error && <p className="notice danger" style={{ marginTop: 12 }}>{error}</p>}
           <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
             <button type="button" className="tenderButton tenderButtonPrimary" disabled={busy} onClick={() => void submitProject()}>

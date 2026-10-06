@@ -1,5 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { canonicalMaterialKey } from "@/lib/material-normalization";
+import { computePricing, distributeByCoefficient, roundAr } from "@/lib/billing/pricing";
+import { loadProjectFinance } from "@/lib/billing/project-finance";
 
 // Calcul du "brouillon" d'une facture (situation de travaux), à partir :
 // - du devis externe du chantier (les lignes réellement vendues au client),
@@ -25,6 +27,9 @@ export type SituationDraftLine = {
   amountThisTime: number;
   matchedTaskTitle?: string | null;
   needsReview?: boolean;
+  /** Titre de catégorie / sous-catégorie du devis (repris sur la facture). */
+  category?: string;
+  subcategory?: string;
 };
 
 export type SituationDraft = {
@@ -119,6 +124,7 @@ export async function computeSituationDraft(
   // La marge à appliquer vient du devis d'origine ; à défaut (chantier créé
   // à la main, sans devis), on demande à l'utilisateur de la préciser une
   // fois, puis on la retient sur le chantier pour ne plus la redemander.
+  const finance = await loadProjectFinance(supabase, organizationId, projectId);
   let marginPercent: number;
   if (project.source_estimate_id) {
     const { data: estimate } = await supabase
@@ -127,6 +133,13 @@ export async function computeSituationDraft(
       .eq("id", project.source_estimate_id)
       .maybeSingle();
     marginPercent = Number(estimate?.profit_margin_percent) || 0;
+  } else if (finance.settings.marginPercent !== null && finance.settings.marginPercent !== undefined) {
+    // Marge attendue donnée à la création du chantier.
+    marginPercent = Number(finance.settings.marginPercent) || 0;
+  } else if (finance.settings.contractAmount || finance.settings.marginAmount) {
+    // Prix ou bénéfice attendu donné sans pourcentage : la marge appliquée
+    // est celle qui résulte des dépenses réelles (elle bouge avec elles).
+    marginPercent = Math.max(0, finance.pricing.marginPercent ?? 0);
   } else if (project.manual_margin_percent !== null && project.manual_margin_percent !== undefined) {
     marginPercent = Number(project.manual_margin_percent) || 0;
   } else if (marginOverride !== undefined && Number.isFinite(marginOverride)) {
@@ -135,15 +148,39 @@ export async function computeSituationDraft(
     return { needsMarginInput: true, projectId, projectName: project.name };
   }
 
-  const { data: priceItems, error: priceItemsError } = await supabase
-    .from("project_price_items")
-    .select("designation,unit,quantity,unit_price,external_unit_price,is_internal,created_at")
-    .eq("project_id", projectId)
-    .eq("is_internal", false)
-    .order("created_at", { ascending: true });
-  if (priceItemsError) return { error: priceItemsError.message };
-  if (!priceItems || priceItems.length === 0) {
-    return { error: "Ce chantier n'a aucun poste de devis externe : impossible de générer une facture." };
+  // Les titres de catégorie / sous-catégorie sont dans deux colonnes ajoutées
+  // par un fichier SQL : tant qu'il n'a pas été exécuté, on relit sans elles
+  // (la facture reste alors "à plat", sans titres).
+  type PriceItemRow = { designation: string; unit: string | null; quantity: number | string | null; unit_price: number | string | null; external_unit_price: number | string | null; is_internal: boolean | null; created_at: string; category?: string | null; subcategory?: string | null };
+  let priceItems: PriceItemRow[] | null = null;
+  {
+    const withTitles = await supabase
+      .from("project_price_items")
+      .select("designation,unit,quantity,unit_price,external_unit_price,is_internal,created_at,category,subcategory")
+      .eq("project_id", projectId)
+      .eq("is_internal", false)
+      .order("created_at", { ascending: true });
+    if (!withTitles.error) {
+      priceItems = withTitles.data as unknown as PriceItemRow[];
+    } else {
+      const plain = await supabase
+        .from("project_price_items")
+        .select("designation,unit,quantity,unit_price,external_unit_price,is_internal,created_at")
+        .eq("project_id", projectId)
+        .eq("is_internal", false)
+        .order("created_at", { ascending: true });
+      if (plain.error) return { error: plain.error.message };
+      priceItems = plain.data as unknown as PriceItemRow[];
+    }
+  }
+
+  // Chantier sans devis chiffré : la facture est bâtie à partir des dépenses
+  // réellement payées (catégories et sous-catégories), chacune multipliée par
+  // le même coefficient pour arriver au prix client (voir pricing.ts).
+  const noDevis = !priceItems || priceItems.length === 0;
+  const items = priceItems ?? [];
+  if (noDevis && finance.realCost <= 0) {
+    return { error: "Ce chantier n'a ni devis chiffré ni dépense payée : rien à facturer pour l'instant." };
   }
 
   const { data: tasks } = await supabase
@@ -178,7 +215,7 @@ export async function computeSituationDraft(
   }
 
   let unmatchedCount = 0;
-  const devisLines: SituationDraftLine[] = priceItems.map((item, index) => {
+  const devisLines: SituationDraftLine[] = items.map((item, index) => {
     const contractQuantity = Number(item.quantity) || 0;
     const baseUnitPrice = Number(item.unit_price) || 0;
     const storedExternalPrice = Number(item.external_unit_price);
@@ -209,6 +246,8 @@ export async function computeSituationDraft(
       amountThisTime: Math.round((currentAmount - previousAmount) * 100) / 100,
       matchedTaskTitle: match?.title ?? null,
       needsReview,
+      category: String(item.category ?? "").trim() || undefined,
+      subcategory: String(item.subcategory ?? "").trim() || undefined,
     };
   });
 
@@ -228,7 +267,43 @@ export async function computeSituationDraft(
   const otherPaid = sumAmount(otherOrders.data);
   const salaryPaid = (salaryPayments.data ?? []).reduce((sum, row) => sum + (Number(row.total_amount) || 0), 0);
 
-  const depenseLines: SituationDraftLine[] = [
+  let noDevisWarning: string | null = null;
+  const depenseLines: SituationDraftLine[] = noDevis
+    ? (() => {
+        const pricing = finance.pricing.mode !== "none"
+          ? finance.pricing
+          : computePricing({ settings: { marginPercent }, realCost: finance.realCost, progress: finance.progress });
+        if (pricing.mode === "fixed" && finance.progress === null) {
+          noDevisWarning = "Ce chantier n'a aucune tâche dans le planning : toute la somme de l'offre est répartie sur les dépenses déjà payées. Ajoute les travaux au planning pour facturer selon l'avancement.";
+        }
+        const flat = finance.categories.flatMap((category) => category.lines.map((line) => ({
+          category: category.label,
+          designation: line.label,
+          cost: line.cost,
+        })));
+        const coefficient = pricing.coefficient ?? 1 + marginPercent / 100;
+        const amounts = distributeByCoefficient(flat.map((row) => row.cost), coefficient, pricing.forceTotal ? pricing.certified : null);
+        return flat.map((row, index) => {
+          const currentAmount = amounts[index];
+          const previousAmount = previousQuantityByDesignation.get(normalizeDesignation(row.designation)) || 0;
+          const current = Math.max(previousAmount, currentAmount);
+          return {
+            kind: "depense" as const,
+            position: index + 1,
+            designation: row.designation,
+            category: row.category,
+            unit: "forfait",
+            contractQuantity: null,
+            unitPrice: null,
+            previousQuantity: previousAmount,
+            currentQuantity: current,
+            previousAmount,
+            currentAmount: current,
+            amountThisTime: roundAr(current - previousAmount),
+          };
+        });
+      })()
+    : [
     { label: "Transport", cumulativePaid: transportPaid },
     { label: "Main d'œuvre", cumulativePaid: salaryPaid },
     { label: "Autre", cumulativePaid: otherPaid },
@@ -241,7 +316,7 @@ export async function computeSituationDraft(
     const current = Math.max(previousAmount, currentAmount);
     return {
       kind: "depense" as const,
-      position: priceItems.length + index + 1,
+      position: items.length + index + 1,
       designation: label,
       unit: "forfait",
       contractQuantity: null,
@@ -257,13 +332,13 @@ export async function computeSituationDraft(
   const lines = [...devisLines, ...depenseLines];
   const grossAmount = Math.round(lines.reduce((sum, line) => sum + line.amountThisTime, 0) * 100) / 100;
 
-  const internalBudget = priceItems.reduce((sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.unit_price) || 0), 0);
+  const internalBudget = items.reduce((sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.unit_price) || 0), 0);
   const totalExpenses = transportPaid + otherPaid + salaryPaid;
   const globalProgressFromMatches = devisLines.length > 0
     ? devisLines.reduce((sum, line) => sum + (line.contractQuantity ? line.currentQuantity / (line.contractQuantity || 1) : 0), 0) / devisLines.length * 100
     : 0;
   const expensesRatio = internalBudget > 0 ? (totalExpenses / internalBudget) * 100 : 0;
-  let expensesWarning: string | null = null;
+  let expensesWarning: string | null = noDevisWarning;
   if (internalBudget > 0 && Math.abs(expensesRatio - globalProgressFromMatches) > 20) {
     expensesWarning = `L'avancement calculé (${globalProgressFromMatches.toFixed(0)} % en moyenne) semble incohérent avec les dépenses déjà engagées (${expensesRatio.toFixed(0)} % du coût interne prévu). Vérifie ces chiffres avant d'envoyer la facture.`;
   }

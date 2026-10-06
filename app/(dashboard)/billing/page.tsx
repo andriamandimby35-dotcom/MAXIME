@@ -2,6 +2,8 @@ import { createClient } from "@/lib/supabase/server";
 import { BillingProjectList } from "./billing-project-list";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
 import { certifiedAmount } from "@/lib/billing";
+import { loadFinanceForProjects } from "@/lib/billing/project-finance";
+import { overpaidAmount } from "@/lib/billing/pricing";
 
 export default async function BillingPage() {
   const supabase = await createClient();
@@ -55,13 +57,30 @@ export default async function BillingPage() {
     certifiedByProject.set(key, (certifiedByProject.get(key) ?? 0) + Number(claim.net_amount || 0));
   }
 
-  const projects = (projectsResult.data ?? []).map((project) => ({
-    ...project,
-    received: receivedByProject.get(project.id) ?? 0,
-    certified: (claimsCountByProject.get(project.id) ?? 0) > 0
-      ? certifiedByProject.get(project.id) ?? 0
-      : certifiedAmount(Number(project.budget_amount) || 0),
-  }));
+  // Le "Certifié" est le prix que le client doit payer : somme du devis, prix
+  // de l'offre, ou dépenses réelles + marge attendue (voir lib/billing/pricing.ts).
+  // À défaut de toute information de prix, on garde l'ancien calcul.
+  const finances = await loadFinanceForProjects(
+    supabase,
+    organizationId ?? "",
+    (projectsResult.data ?? []).map((project) => String(project.id)),
+  );
+
+  const projects = (projectsResult.data ?? []).map((project) => {
+    const pricing = finances.get(project.id)?.pricing;
+    const received = receivedByProject.get(project.id) ?? 0;
+    const certified = pricing && pricing.mode !== "none"
+      ? pricing.certified
+      : (claimsCountByProject.get(project.id) ?? 0) > 0
+        ? certifiedByProject.get(project.id) ?? 0
+        : certifiedAmount(Number(project.budget_amount) || 0);
+    return {
+      ...project,
+      received,
+      certified,
+      overpaid: overpaidAmount(certified, received),
+    };
+  });
 
   return <>
     {organizationId && <RealtimeRefresh channelName="billing-list" tables={[
