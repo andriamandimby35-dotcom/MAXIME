@@ -333,11 +333,11 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
             <thead>
               <tr>
                 <th className="border p-2">N°</th><th className="border p-2">Désignation</th><th className="border p-2">Unité</th><th className="border p-2">Quantité</th>
-                {view === "internal" ? <><th className="border p-2">PU interne</th><th className="border p-2">Montant interne</th><th className="border p-2">PU externe</th></> : <><th className="border p-2">PU externe</th><th className="border p-2">Montant externe HT</th></>}
+                {view === "internal" ? <><th className="border p-2">PU interne</th><th className="border p-2">Montant interne</th></> : <><th className="border p-2">PU externe</th><th className="border p-2">Montant externe HT</th></>}
               </tr>
             </thead>
             <tbody>
-              {visibleRows.length === 0 && <tr><td colSpan={view === "internal" ? 7 : 6} className="border p-4 text-center text-gray-600">Aucune ligne.</td></tr>}
+              {visibleRows.length === 0 && <tr><td colSpan={6} className="border p-4 text-center text-gray-600">Aucune ligne.</td></tr>}
               {visibleRows.map((row, index) => {
                 const section = [String(row.category ?? "").trim(), String(row.subcategory ?? "").trim()].filter(Boolean).join(" — ");
                 const header = section && section !== lastSection ? section : null;
@@ -350,7 +350,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
                 const labor = internal <= 0 && isLaborLine(row.designation);
                 const missing = view === "internal" ? internal <= 0 && !labor : external <= 0;
                 return (
-                  <FragmentRows key={row.id} header={header} colSpan={view === "internal" ? 7 : 6}>
+                  <FragmentRows key={row.id} header={header} colSpan={6}>
                     <tr style={missing ? { background: "#fff7ed" } : undefined}>
                       <td className="border p-2">{String(row.position ?? "").trim() || index + 1}</td>
                       <td className="border p-2">{row.designation}</td>
@@ -363,7 +363,6 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
                             : internal > 0 ? formatAr(internal) : labor ? "main-d'œuvre" : "—"}
                         </td>
                         <td className="border p-2" style={{ textAlign: "right" }}>{internal > 0 ? formatAr(quantity * internal) : "—"}</td>
-                        <td className="border p-2" style={{ textAlign: "right" }}>{row.is_internal ? "Interne seulement" : external > 0 ? formatAr(external) : "—"}</td>
                       </> : <>
                         <td className="border p-2" style={{ textAlign: "right" }}>{external > 0 ? formatAr(external) : "—"}</td>
                         <td className="border p-2" style={{ textAlign: "right" }}>{external > 0 ? formatAr(quantity * external) : "—"}</td>
@@ -375,9 +374,8 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
             </tbody>
             <tfoot>
               <tr style={{ fontWeight: 800, background: "#f3f4f6" }}>
-                <td className="border p-2" colSpan={view === "internal" ? 5 : 5} style={{ textAlign: "right" }}>{view === "internal" ? "Total interne (lignes chiffrées)" : "Total externe HT"}</td>
+                <td className="border p-2" colSpan={5} style={{ textAlign: "right" }}>{view === "internal" ? "Total interne (lignes chiffrées)" : "Total externe HT"}</td>
                 <td className="border p-2" style={{ textAlign: "right" }}>{formatAr(grandTotal)}</td>
-                {view === "internal" && <td className="border p-2" />}
               </tr>
             </tfoot>
           </table>
