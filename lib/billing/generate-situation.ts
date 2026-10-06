@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { computePricing, roundAr } from "@/lib/billing/pricing";
 import { loadProjectFinance } from "@/lib/billing/project-finance";
 import { matchTaskForItem, type PlanningTask } from "@/lib/billing/task-matching";
+import { loadExpenseAllocation } from "@/lib/expenses/allocation";
 
 // Calcul du "brouillon" d'une facture (situation de travaux), à partir :
 // - du devis externe du chantier (les lignes réellement vendues au client),
@@ -258,6 +259,17 @@ export async function computeSituationDraft(
   const previousOtherAmount = ["autre", "transport", "main d'œuvre"]
     .reduce((sum, label) => sum + (previousQuantityByDesignation.get(label) || 0), 0);
 
+  // Part des transports, salaires et autres dépenses pas encore classée dans
+  // une catégorie du devis. Si le calcul échoue (tables pas encore à jour),
+  // on retombe sur le comportement d'avant : tout est refacturé en « Autre ».
+  let unallocatedOther: number | null = null;
+  if (!noDevis) {
+    try {
+      const allocation = await loadExpenseAllocation(supabase, projectId);
+      unallocatedOther = Math.max(0, allocation.unallocated.transport + allocation.unallocated.labor + allocation.unallocated.other);
+    } catch { unallocatedOther = null; }
+  }
+
   let noDevisWarning: string | null = null;
   const depenseLines: SituationDraftLine[] = (() => {
     let currentAmount: number;
@@ -275,7 +287,11 @@ export async function computeSituationDraft(
     } else {
       // Avec devis : transport, main d'œuvre et autres dépenses (les achats de
       // matériaux sont déjà dans les lignes du devis) majorés de la marge.
-      currentAmount = roundAr((transportPaid + salaryPaid + otherPaid) * (1 + marginPercent / 100));
+      // Seul ce qui n'est PAS encore classé dans une catégorie du devis (le
+      // « Autre » de la page Dépenses) est refacturé ici : le reste est déjà
+      // compris dans les lignes du devis, facturées selon l'avancement.
+      const autreBase = unallocatedOther ?? (transportPaid + salaryPaid + otherPaid);
+      currentAmount = roundAr(autreBase * (1 + marginPercent / 100));
     }
     const previousAmount = previousOtherAmount;
     const current = Math.max(previousAmount, currentAmount);
@@ -286,7 +302,7 @@ export async function computeSituationDraft(
       designation: "Autre",
       // Catégorie « Autre » : tout ce qui n'est pas une ligne du devis.
       category: "Autre",
-      unit: "forfait",
+      unit: "",
       contractQuantity: null,
       unitPrice: null,
       previousQuantity: previousAmount,

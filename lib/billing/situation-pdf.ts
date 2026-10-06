@@ -259,11 +259,15 @@ export function generateProgressClaimPdf(input: SituationPdfInput) {
     const designationLines = wrapText(line.designation, COLUMN_WIDTHS[1] - 6, 7);
     const height = Math.max(22, designationLines.length * 9 + 10);
     ensureSpace(height);
-    const values = [
-      String(line.position), "", line.unit, qty(line.contractQuantity),
-      line.unitPrice === null ? "—" : money(line.unitPrice),
-      qty(line.currentQuantity), progressLabel(line), money(line.currentAmount), money(line.previousAmount), money(line.amountThisTime),
-    ];
+    // La ligne « Autre » (dépenses hors devis) ne montre que ses totaux :
+    // ni unité, ni quantité, ni prix unitaire, ni avancement.
+    const values = line.kind === "depense"
+      ? [String(line.position), "", "", "", "", "", "", money(line.currentAmount), money(line.previousAmount), money(line.amountThisTime)]
+      : [
+        String(line.position), "", line.unit, qty(line.contractQuantity),
+        line.unitPrice === null ? "—" : money(line.unitPrice),
+        qty(line.currentQuantity), progressLabel(line), money(line.currentAmount), money(line.previousAmount), money(line.amountThisTime),
+      ];
     let x = LEFT;
     values.forEach((value, index) => { if (index !== 1) addText(value, x + 2, y - 10, 6.6, false); x += COLUMN_WIDTHS[index]; });
     designationLines.forEach((text, index) => addText(text, LEFT + COLUMN_WIDTHS[0] + 3, y - 10 - index * 9, 7));

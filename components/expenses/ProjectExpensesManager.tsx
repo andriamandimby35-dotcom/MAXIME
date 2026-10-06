@@ -5,7 +5,8 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
-import type { ExpensePdfData } from "@/lib/expenses/general-expense-pdf";
+import type { ExpensePdfData, ExpensePdfSection } from "@/lib/expenses/general-expense-pdf";
+import type { AllocationResult, AllocationLine } from "@/lib/expenses/allocation";
 
 type RoleHistoryEntry = { role_name: string; effective_from: string };
 type StaffMember = { id: string; project_id: string; full_name: string; role_name?: string | null; active?: boolean; mvola_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; created_at?: string | null; linked_assignment_id?: string | null; role_history?: RoleHistoryEntry[] | null };
@@ -122,6 +123,69 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   const [viewingGeneralExport, setViewingGeneralExport] = useState(false);
   const [exportGeneratedAt, setExportGeneratedAt] = useState<string | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
+  // Dépenses classées par catégorie / sous-catégorie du devis (calculées côté
+  // serveur à partir des achats, rapports, présences et salaires payés).
+  const [allocation, setAllocation] = useState<AllocationResult | null>(null);
+  const [allocationLoading, setAllocationLoading] = useState(false);
+  async function fetchAllocation(): Promise<AllocationResult | null> {
+    setAllocationLoading(true);
+    try {
+      const response = await fetch(`/api/projects/${project.id}/expense-allocation`, { cache: "no-store" });
+      if (!response.ok) return null;
+      const data = await response.json() as AllocationResult;
+      setAllocation(data);
+      return data;
+    } catch { return null; }
+    finally { setAllocationLoading(false); }
+  }
+  // Recalcul (légèrement différé) à chaque changement d'achat ou de salaire
+  // reçu en direct, pour ne pas multiplier les lectures.
+  useEffect(() => {
+    if (!canManage) return;
+    const timer = setTimeout(() => { void fetchAllocation(); }, 700);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.id, canManage, materialOrders, salaryPayments]);
+  const allocationLineLabel = (line: AllocationLine) => {
+    if (line.kind === "labor") return `${line.label}${line.quantity ? ` — ${line.quantity} j × ${money(line.unitPrice ?? 0)}` : ""}`;
+    if (line.quantity !== null && line.unitPrice) return `${line.label} — ${line.quantity} ${line.unit} × ${money(line.unitPrice)}`.replace("  ", " ");
+    return line.label;
+  };
+  function allocationPdfSections(alloc: AllocationResult | null): ExpensePdfSection[] {
+    if (!alloc) return [];
+    if (!alloc.categories.length && !alloc.other.lines.length) return [];
+    const sections: ExpensePdfSection[] = [];
+    if (!alloc.categories.length) {
+      sections.push({ heading: "Dépenses classées par catégorie du devis", rows: [], emptyText: "Aucune dépense classée pour l'instant : elles se classent automatiquement quand le chef ou le conducteur fait son rapport journalier." });
+    }
+    for (const category of alloc.categories) {
+      const rows: ExpensePdfSection["rows"] = [];
+      for (const sub of category.subs) {
+        rows.push({ variant: "sub", label: sub.name || "Dépenses de la catégorie", value: money(sub.total) });
+        for (const line of sub.lines) rows.push({ variant: "line", label: allocationLineLabel(line), value: money(line.amount) });
+      }
+      rows.push({ variant: "total", label: `Total ${category.name}`, value: money(category.total) });
+      sections.push({ heading: `Catégorie — ${category.name}`, rows });
+    }
+    const otherRows: ExpensePdfSection["rows"] = alloc.other.lines.map((line) => ({ variant: "line" as const, label: allocationLineLabel(line), value: money(line.amount) }));
+    otherRows.push({ variant: "total", label: "Total Autre (non classé)", value: money(alloc.other.total) });
+    sections.push({ heading: "Catégorie — Autre (achats ou dépenses non classés)", rows: otherRows, emptyText: "Rien dans « Autre »." });
+    return sections;
+  }
+  function renderAllocation(openAll: boolean) {
+    if (!allocation) return <p className="projectEmptyText">{allocationLoading ? "Calcul du détail en cours…" : "Détail indisponible pour le moment."}</p>;
+    const block = (title: string, total: number, children: React.ReactNode, key: string) => <details key={key} open={openAll} style={{ marginBottom: "8px" }}>
+      <summary style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", gap: "8px", fontWeight: 700 }}><span>{title}</span><span>{money(total)}</span></summary>
+      <div style={{ paddingLeft: "10px", marginTop: "4px" }}>{children}</div>
+    </details>;
+    return <div>
+      {allocation.categories.length ? allocation.categories.map((category) => block(category.name, category.total, category.subs.map((sub) => <div key={sub.name || "_"} style={{ marginBottom: "6px" }}>
+        {sub.name && <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 600, fontSize: ".9rem" }}><span>{sub.name}</span><span>{money(sub.total)}</span></div>}
+        {sub.lines.map((line, index) => <div key={index} style={{ display: "flex", justifyContent: "space-between", gap: "8px", fontSize: ".82rem", color: "#4b5b52" }}><span>{allocationLineLabel(line)}</span><span>{money(line.amount)}</span></div>)}
+      </div>), category.name)) : <p className="projectEmptyText">Aucune dépense classée pour l’instant : elles se classent automatiquement quand le chef ou le conducteur fait son rapport journalier.</p>}
+      {block("Autre (achats ou dépenses non classés)", allocation.other.total, allocation.other.lines.length ? allocation.other.lines.map((line, index) => <div key={index} style={{ display: "flex", justifyContent: "space-between", gap: "8px", fontSize: ".82rem", color: "#4b5b52" }}><span>{allocationLineLabel(line)}</span><span>{money(line.amount)}</span></div>) : <p className="projectEmptyText">Rien dans « Autre ».</p>, "other")}
+    </div>;
+  }
   const [rateDrafts, setRateDrafts] = useState<Record<string, { daily: string; monthly: string }>>({});
   const [viewingSalaryHistory, setViewingSalaryHistory] = useState(false);
   const [viewingSalaryDetail, setViewingSalaryDetail] = useState<SalaryPayment | null>(null);
@@ -538,7 +602,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   // Remplace l'ancienne impression de la page (window.print), qui donnait des
   // feuilles blanches et laissait le navigateur ajouter date, titre et adresse
   // en haut et en bas de chaque feuille.
-  function buildGeneralExportData(): ExpensePdfData {
+  function buildGeneralExportData(alloc: AllocationResult | null): ExpensePdfData {
     const generatedLabel = exportGeneratedAt ? new Intl.DateTimeFormat("fr-FR", { dateStyle: "long", timeStyle: "short" }).format(new Date(exportGeneratedAt)) : "";
     const categorySectionRows = (Object.keys(categoryLabels) as RecapCategory[]).map((category) => ({ label: `Sous-total ${categoryLabels[category]}`, value: money(categoryTotals[category]) }));
     if (outsideClosureTotal > 0) categorySectionRows.push({ label: "Sous-total dépense hors clôture", value: money(outsideClosureTotal) });
@@ -548,6 +612,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
       sections: [
         { heading: "Conducteur et chef(s) de chantier", emptyText: "Aucun conducteur ni chef de chantier actif.", rows: assignmentRows.map((row) => ({ label: `${row.roleName} — ${row.name}`, value: `${row.daysWorked} j sur la période` })) },
         { heading: "Ouvriers, manœuvres et autres présents", emptyText: "Aucun ouvrier déclaré.", rows: staffRows.map((row) => ({ label: row.roleName ? `${row.name} (${row.roleName})` : row.name, value: row.trackedDays === 0 ? "Aucun jour suivi" : row.absenceDays === 0 ? `Présent du début à la fin (${row.daysWorked} j)` : `${row.daysWorked} j présent · ${row.absenceDays} j d’absence` })) },
+        ...allocationPdfSections(alloc),
         { heading: "Détail des dépenses payées", emptyText: "Aucune dépense enregistrée.", rows: recapRows.map((row) => ({ label: `${row.date ? dateFmt.format(new Date(row.date)) : "—"} · ${row.label}${row.outsideClosure ? " · Dépense hors clôture" : ""}`, value: `${row.qty} · ${money(row.amount)}`, highlight: row.outsideClosure })) },
         { heading: "Matériaux (quantités déjà achetées/utilisées)", emptyText: "Aucun matériau acheté.", rows: materialUsageTotals.map((item) => ({ label: item.name, value: `${item.quantity} ${item.unit}`.trim() })) },
         { heading: "Sous-totaux par catégorie", rows: categorySectionRows },
@@ -558,7 +623,8 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   }
   async function makeGeneralExportPdf() {
     const { buildGeneralExpensePdf } = await import("@/lib/expenses/general-expense-pdf");
-    const bytes = await buildGeneralExpensePdf(buildGeneralExportData());
+    const fresh = await fetchAllocation();
+    const bytes = await buildGeneralExpensePdf(buildGeneralExportData(fresh ?? allocation));
     const blob = new Blob([bytes as unknown as BlobPart], { type: "application/pdf" });
     const slug = project.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "chantier";
     return { blob, fileName: `Resume-depenses-${slug}-${new Date().toISOString().slice(0, 10)}.pdf` };
@@ -821,13 +887,19 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     <header className="projectSiteHeader" style={closedAt ? { pointerEvents: "auto" } : undefined}>
       <div><p className="projectEyebrow">DÉPENSES ET APPROVISIONNEMENT</p><h1>{project.name}</h1><p>{project.project_code || ""}</p></div>
       <div className="projectHeaderActions">
-        {canManage && <button type="button" className="dangerButton" onClick={() => { setExportGeneratedAt(new Date().toISOString()); setViewingGeneralExport(true); }}>📄 Exporter résumé dépense</button>}
+        {canManage && <button type="button" className="dangerButton" onClick={() => { setExportGeneratedAt(new Date().toISOString()); setViewingGeneralExport(true); void fetchAllocation(); }}>📄 Exporter résumé dépense</button>}
         <Link className="projectBackLink" href="/expenses">← Retour aux dépenses</Link>
       </div>
     </header>
     {message && <div className="notice">{message.text}</div>}
 
     <div className="projectSiteGrid">
+      {canManage && <section className="projectSiteCard">
+        <div className="projectCardHead"><div><p className="projectEyebrow">DÉPENSES PAR CATÉGORIE</p><h2>Détail par catégorie du devis</h2></div><span>{allocation ? money(allocation.allocated.total + allocation.other.total) : ""}</span></div>
+        <p className="projectHint">Chaque matériau utilisé (au prix d’achat), son transport et la main d’œuvre payée sont rangés dans la catégorie travaillée dans le rapport journalier. Ce qui n’est pas encore utilisé ou classé reste dans « Autre ».</p>
+        {renderAllocation(false)}
+        <button type="button" className="secondary" style={{ marginTop: "8px" }} disabled={allocationLoading} onClick={() => void fetchAllocation()}>{allocationLoading ? "Calcul…" : "Actualiser"}</button>
+      </section>}
       {canManage && <section className="projectSiteCard">
         <div className="projectCardHead"><div><p className="projectEyebrow">SALAIRE</p><h2>Salaire employés</h2></div><span>{money(salaryTotal)}</span></div>
         <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px", flexWrap: "wrap" }}>
@@ -1096,6 +1168,9 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
           <span className="chipName">{row.name} <small style={{ color: "#8a5b08" }}>{row.roleName}</small></span>
           <span className="chipQty">{row.trackedDays === 0 ? "Aucun jour suivi" : row.absenceDays === 0 ? `Présent du début à la fin (${row.daysWorked} j)` : `${row.daysWorked} j présent · ${row.absenceDays} j d’absence`}</span>
         </div>) : <p className="projectEmptyText">Aucun ouvrier déclaré.</p>}</div>
+
+        <h3 style={{ marginTop: "16px" }}>Dépenses classées par catégorie du devis</h3>
+        {renderAllocation(true)}
 
         <h3 style={{ marginTop: "16px" }}>Détail des dépenses payées</h3>
         <div className="projectStockSummaryList">{recapRows.length ? recapRows.map((row) => <div key={row.key}>

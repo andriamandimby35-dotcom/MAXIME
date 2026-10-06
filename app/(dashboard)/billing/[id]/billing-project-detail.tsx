@@ -683,9 +683,9 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
                           </select>
                         )}
                       </td>
-                      <td>{line.unit}</td>
-                      <td>{line.contractQuantity === null ? "—" : line.contractQuantity}</td>
-                      <td>{line.unitPrice === null ? "—" : `${ariary.format(line.unitPrice)} Ar`}</td>
+                      <td>{line.kind === "depense" ? "" : line.unit}</td>
+                      <td>{line.kind === "depense" ? "" : line.contractQuantity === null ? "—" : line.contractQuantity}</td>
+                      <td>{line.kind === "depense" ? "" : line.unitPrice === null ? "—" : `${ariary.format(line.unitPrice)} Ar`}</td>
                       <td>{ariary.format(line.currentAmount)} Ar</td>
                       <td>{line.kind === "devis" && line.contractQuantity ? `${Math.max(0, Math.min(100, (line.currentQuantity / line.contractQuantity) * 100)).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} %` : "—"}</td>
                       <td>{ariary.format(line.previousAmount)} Ar</td>

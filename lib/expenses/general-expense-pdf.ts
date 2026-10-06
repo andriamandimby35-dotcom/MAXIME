@@ -9,7 +9,7 @@
 // partager (WhatsApp...) et imprimer.
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 
-export type ExpensePdfRow = { label: string; value: string; highlight?: boolean };
+export type ExpensePdfRow = { label: string; value: string; highlight?: boolean; variant?: "sub" | "line" | "total" };
 export type ExpensePdfSection = { heading: string; rows: ExpensePdfRow[]; emptyText?: string };
 export type ExpensePdfData = {
   title: string;
@@ -110,17 +110,24 @@ export async function buildGeneralExpensePdf(data: ExpensePdfData): Promise<Uint
       continue;
     }
     for (const row of section.rows) {
+      const variant = row.variant;
+      const indent = variant === "line" ? 12 : 0;
+      const font = variant === "line" ? regular : bold;
+      const size = variant === "line" ? 9.5 : 10;
       const value = toPdfText(row.value);
-      const valueWidth = bold.widthOfTextAtSize(value, 10);
-      const labelMax = Math.max(120, contentWidth - valueWidth - 16);
-      const labelLines = wrap(row.label, bold, 10, labelMax);
-      const height = labelLines.length * 13 + 8;
+      const valueWidth = font.widthOfTextAtSize(value, size);
+      const labelMax = Math.max(120, contentWidth - indent - valueWidth - 16);
+      const labelLines = wrap(row.label, font, size, labelMax);
+      const lineHeight = size + 3;
+      const height = labelLines.length * lineHeight + 8;
       ensureSpace(height);
       const color = row.highlight ? RED : DARK;
-      labelLines.forEach((line, index) => page.drawText(line, { x: MARGIN_X, y: y - 12 - index * 13, size: 10, font: bold, color }));
-      page.drawText(value, { x: PAGE_WIDTH - MARGIN_X - valueWidth, y: y - 12, size: 10, font: bold, color: row.highlight ? RED : GREEN });
+      if (variant === "sub") page.drawRectangle({ x: MARGIN_X, y: y - height + 2, width: contentWidth, height: height - 2, color: rgb(0.93, 0.96, 0.94) });
+      if (variant === "total") page.drawLine({ start: { x: MARGIN_X, y: y + 1 }, end: { x: PAGE_WIDTH - MARGIN_X, y: y + 1 }, thickness: 1, color: GREEN });
+      labelLines.forEach((line, index) => page.drawText(line, { x: MARGIN_X + indent + (variant === "sub" ? 4 : 0), y: y - 12 - index * lineHeight, size, font, color: variant === "sub" ? GREEN : color }));
+      page.drawText(value, { x: PAGE_WIDTH - MARGIN_X - valueWidth - (variant === "sub" ? 4 : 0), y: y - 12, size, font, color: row.highlight ? RED : (variant === "line" ? DARK : GREEN) });
       y -= height;
-      page.drawLine({ start: { x: MARGIN_X, y: y + 2 }, end: { x: PAGE_WIDTH - MARGIN_X, y: y + 2 }, thickness: 0.5, color: LINE });
+      if (variant !== "sub" && variant !== "total") page.drawLine({ start: { x: MARGIN_X, y: y + 2 }, end: { x: PAGE_WIDTH - MARGIN_X, y: y + 2 }, thickness: 0.4, color: LINE });
     }
   }
 

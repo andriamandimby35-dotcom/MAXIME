@@ -875,6 +875,11 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     const { data: reportId, error } = await supabase.rpc("record_project_daily_report_consumption", queued.reportInput);
     if (error || !reportId) return { ok: false, entry };
 
+    // Même enregistrement des tâches travaillées que pour un rapport envoyé en
+    // ligne, avec la date d'origine du rapport (conservée par le rapport lui-même).
+    if (queued.taskUpdates.length) {
+      await supabase.rpc("log_report_task_progress", { p_report_id: reportId, p_tasks: queued.taskUpdates.map((item) => ({ task_id: item.task_id, progress_percent: item.progress_percent })) });
+    }
     await Promise.all(queued.taskUpdates.map((item) =>
       supabase.from("project_tasks").update({ progress_percent: item.progress_percent, status: item.status, ...(item.checklist ? { checklist: item.checklist } : {}) }).eq("id", item.task_id)
     ));
@@ -1392,6 +1397,12 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
       p_consumptions: reportConsumptionDraft,
     });
     if (error || !reportId) { setReportSubmitting(false); setReportSubmitStatus({ kind: "error", text: `Rapport non enregistré : ${error?.message || "réponse invalide"}` }); return false; }
+    // Garde, pour ce rapport, les tâches travaillées et l'avancement gagné
+    // (avant de modifier l'avancement) : sert à ranger les dépenses du jour
+    // dans la bonne catégorie. Sans effet visible ; une erreur ici ne bloque rien.
+    if (reportSelectedTasks.length) {
+      await supabase.rpc("log_report_task_progress", { p_report_id: reportId, p_tasks: reportSelectedTasks.map((item) => ({ task_id: item.task_id, progress_percent: item.progress_percent })) });
+    }
     await Promise.all(reportSelectedTasks.map((item) => updateTask(item.task_id, { progress_percent: item.progress_percent, status: item.status, ...(item.checklist ? { checklist: item.checklist } : {}) })));
     await Promise.all(reportTomorrowMaterials.map((item) => updateMaterial(item.material_id, { required_tomorrow: item.quantity })));
     let photoFailures = 0;
@@ -1644,14 +1655,22 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
     setMaterialOrders((rows) => rows.map((row) => row.id === currentOrder.id ? { ...row, ...values } : row));
     let transportWarning = "";
     if (input.transportMode) {
-      const { data: transportOrder, error: transportError } = await supabase.from("project_material_orders").insert({
+      // Le transport garde le lien avec l'achat auquel il appartient
+      // (source_order_id) : c'est ce qui permet de ranger sa part dans la
+      // bonne catégorie quand le matériau est utilisé. Si cette colonne
+      // n'existe pas encore (SQL pas exécuté), on enregistre sans elle.
+      const transportRow = {
         organization_id: organizationId, project_id: selectedId, material_name: "Transport", material_key: "transport", unit: "U",
         quantity: 1, unit_price: input.transportPrice || 0, status: "paid", expense_kind: "transport", transport_mode: input.transportMode,
         paid_at: new Date().toISOString(), requested_by: userId, validated_by: userId,
         // Le transport n'a pas sa propre photo — il réutilise celle de l'achat
         // du matériau si elle existe (même field déjà présent).
         purchase_photo_path: path, purchase_photo_caption: caption,
-      }).select().single();
+      };
+      let { data: transportOrder, error: transportError } = await supabase.from("project_material_orders").insert({ ...transportRow, source_order_id: currentOrder.id }).select().single();
+      if (transportError && /source_order_id/i.test(transportError.message)) {
+        ({ data: transportOrder, error: transportError } = await supabase.from("project_material_orders").insert(transportRow).select().single());
+      }
       if (transportOrder) setMaterialOrders((rows) => [transportOrder as MaterialOrder, ...rows]);
       else if (transportError) transportWarning = ` Transport non enregistré : ${transportError.message}.`;
     }
