@@ -10,10 +10,16 @@ function safeName(value: string) {
   return value.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "facture";
 }
 
-// Régénère et ouvre le PDF d'une facture déjà enregistrée : sert à la fois
-// pour l'impression immédiate et pour rouvrir l'historique plus tard — le
-// PDF est reconstruit à chaque appel à partir des lignes enregistrées, donc
-// toujours fidèle même si le style du document est amélioré par la suite.
+// PDF d'une facture enregistrée. Il est fabriqué UNE SEULE FOIS (à la première
+// ouverture) puis conservé dans Supabase sous un nom propre à cette facture
+// (son identifiant) : une facture plus avancée a son propre fichier et
+// n'écrase jamais l'ancien. Les ouvertures suivantes relisent ce fichier figé,
+// et le navigateur le garde en mémoire (cache) : pas de nouveau téléchargement
+// à chaque ouverture. Le fichier est supprimé avec la facture.
+const PDF_CACHE_HEADERS = {
+  "Content-Type": "application/pdf",
+  "Cache-Control": "private, max-age=31536000, immutable",
+};
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const supabase = await createClient();
@@ -28,6 +34,16 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     .select("id,project_id,claim_number,client_name,issue_date,period_start,period_end,gross_amount,retention_rate,retention_amount,advance_repayment,other_deductions,tax_rate,tax_amount,net_amount")
     .eq("id", id).eq("organization_id", member.organization_id).maybeSingle();
   if (claimError || !claim) return NextResponse.json({ error: "Facture introuvable dans votre organisation." }, { status: 404 });
+
+  const storagePath = `${member.organization_id}/${claim.project_id}/${claim.id}.pdf`;
+  const storedFileName = `facture-${safeName(claim.claim_number)}.pdf`;
+  const stored = await supabase.storage.from("billing-pdfs").download(storagePath);
+  if (!stored.error && stored.data) {
+    return new NextResponse(Buffer.from(await stored.data.arrayBuffer()), {
+      status: 200,
+      headers: { ...PDF_CACHE_HEADERS, "Content-Disposition": `inline; filename="${storedFileName}"` },
+    });
+  }
 
   type ItemRow = { position: number; designation: string; unit: string; contract_quantity: number | string; unit_price: number | string; previous_quantity: number | string; current_quantity: number | string; category?: string | null; subcategory?: string | null };
   let items: ItemRow[] | null = null;
@@ -126,16 +142,12 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     })(),
   });
 
-  // Le PDF est renvoyé directement au navigateur, pour être OUVERT (aperçu) :
-  // il n'est ni téléchargé, ni enregistré dans Supabase (aucun stockage, aucun
-  // transfert Supabase à chaque ouverture).
-  const fileName = `facture-${safeName(claim.claim_number)}.pdf`;
+  // Première ouverture : on enregistre le PDF une fois (sans jamais écraser un
+  // fichier existant), puis on le renvoie pour être OUVERT, pas téléchargé.
+  const upload = await supabase.storage.from("billing-pdfs").upload(storagePath, pdf, { contentType: "application/pdf", cacheControl: "31536000", upsert: false });
+  if (upload.error && !/exists|duplicate/i.test(upload.error.message)) console.error("Enregistrement du PDF de facture impossible :", upload.error.message);
   return new NextResponse(Buffer.from(pdf), {
     status: 200,
-    headers: {
-      "Content-Type": "application/pdf",
-      "Content-Disposition": `inline; filename="${fileName}"`,
-      "Cache-Control": "private, no-store",
-    },
+    headers: { ...PDF_CACHE_HEADERS, "Content-Disposition": `inline; filename="${storedFileName}"` },
   });
 }

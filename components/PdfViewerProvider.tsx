@@ -14,7 +14,7 @@ import { toFriendlyPdfError } from "@/lib/submission/friendly-pdf-error";
 type ViewingPdf = { title: string; objectUrl: string };
 
 type PdfViewerContextValue = {
-  openPdf: (title: string, documentUrl: string, options?: { method?: "GET" | "POST" }) => Promise<void>;
+  openPdf: (title: string, documentUrl: string, options?: { method?: "GET" | "POST"; cache?: RequestCache }) => Promise<void>;
 };
 
 const PdfViewerContext = createContext<PdfViewerContextValue | null>(null);
@@ -42,7 +42,7 @@ export function PdfViewerProvider({ children }: { children: ReactNode }) {
     catch { setErrorMessage("Impression impossible depuis cet aperçu."); }
   }
 
-  async function openPdf(title: string, documentUrl: string, options?: { method?: "GET" | "POST" }) {
+  async function openPdf(title: string, documentUrl: string, options?: { method?: "GET" | "POST"; cache?: RequestCache }) {
     setLoadingTitle(title);
     setErrorMessage("");
     try {
@@ -58,7 +58,9 @@ export function PdfViewerProvider({ children }: { children: ReactNode }) {
         const response = await fetch(documentUrl, {
           method: options?.method || "GET",
           credentials: "same-origin",
-          cache: "no-store",
+          // Par défaut le PDF est toujours relu ; un PDF figé (ex. facture émise) peut
+          // demander "force-cache" pour ne pas être retéléchargé à chaque ouverture.
+          cache: options?.cache ?? "no-store",
           headers: session?.access_token ? {
             Authorization: `Bearer ${session.access_token}`,
             "X-Supabase-Access-Token": session.access_token,

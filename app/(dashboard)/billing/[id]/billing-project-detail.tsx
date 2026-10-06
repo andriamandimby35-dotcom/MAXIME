@@ -398,7 +398,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     setDraft(null);
     setDraftMessage("");
     router.refresh();
-    void openPdf(`Facture ${claimNumberInput}`, `/api/billing/claims/${result.id}/pdf`);
+    void openPdf(`Facture ${claimNumberInput}`, `/api/billing/claims/${result.id}/pdf`, { cache: "force-cache" });
   }
 
   async function deleteClaim(claimId: string) {
@@ -739,7 +739,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
                 <td><span className="pill">{claimStatusLabel[claim.status] || claim.status}</span></td>
                 <td><strong>{ariary.format(Number(claim.net_amount))} Ar</strong></td>
                 <td style={{ display: "flex", gap: "8px" }}>
-                  <button type="button" className="ghostButton" onClick={() => void openPdf(`Facture ${claim.claim_number}`, `/api/billing/claims/${claim.id}/pdf`)}>Ouvrir / Imprimer</button>
+                  <button type="button" className="ghostButton" onClick={() => void openPdf(`Facture ${claim.claim_number}`, `/api/billing/claims/${claim.id}/pdf`, { cache: "force-cache" })}>Ouvrir / Imprimer</button>
                   {(claim.status === "draft" || claim.status === "submitted") && <button type="button" className="dangerButton" disabled={busy} onClick={() => void deleteClaim(claim.id)}>Supprimer</button>}
                 </td>
               </tr>
