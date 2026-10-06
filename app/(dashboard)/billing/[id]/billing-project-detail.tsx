@@ -126,6 +126,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
   const [importTotal, setImportTotal] = useState<number | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   const [importMessage, setImportMessage] = useState("");
+  const [importFile, setImportFile] = useState<File | null>(null);
 
   async function deletePricing() {
     if (!window.confirm("Supprimer le prix / la marge enregistrés pour ce chantier ?")) return;
@@ -163,6 +164,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     setImportBusy(false);
     if (!response.ok) return setImportMessage(result.error ?? "Enregistrement impossible.");
     setImportLines(null);
+    setImportFile(null);
     setImportMessage("Prix du devis enregistrés.");
     router.refresh();
   }
@@ -430,7 +432,12 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
             tu les vérifies, puis la facture sera faite exactement comme le devis (avancement tiré du planning). Le planning du chantier n'est pas modifié.
           </p>
           {!importLines && (
-            <input type="file" accept="application/pdf" disabled={importBusy} onChange={(e) => { const file = e.target.files?.[0]; if (file) void readDevisPdf(file); e.target.value = ""; }} />
+            <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+              <input type="file" accept="application/pdf" disabled={importBusy} onChange={(e) => { setImportFile(e.target.files?.[0] ?? null); setImportMessage(""); }} />
+              <button type="button" className="button" disabled={importBusy || !importFile} onClick={() => importFile && void readDevisPdf(importFile)}>
+                {importBusy ? "Lecture en cours…" : "Lire le devis (utilise l'IA)"}
+              </button>
+            </div>
           )}
           {importBusy && !importLines && <p className="notice" style={{ marginTop: "10px" }}>Lecture du PDF en cours (cela peut prendre une minute)…</p>}
           {importLines && (
