@@ -12,9 +12,9 @@ export default async function ImportedDevisPage({ params }: { params: Promise<{ 
   const { supabase, organizationId, memberRole } = await getContext();
   if (!organizationId) notFound();
 
-  type ProjectRow = { id: string; name: string; created_at: string | null; expected_margin_percent?: number | string | null };
+  type ProjectRow = { id: string; name: string; created_at: string | null; expected_margin_percent?: number | string | null; location?: string | null; internal_params?: Record<string, number> | null };
   let project: ProjectRow | null = null;
-  for (const columns of ["id,name,created_at,expected_margin_percent", "id,name,created_at"]) {
+  for (const columns of ["id,name,created_at,expected_margin_percent,location,internal_params", "id,name,created_at,expected_margin_percent,location", "id,name,created_at,expected_margin_percent", "id,name,created_at"]) {
     const result = await supabase.from("projects").select(columns).eq("id", id).eq("organization_id", organizationId).maybeSingle();
     if (!result.error) { project = result.data as unknown as ProjectRow; break; }
   }
@@ -29,7 +29,7 @@ export default async function ImportedDevisPage({ params }: { params: Promise<{ 
   return (
     <div className="p-6">
       <ImportedDevisDetail
-        project={{ id: project.id, name: project.name, createdAt: project.created_at ?? null, marginPercent: project.expected_margin_percent === null || project.expected_margin_percent === undefined ? null : Number(project.expected_margin_percent) }}
+        project={{ id: project.id, name: project.name, createdAt: project.created_at ?? null, marginPercent: project.expected_margin_percent === null || project.expected_margin_percent === undefined ? null : Number(project.expected_margin_percent), location: project.location ?? "", internalParams: project.internal_params ?? null }}
         lines={lines}
         isAdmin={isAdmin}
       />

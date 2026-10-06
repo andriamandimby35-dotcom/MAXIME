@@ -7,6 +7,7 @@ import { summarizeDevis } from "@/lib/devis/pricing";
 import { isLaborLine } from "@/lib/compositions/labor";
 import { openDevisPdf } from "@/components/estimates/openPdf";
 import { confirmDeletion } from "@/components/deletion/confirmDeletion";
+import { DEFAULT_INTERNAL_PARAMS, INTERNAL_COSTS_CATEGORY, TRANSPORT_DESIGNATION, TRANSPORT_UNIT, type InternalParams } from "@/lib/devis/internal-costs";
 
 export type DevisLine = {
   id: string;
@@ -21,7 +22,7 @@ export type DevisLine = {
   subcategory?: string | null;
 };
 
-type Project = { id: string; name: string; createdAt: string | null; marginPercent: number | null };
+type Project = { id: string; name: string; createdAt: string | null; marginPercent: number | null; location?: string | null; internalParams?: Partial<InternalParams> | null };
 type View = "external" | "internal";
 
 type CalcPart = { designation: string; unit: string; quantity: number; unitPrice: number | null; amount: number; optional: boolean };
@@ -62,37 +63,47 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
     }
     return external - internal;
   }, [rows]);
-  // Autres dépenses internes (lignes « interne seulement » : salaires et transport des matériaux).
+  // Coûts internes (mêmes règles que le devis du DAO) : main-d'œuvre en JOUR-PERSONNE et
+  // transport en T.KM, créés comme lignes « interne seulement » d'après la carte « Paramètres internes du chantier ».
+  const costRows = useMemo(() => rows.filter((row) => row.is_internal && row.category === INTERNAL_COSTS_CATEGORY), [rows]);
   const otherCosts = useMemo(() => {
-    const labor = rows.find((row) => row.is_internal && row.designation === "Main-d'œuvre (salaires)");
-    const transport = rows.find((row) => row.is_internal && row.designation === "Transport des matériaux");
-    const amountOf = (row?: DevisLine) => (row ? (num(row.unit_price) * (num(row.quantity) || 1)) : 0);
-    return { labor: amountOf(labor), transport: amountOf(transport), total: amountOf(labor) + amountOf(transport) };
-  }, [rows]);
-  const [laborInput, setLaborInput] = useState("");
-  const [transportInput, setTransportInput] = useState("");
-  const [laborPercent, setLaborPercent] = useState("30");
-  const [transportPercent, setTransportPercent] = useState("8");
+    const total = costRows.reduce((sum, row) => sum + num(row.unit_price) * (num(row.quantity) || 1), 0);
+    return { total, missing: costRows.filter((row) => !(num(row.unit_price) > 0)).length };
+  }, [costRows]);
+  const [location, setLocation] = useState(project.location ?? "");
+  const [params, setParams] = useState<InternalParams>({ ...DEFAULT_INTERNAL_PARAMS, ...(project.internalParams ?? {}) });
+  const [tonnes, setTonnes] = useState<number | null>(null);
   const [costsBusy, setCostsBusy] = useState(false);
-  useEffect(() => { setLaborInput(otherCosts.labor > 0 ? String(Math.round(otherCosts.labor)) : ""); setTransportInput(otherCosts.transport > 0 ? String(Math.round(otherCosts.transport)) : ""); }, [otherCosts.labor, otherCosts.transport]);
+  const setParam = (key: keyof InternalParams, value: string) => setParams((current) => ({ ...current, [key]: Math.max(0, Number(value.replace(",", ".")) || 0) }));
 
-  async function saveOtherCosts(values: { labor?: string; transport?: string }) {
+  async function saveInternalCosts(prices?: Record<string, number | string | null>) {
     setCostsBusy(true);
     try {
-      const response = await fetch(`/api/devis/projects/${project.id}/other-costs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(values) });
-      const result = await response.json().catch(() => ({})) as { error?: string };
-      if (!response.ok) { setMessage(result.error ?? "Dépenses non enregistrées."); return; }
-      setMessage("Salaires et transport enregistrés dans le devis interne.");
+      const response = await fetch(`/api/devis/projects/${project.id}/other-costs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ location, params, prices }) });
+      const result = await response.json().catch(() => ({})) as { error?: string; tonnes?: number; needs?: string[]; warning?: string };
+      if (!response.ok) { setMessage(result.error ?? "Coûts internes non enregistrés."); return; }
+      if (typeof result.tonnes === "number") setTonnes(result.tonnes);
+      const needs = result.needs ?? [];
+      const notes: string[] = [];
+      if (needs.includes("days")) notes.push("indique la durée interne prévue (jours) pour calculer les salaires");
+      if (needs.includes("location")) notes.push("indique la localisation du chantier : le transport en dépend");
+      else if (needs.includes("distance")) notes.push("indique la distance fournisseur → chantier (km) pour calculer le transport");
+      setMessage(`Coûts internes enregistrés (salaires et transport).${notes.length ? " À compléter : " + notes.join(" ; ") + "." : ""}${result.warning ? " " + result.warning : ""}`);
       router.refresh();
     } finally { setCostsBusy(false); }
   }
-  function estimateOtherCosts() {
-    const base = summary.internalTotal;
-    if (!(base > 0)) { setMessage("Calcule d'abord les prix internes : l'estimation part du coût des matériaux."); return; }
-    const labor = Math.round(base * (Number(laborPercent.replace(",", ".")) || 0) / 100);
-    const transport = Math.round(base * (Number(transportPercent.replace(",", ".")) || 0) / 100);
-    setLaborInput(String(labor)); setTransportInput(String(transport));
-    void saveOtherCosts({ labor: String(labor), transport: String(transport) });
+  // Prix du transport (T.KM) pour cette localisation, cherché sur internet comme dans le DAO (crédits IA).
+  async function searchTransportPrice() {
+    if (!location.trim()) { setMessage("Indique d'abord la localisation du chantier : le transport en dépend."); return; }
+    if (!window.confirm("Le prix du transport (par tonne-kilomètre) va être cherché sur internet pour cette localisation. Cela utilise des crédits IA. Lancer ?")) return;
+    setCostsBusy(true);
+    try {
+      const response = await fetch("/api/prices/internet-search", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ designation: TRANSPORT_DESIGNATION, categorie: INTERNAL_COSTS_CATEGORY, unite: TRANSPORT_UNIT, daoQuantity: 1, pricingContext: "", worksiteName: project.name, worksiteLocation: location.trim() }) });
+      const result = await response.json().catch(() => ({})) as { error?: string; found?: boolean; selected_price?: number };
+      const price = Number(result.selected_price);
+      if (!response.ok || !result.found || !(price > 0)) { setMessage(result.error || "Prix du transport introuvable : saisis-le à la main dans le tableau ci-dessous."); return; }
+      await saveInternalCosts({ [TRANSPORT_DESIGNATION]: price });
+    } finally { setCostsBusy(false); }
   }
   const visibleRows = view === "external" ? rows.filter((row) => !row.is_internal) : rows;
   const canGiveMargin = summary.missingExternal > 0 && summary.lines - summary.missingInternal > 0;
@@ -354,25 +365,62 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
       )}
 
       {isAdmin && (
-        <section className="estimateVersionsPanel" style={{ marginBottom: 16 }}>
-          <p className="estimatePanelEyebrow">Dépenses internes</p>
-          <h3>Salaires et transport des matériaux</h3>
-          <p className="estimatePanelDescription">Les lignes du devis ne contiennent que les matériaux. Ajoute ici les salaires (main-d'œuvre) et le transport des matériaux : ils apparaissent dans le devis interne (PDF compris) et réduisent le bénéfice, mais jamais dans le devis externe ni la facture.</p>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "end", marginTop: 8 }}>
-            <label style={{ display: "grid", gap: 4, fontSize: ".85rem" }}>Salaires — main-d'œuvre (Ar)
-              <input type="text" inputMode="decimal" value={laborInput} placeholder="0" onChange={(event) => setLaborInput(event.target.value)} style={{ width: 170, textAlign: "right" }} /></label>
-            <label style={{ display: "grid", gap: 4, fontSize: ".85rem" }}>Transport des matériaux (Ar)
-              <input type="text" inputMode="decimal" value={transportInput} placeholder="0" onChange={(event) => setTransportInput(event.target.value)} style={{ width: 170, textAlign: "right" }} /></label>
-            <button type="button" className="estimatePrimaryAction" disabled={costsBusy} onClick={() => void saveOtherCosts({ labor: laborInput, transport: transportInput })}>{costsBusy ? "Enregistrement…" : "Enregistrer"}</button>
+        <section className="estimateWorksitePanel" style={{ marginBottom: 16 }}>
+          <h2 className="font-bold">Paramètres internes du chantier</h2>
+          <p>{project.name}</p>
+          <label className="mt-3 block">
+            <span className="mb-1 block font-semibold">Ville ou localisation du chantier</span>
+            <input type="text" value={location} onChange={(event) => setLocation(event.target.value)} placeholder="Exemple : Lazamasy, Fitovinany" className="w-full rounded border p-2" required />
+          </label>
+          <p className="mt-2 text-sm text-gray-600">Cette localisation sert uniquement à rechercher le coût rendu chantier (transport) et reste interne.{!location.trim() ? " Elle est obligatoire pour calculer le transport." : ""}</p>
+          <div className="estimateWorksiteFields">
+            <label>
+              <span style={{ display: "block", fontWeight: 700 }}>Délai d&apos;exécution du devis (jours)</span>
+              <input readOnly value="Non indiqué dans le devis" title="Ce délai n'est pas écrit dans un devis ajouté par PDF." style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6, background: "#f3f4f6", cursor: "not-allowed" }} />
+            </label>
+            <label>
+              <span style={{ display: "block", fontWeight: 700 }}>Durée interne prévue (jours)</span>
+              <input type="number" min="0" value={params.days || ""} onChange={(event) => setParam("days", event.target.value)} placeholder="Exemple : 100" style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }} />
+            </label>
+            {([["workerAideCount", "Ouvriers et aides"], ["masonCount", "Maçons qualifiés"], ["siteManagerCount", "Chefs de chantier"], ["worksManagerCount", "Conducteurs de travaux"], ["engineerCount", "Ingénieurs / responsables techniques"]] as Array<[keyof InternalParams, string]>).map(([key, label]) => (
+              <label key={key}>
+                <span style={{ display: "block", fontWeight: 700 }}>{label}</span>
+                <input type="number" min="0" value={params[key]} onChange={(event) => setParam(key, event.target.value)} style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }} />
+              </label>
+            ))}
+            <label>
+              <span style={{ display: "block", fontWeight: 700 }}>Distance fournisseur → chantier (km)</span>
+              <input type="number" min="0" value={params.distanceKm || ""} onChange={(event) => setParam("distanceKm", event.target.value)} placeholder="Exemple : 120" style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }} />
+            </label>
           </div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "end", marginTop: 12 }}>
-            <label style={{ display: "grid", gap: 4, fontSize: ".85rem" }}>Salaires = % des matériaux
-              <input type="number" step="1" value={laborPercent} onChange={(event) => setLaborPercent(event.target.value)} style={{ width: 90 }} /></label>
-            <label style={{ display: "grid", gap: 4, fontSize: ".85rem" }}>Transport = % des matériaux
-              <input type="number" step="1" value={transportPercent} onChange={(event) => setTransportPercent(event.target.value)} style={{ width: 90 }} /></label>
-            <button type="button" className="estimateSecondaryAction" disabled={costsBusy} onClick={estimateOtherCosts}>Estimer d'après le coût des matériaux</button>
+          <p style={{ marginTop: 8, fontSize: 13 }}>Les journées-personnes comprennent la nourriture. Les effectifs et la durée restent modifiables. Le transport = poids des matériaux lourds (ciment, sable, gravillon, parpaings, briques){tonnes !== null ? ` : ${tonnes.toLocaleString("fr-FR")} t estimées` : ""} × distance.</p>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
+            <button type="button" className="estimatePrimaryAction" disabled={costsBusy} onClick={() => void saveInternalCosts()}>{costsBusy ? "Calcul en cours…" : "Enregistrer et calculer les salaires et le transport"}</button>
+            <button type="button" className="estimateSecondaryAction" disabled={costsBusy} onClick={() => void searchTransportPrice()}>Chercher le prix du transport sur internet (crédits IA)</button>
           </div>
-          <p style={{ ...small, marginTop: 8 }}>L'estimation est un point de départ à ajuster avec tes vrais salaires et tes vrais transports (les pourcentages sont modifiables). Les dépenses réelles restent dans la page Dépenses du chantier.</p>
+          {costRows.length > 0 && (
+            <div className="overflow-x-auto" style={{ marginTop: 12 }}>
+              <table className="w-full border">
+                <thead><tr><th className="border p-2">Ligne interne</th><th className="border p-2">Unité</th><th className="border p-2">Quantité</th><th className="border p-2">PU interne</th><th className="border p-2">Montant interne</th></tr></thead>
+                <tbody>
+                  {costRows.map((row) => (
+                    <tr key={row.id} style={!(num(row.unit_price) > 0) ? { background: "#fff7ed" } : undefined}>
+                      <td className="border p-2">{row.designation}</td>
+                      <td className="border p-2">{row.unit}</td>
+                      <td className="border p-2" style={{ textAlign: "right" }}>{num(row.quantity).toLocaleString("fr-FR")}</td>
+                      <td className="border p-2" style={{ textAlign: "right" }}>
+                        <input key={`${row.id}-${num(row.unit_price)}`} type="text" inputMode="decimal" defaultValue={num(row.unit_price) > 0 ? String(num(row.unit_price)) : ""} placeholder="à remplir"
+                          onBlur={(event) => { const value = event.target.value.trim(); if (value && Number(value.replace(/\s/g, "").replace(",", ".")) !== num(row.unit_price)) void saveInternalCosts({ [String(row.designation)]: value }); }}
+                          style={{ width: 110, textAlign: "right" }} />
+                      </td>
+                      <td className="border p-2" style={{ textAlign: "right" }}>{num(row.unit_price) > 0 ? formatAr(num(row.unit_price) * num(row.quantity)) : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p style={{ ...small, marginTop: 6 }}>Un salaire journalier ou un prix de transport saisi ici est gardé dans la bibliothèque de prix et retrouvé automatiquement dans les prochains devis (comme dans le DAO).</p>
+            </div>
+          )}
         </section>
       )}
 
