@@ -36,6 +36,8 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   const [message, setMessage] = useState("");
   const [progress, setProgress] = useState<{ current: number; total: number; label: string } | null>(null);
   const [marginInput, setMarginInput] = useState("");
+  const [libraryBusy, setLibraryBusy] = useState(false);
+  const [libraryDone, setLibraryDone] = useState<{ saved: number; remaining: number } | null>(null);
   const [pdfBusy, setPdfBusy] = useState<View | null>(null);
   const stopRef = useRef(false);
   useEffect(() => setRows(lines), [lines]);
@@ -67,14 +69,38 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
     return true;
   }
 
+  // Étape 1, GRATUITE : reprend les prix déjà connus (bibliothèque + catalogue
+  // partagé). Aucun crédit IA. Les lignes introuvables restent à compléter.
+  async function fillFromLibrary() {
+    setLibraryBusy(true);
+    setMessage("Lecture de la bibliothèque de prix…");
+    try {
+      const response = await fetch(`/api/devis/projects/${project.id}/library-prices`, { method: "POST" });
+      const result = await response.json().catch(() => ({})) as { error?: string; saved?: number; fromLibrary?: number; fromShared?: number; updates?: Array<{ id: string; unit_price: number }>; remaining?: unknown[] };
+      if (!response.ok) { setMessage(result.error ?? "Lecture de la bibliothèque impossible."); return; }
+      const updates = result.updates ?? [];
+      if (updates.length > 0) setRows((current) => current.map((row) => { const update = updates.find((item) => item.id === row.id); return update ? { ...row, unit_price: update.unit_price } : row; }));
+      const remaining = (result.remaining ?? []).length;
+      setLibraryDone({ saved: result.saved ?? 0, remaining });
+      if ((result.saved ?? 0) > 0) await applyMargin();
+      setMessage(`${result.saved ?? 0} prix remplis depuis la bibliothèque (${result.fromLibrary ?? 0} de ta bibliothèque, ${result.fromShared ?? 0} du catalogue partagé). ${remaining > 0 ? `Il reste ${remaining} prix introuvables : saisis-les toi-même dans l'onglet « Devis interne », ou lance la recherche internet (crédits IA).` : "Tous les prix internes sont remplis."}`);
+      router.refresh();
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
   async function fillInternalPrices() {
     setMessage("");
     const listResponse = await fetch(`/api/devis/projects/${project.id}/prices`, { cache: "no-store" });
-    const list = await listResponse.json().catch(() => ({})) as { error?: string; missing?: Array<{ id: string; designation: string; unit: string; quantity: number; category: string }> };
+    const list = await listResponse.json().catch(() => ({})) as { error?: string; project?: { location?: string }; missing?: Array<{ id: string; designation: string; unit: string; quantity: number; category: string }> };
     if (!listResponse.ok) { setMessage(list.error ?? "Lecture du devis impossible."); return; }
     const missing = list.missing ?? [];
     if (missing.length === 0) { setMessage("Tous les prix internes sont déjà remplis."); return; }
-    if (!window.confirm(`${missing.length} prix interne(s) vont être cherchés (bibliothèque de prix, puis internet). Cela utilise des crédits IA. Lancer ?`)) return;
+    // La recherche de prix a besoin du lieu du chantier (transport, fournisseurs proches).
+    // Si le chantier n'a pas de localisation, les prix sont cherchés à Antananarivo (Analamanga).
+    const location = String(list.project?.location ?? "").trim() || "Antananarivo, Analamanga";
+    if (!window.confirm(`${missing.length} prix restant(s) vont être cherchés sur internet. Cela utilise des crédits IA (les prix déjà connus de ta bibliothèque ne sont pas concernés : utilise d'abord « Remplir depuis la bibliothèque »). Lancer ?`)) return;
 
     stopRef.current = false;
     let pending: Array<{ id: string; unit_price: number }> = [];
@@ -97,7 +123,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
         const response = await fetch("/api/prices/internet-search", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ designation: line.designation, categorie: line.category, unite: line.unit, daoQuantity: line.quantity, pricingContext: "", worksiteName: project.name, worksiteLocation: "" }),
+          body: JSON.stringify({ designation: line.designation, categorie: line.category, unite: line.unit, daoQuantity: line.quantity, pricingContext: "", worksiteName: project.name, worksiteLocation: location }),
         });
         const result = await response.json().catch(() => ({})) as { error?: string; found?: boolean; selected_price?: number };
         if (!response.ok) { failed = result.error || "La recherche de prix est momentanément indisponible."; break; }
@@ -193,7 +219,8 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
           <p className="estimatePanelEyebrow">Prix du devis</p>
           <h3>Compléter les prix manquants</h3>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
-            {summary.missingInternal > 0 && !progress && <button type="button" className="estimatePrimaryAction" onClick={() => void fillInternalPrices()}>Remplir les prix internes (IA)</button>}
+            {summary.missingInternal > 0 && !progress && <button type="button" className="estimatePrimaryAction" disabled={libraryBusy} onClick={() => void fillFromLibrary()}>{libraryBusy ? "Lecture de la bibliothèque…" : "1. Remplir depuis la bibliothèque (gratuit)"}</button>}
+            {summary.missingInternal > 0 && !progress && <button type="button" className="estimateSecondaryAction" disabled={libraryBusy} onClick={() => void fillInternalPrices()}>{libraryDone ? `2. Chercher les ${summary.missingInternal} prix restants sur internet (crédits IA)` : "2. Chercher les prix manquants sur internet (crédits IA)"}</button>}
             {progress && <button type="button" className="estimateSecondaryAction" onClick={() => { stopRef.current = true; }}>Arrêter</button>}
             {summary.missingInternal === 0 && <span style={{ color: "#1f7a46", fontWeight: 700 }}>Prix internes complets</span>}
             {canGiveMargin && !progress && (

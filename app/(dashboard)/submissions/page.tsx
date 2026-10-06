@@ -1,7 +1,6 @@
-import Link from "next/link";
 import { getContext } from "@/lib/organization";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
-import { DeleteSubmissionDossierButton } from "@/components/tenders/DeleteSubmissionDossierButton";
+import { SubmissionCard } from "@/components/tenders/SubmissionCard";
 
 type Analysis = { submission_items?: unknown[] };
 type StoredItem = { title: string; required: boolean; form_data: Record<string, string> };
@@ -39,11 +38,8 @@ export default async function SubmissionsPage() {
     ]} />}
     <h1 className="text-3xl font-bold">Dossiers de soumission</h1>
     <p className="mt-2 text-gray-600">Un dossier maître par DAO, à vérifier et valider avant dépôt physique.</p>
-    <section className="submissionTable mt-6 overflow-hidden rounded-2xl border bg-white">
-      <table className="w-full"><thead><tr><th className="text-left p-4">DAO / chantier</th><th className="text-left p-4">Échéance</th><th className="text-left p-4">Pièces trouvées</th><th className="text-left p-4">État</th><th className="text-left p-4">Dossier</th></tr></thead>
-        <tbody>{rows.map(({ tender, count, valid, hasStoredItems }) => <tr key={tender.id} className="submissionRow"><td className="p-4 font-semibold" data-label="DAO / chantier">{tender.reference ? `${tender.reference} — ` : ""}{tender.title}</td><td className="p-4" data-label="Échéance">{tender.deadline ? new Date(tender.deadline).toLocaleDateString("fr-FR") : "—"}</td><td className="p-4" data-label="Pièces trouvées"><span className="submissionCount">{count || "À analyser"}</span></td><td className="p-4" data-label="État"><span className={`submissionStatus ${!hasStoredItems ? "isPending" : valid ? "isValid" : "isInvalid"}`}>{!hasStoredItems ? "Dossier non généré" : valid ? "Validé — prêt à déposer" : "Non validé"}</span></td><td className="p-4" data-label="Dossier"><div className="flex flex-wrap gap-2"><Link className="tenderButton submissionOpenLink" href={`/tenders/${tender.id}/submission`}>Ouvrir</Link>{hasStoredItems && <DeleteSubmissionDossierButton tenderId={tender.id} />}</div></td></tr>)}</tbody>
-      </table>
-      {!tenders?.length && <p className="p-6 text-gray-600">Aucun DAO enregistré.</p>}
-    </section>
+    {!tenders?.length ? <section className="projectEmptyCard"><h2>Aucun DAO enregistré</h2><p>Ajoutez un appel d’offres : son dossier de soumission apparaîtra ici.</p></section> : <section className="projectDirectoryGrid mt-6" aria-label="Dossiers de soumission">
+      {rows.map(({ tender, count, valid, hasStoredItems }) => <SubmissionCard key={tender.id} dossier={{ id: tender.id, reference: tender.reference ?? null, title: tender.title ?? null, deadline: tender.deadline ?? null, count, valid, hasStoredItems }} />)}
+    </section>}
   </main>;
 }
