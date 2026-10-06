@@ -125,9 +125,11 @@ export async function computeSituationDraft(
   } else if (finance.settings.marginPercent !== null && finance.settings.marginPercent !== undefined) {
     // Marge attendue donnée à la création du chantier.
     marginPercent = Number(finance.settings.marginPercent) || 0;
-  } else if (finance.settings.contractAmount || finance.settings.marginAmount) {
-    // Prix ou bénéfice attendu donné sans pourcentage : la marge appliquée
-    // est celle qui résulte des dépenses réelles (elle bouge avec elles).
+  } else if (!(finance.devisTotal > 0) && (finance.settings.contractAmount || finance.settings.marginAmount)) {
+    // Prix ou bénéfice attendu donné sans pourcentage, ET pas de devis chiffré :
+    // la marge appliquée est celle qui résulte des dépenses réelles. Avec un
+    // devis chiffré on ne l'utilise JAMAIS : elle serait énorme (prix du devis
+    // divisé par les petites dépenses du début) et gonflerait la ligne « Autre ».
     marginPercent = Math.max(0, finance.pricing.marginPercent ?? 0);
   } else if (project.manual_margin_percent !== null && project.manual_margin_percent !== undefined) {
     marginPercent = Number(project.manual_margin_percent) || 0;
