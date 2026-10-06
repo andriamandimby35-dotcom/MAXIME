@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
+import type { ExpensePdfData } from "@/lib/expenses/general-expense-pdf";
 
 type RoleHistoryEntry = { role_name: string; effective_from: string };
 type StaffMember = { id: string; project_id: string; full_name: string; role_name?: string | null; active?: boolean; mvola_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; created_at?: string | null; linked_assignment_id?: string | null; role_history?: RoleHistoryEntry[] | null };
@@ -120,6 +121,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   const [viewingRates, setViewingRates] = useState(false);
   const [viewingGeneralExport, setViewingGeneralExport] = useState(false);
   const [exportGeneratedAt, setExportGeneratedAt] = useState<string | null>(null);
+  const [exportBusy, setExportBusy] = useState(false);
   const [rateDrafts, setRateDrafts] = useState<Record<string, { daily: string; monthly: string }>>({});
   const [viewingSalaryHistory, setViewingSalaryHistory] = useState(false);
   const [viewingSalaryDetail, setViewingSalaryDetail] = useState<SalaryPayment | null>(null);
@@ -531,6 +533,96 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   const categoryTotals: Record<RecapCategory, number> = { materiaux: 0, transport: 0, salaire: 0, autre: 0 };
   for (const row of recapRows) categoryTotals[row.category] += row.amount;
   const categoryLabels: Record<RecapCategory, string> = { materiaux: "Matériaux", transport: "Transport", salaire: "Salaire", autre: "Autre" };
+
+  // ----- Résumé dépense : vrai PDF (voir lib/expenses/general-expense-pdf.ts) -----
+  // Remplace l'ancienne impression de la page (window.print), qui donnait des
+  // feuilles blanches et laissait le navigateur ajouter date, titre et adresse
+  // en haut et en bas de chaque feuille.
+  function buildGeneralExportData(): ExpensePdfData {
+    const generatedLabel = exportGeneratedAt ? new Intl.DateTimeFormat("fr-FR", { dateStyle: "long", timeStyle: "short" }).format(new Date(exportGeneratedAt)) : "";
+    const categorySectionRows = (Object.keys(categoryLabels) as RecapCategory[]).map((category) => ({ label: `Sous-total ${categoryLabels[category]}`, value: money(categoryTotals[category]) }));
+    if (outsideClosureTotal > 0) categorySectionRows.push({ label: "Sous-total dépense hors clôture", value: money(outsideClosureTotal) });
+    return {
+      title: `Résumé dépense — ${project.name}`,
+      subtitle: `${project.location || "Localisation à confirmer"}${project.project_code ? ` · ${project.project_code}` : ""} · Période : ${periodMonth} · Généré le ${generatedLabel}`,
+      sections: [
+        { heading: "Conducteur et chef(s) de chantier", emptyText: "Aucun conducteur ni chef de chantier actif.", rows: assignmentRows.map((row) => ({ label: `${row.roleName} — ${row.name}`, value: `${row.daysWorked} j sur la période` })) },
+        { heading: "Ouvriers, manœuvres et autres présents", emptyText: "Aucun ouvrier déclaré.", rows: staffRows.map((row) => ({ label: row.roleName ? `${row.name} (${row.roleName})` : row.name, value: row.trackedDays === 0 ? "Aucun jour suivi" : row.absenceDays === 0 ? `Présent du début à la fin (${row.daysWorked} j)` : `${row.daysWorked} j présent · ${row.absenceDays} j d’absence` })) },
+        { heading: "Détail des dépenses payées", emptyText: "Aucune dépense enregistrée.", rows: recapRows.map((row) => ({ label: `${row.date ? dateFmt.format(new Date(row.date)) : "—"} · ${row.label}${row.outsideClosure ? " · Dépense hors clôture" : ""}`, value: `${row.qty} · ${money(row.amount)}`, highlight: row.outsideClosure })) },
+        { heading: "Matériaux (quantités déjà achetées/utilisées)", emptyText: "Aucun matériau acheté.", rows: materialUsageTotals.map((item) => ({ label: item.name, value: `${item.quantity} ${item.unit}`.trim() })) },
+        { heading: "Sous-totaux par catégorie", rows: categorySectionRows },
+      ],
+      totalLabel: "TOTAL GÉNÉRAL DES DÉPENSES",
+      totalValue: money(recapTotal),
+    };
+  }
+  async function makeGeneralExportPdf() {
+    const { buildGeneralExpensePdf } = await import("@/lib/expenses/general-expense-pdf");
+    const bytes = await buildGeneralExpensePdf(buildGeneralExportData());
+    const blob = new Blob([bytes as unknown as BlobPart], { type: "application/pdf" });
+    const slug = project.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "chantier";
+    return { blob, fileName: `Resume-depenses-${slug}-${new Date().toISOString().slice(0, 10)}.pdf` };
+  }
+  function downloadBlob(blob: Blob, fileName: string) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+  async function saveGeneralExport() {
+    setExportBusy(true);
+    try {
+      const { blob, fileName } = await makeGeneralExportPdf();
+      downloadBlob(blob, fileName);
+      setMessage({ kind: "success", text: `PDF enregistré : ${fileName}` });
+    } catch (error) {
+      console.error("Création du PDF du résumé dépense impossible", error);
+      setMessage({ kind: "error", text: "Le PDF n’a pas pu être créé. Réessayez." });
+    } finally { setExportBusy(false); }
+  }
+  async function shareGeneralExport() {
+    setExportBusy(true);
+    try {
+      const { blob, fileName } = await makeGeneralExportPdf();
+      const file = new File([blob], fileName, { type: "application/pdf" });
+      if (typeof navigator !== "undefined" && typeof navigator.share === "function" && navigator.canShare?.({ files: [file] })) {
+        // Ouvre le choix de partage du téléphone/ordinateur (WhatsApp, e-mail...).
+        await navigator.share({ files: [file], title: `Résumé dépense — ${project.name}` });
+      } else {
+        downloadBlob(blob, fileName);
+        setMessage({ kind: "info", text: "Le partage direct n’est pas disponible sur cet appareil : le PDF a été enregistré, joignez-le ensuite dans WhatsApp ou un e-mail." });
+      }
+    } catch (error) {
+      // Fermer la fenêtre de partage sans choisir n'est pas une erreur.
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        console.error("Partage du PDF du résumé dépense impossible", error);
+        setMessage({ kind: "error", text: "Le PDF n’a pas pu être partagé. Utilisez « Enregistrer sous (PDF) »." });
+      }
+    } finally { setExportBusy(false); }
+  }
+  async function printGeneralExport() {
+    setExportBusy(true);
+    try {
+      const { blob } = await makeGeneralExportPdf();
+      const url = URL.createObjectURL(blob);
+      const frame = document.createElement("iframe");
+      frame.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;";
+      frame.src = url;
+      frame.onload = () => {
+        try { frame.contentWindow?.focus(); frame.contentWindow?.print(); }
+        catch { window.open(url, "_blank"); }
+        setTimeout(() => { frame.remove(); URL.revokeObjectURL(url); }, 120_000);
+      };
+      document.body.appendChild(frame);
+    } catch (error) {
+      console.error("Impression du PDF du résumé dépense impossible", error);
+      setMessage({ kind: "error", text: "Impossible de lancer l’impression. Utilisez « Enregistrer sous (PDF) »." });
+    } finally { setExportBusy(false); }
+  }
 
   async function insertSalaryPayment(rows: SalaryRow[], options: { paymentMethod: "mvola" | "cash" | "other" | null; isAdvance?: boolean; advanceNote?: string }) {
     const total = rows.reduce((sum, row) => sum + row.amount, 0);
@@ -1031,8 +1123,9 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
       </div>
       <div className="noPrint" style={{ display: "flex", gap: "10px", marginTop: "14px", flex: "0 0 auto", flexWrap: "wrap" }}>
         <button type="button" className="secondary" onClick={() => setExportGeneratedAt(new Date().toISOString())}>Nouvel export</button>
-        <button type="button" onClick={() => window.print()}>Enregistrer sous (PDF)</button>
-        <button type="button" className="secondary" onClick={() => window.print()}>Imprimer</button>
+        <button type="button" disabled={exportBusy} onClick={() => void saveGeneralExport()}>Enregistrer sous (PDF)</button>
+        <button type="button" disabled={exportBusy} onClick={() => void shareGeneralExport()}>Partager</button>
+        <button type="button" className="secondary" disabled={exportBusy} onClick={() => void printGeneralExport()}>Imprimer</button>
         <button type="button" className="ghostButton" onClick={() => setViewingGeneralExport(false)}>Fermer</button>
       </div>
     </div></div>, document.body)}
