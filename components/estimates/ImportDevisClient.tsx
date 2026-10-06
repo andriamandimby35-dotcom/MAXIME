@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import { formatAr } from "@/components/money";
 
 type Line = { category: string; subcategory: string; designation: string; unit: string; quantity: number; unit_price: number; ref?: string; description?: string; concerne?: string };
-type Extraction = { project_name: string; location: string; works: string[]; lines: Line[]; devis_total: number | null; tmp_percent?: number | null };
+type Extraction = { project_name: string; location: string; works: string[]; lines: Line[]; devis_total: number | null; tmp_percent?: number | null; warnings?: string[] };
 
 // « Ajouter un devis » à partir d'un PDF : lecture par l'IA (une seule fois),
 // vérification à l'écran, puis création du chantier, du planning et des prix.
@@ -92,6 +92,12 @@ export function ImportDevisClient({ kind }: { kind: "internal" | "external" }) {
           </p>
           {extraction.devis_total && totalMatches === false && (
             <p className="notice" style={{ background: "#fbeee0" }}>⚠ Total écrit dans le devis : {formatAr(extraction.devis_total)}. Il diffère du total des lignes lues : une ligne manque peut-être. Tu pourras tout corriger ensuite.</p>
+          )}
+          {(extraction.warnings?.length ?? 0) > 0 && (
+            <details className="notice" style={{ background: "#fbeee0" }} open>
+              <summary style={{ cursor: "pointer", fontWeight: 700 }}>⚠ {extraction.warnings!.length} ligne(s) dont la quantité, le prix unitaire et le montant ne concordent pas</summary>
+              <ul style={{ margin: "8px 0 0 18px" }}>{extraction.warnings!.slice(0, 40).map((item, index) => <li key={index} style={{ fontSize: ".82rem" }}>{item}</li>)}</ul>
+            </details>
           )}
           {extraction.devis_total && totalMatches === true && <p className="notice" style={{ background: "#e5f8eb" }}>✔ Le total des lignes correspond au total du devis.</p>}
 

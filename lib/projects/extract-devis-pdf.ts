@@ -4,9 +4,11 @@
 // l'import des prix d'un chantier déjà créé (/api/billing/projects/[id]/import-devis).
 // Le PDF n'est jamais stocké : copie temporaire côté IA, supprimée aussitôt.
 
+import { reconcileLine } from "@/lib/devis/reconcile";
+
 /** ref / description / concerne : texte d'origine du bordereau (numéro, texte complet de l'article, ligne « Concerne »), pour que le PDF généré ressemble à l'original. */
-export type DevisPriceLine = { category: string; subcategory: string; designation: string; unit: string; quantity: number; unit_price: number; ref?: string; description?: string; concerne?: string };
-export type DevisExtraction = { works: string[]; project_name: string; location: string; price_lines: DevisPriceLine[]; /** Toutes les lignes du devis, y compris celles sans prix (unit_price = 0). */ all_lines: DevisPriceLine[]; devis_total: number | null; /** Taux « TMP » écrit sous le total du devis (ex. 8), sinon null. */ tmp_percent: number | null };
+export type DevisPriceLine = { category: string; subcategory: string; designation: string; unit: string; quantity: number; unit_price: number; ref?: string; description?: string; concerne?: string; amount?: number };
+export type DevisExtraction = { works: string[]; project_name: string; location: string; price_lines: DevisPriceLine[]; /** Toutes les lignes du devis, y compris celles sans prix (unit_price = 0). */ all_lines: DevisPriceLine[]; devis_total: number | null; /** Lignes corrigées ou à vérifier (quantité × prix ≠ montant du devis). */ warnings: string[]; /** Taux « TMP » écrit sous le total du devis (ex. 8), sinon null. */ tmp_percent: number | null };
 export type DevisExtractionResult = { ok: true; data: DevisExtraction } | { ok: false; status: number; body: Record<string, unknown> };
 
 function extractResponseText(payload: { output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }) {
@@ -67,7 +69,7 @@ export async function extractDevisFromPdf(file: File): Promise<DevisExtractionRe
       instructions: [
         "Tu lis un devis de travaux de bâtiment (BTP) à Madagascar.",
         "Pour la liste 'works' (planning), ignore les prix et les montants : seuls les travaux comptent.",
-        "En plus, remplis 'price_lines' avec chaque ligne CHIFFRÉE du devis, dans l'ordre du document : category = titre de la catégorie ou du lot principal auquel la ligne appartient (chaîne vide s'il n'y en a pas), subcategory = titre de la sous-catégorie ou sous-section à l'intérieur de cette catégorie (chaîne vide s'il n'y en a pas), exactement comme écrits dans le devis, designation = le même titre court que dans 'works', unit = unité écrite, quantity = quantité, unit_price = prix unitaire en Ariary tel qu'écrit dans le devis. Le relevé doit être COMPLET : parcours TOUTES les pages et TOUS les tableaux, n'omets aucune ligne chiffrée (même courte, même répétée sur plusieurs pages, même si son prix est dans un tableau récapitulatif). Avant de répondre, additionne quantité × prix unitaire de toutes tes lignes et compare avec le total général du devis : si l'écart dépasse 1 %, relis le document et ajoute les lignes manquantes. N'inclus jamais une ligne de titre, de sous-total ou de total dans price_lines. N'invente JAMAIS un prix : une ligne de travaux dont le devis ne donne PAS de prix unitaire est quand même listée dans price_lines, avec unit_price = null (le prix sera cherché plus tard). 'devis_total' = le total général du devis s'il est écrit, sinon null. Pour CHAQUE ligne, recopie aussi le texte d'origine : ref = le numéro de la ligne tel qu'écrit (ex. \"0.1\", \"I.4\", \"XI.15\"), description = le texte complet de l'article tel qu'écrit dans le devis (sans le numéro, sans l'unité, sans les nombres, sans la ligne « Concerne »), concerne = ce qui suit « Concerne : » (chaîne vide s'il n'y en a pas). 'tmp_percent' = le pourcentage de la ligne « TMP » écrite sous le total (ex. 8 pour « TMP 8% »), sinon null.",
+        "En plus, remplis 'price_lines' avec chaque ligne CHIFFRÉE du devis, dans l'ordre du document : category = titre de la catégorie ou du lot principal auquel la ligne appartient (chaîne vide s'il n'y en a pas), subcategory = titre de la sous-catégorie ou sous-section à l'intérieur de cette catégorie (chaîne vide s'il n'y en a pas), exactement comme écrits dans le devis, designation = le même titre court que dans 'works', unit = unité écrite, quantity = quantité, unit_price = prix unitaire en Ariary tel qu'écrit dans le devis. Le relevé doit être COMPLET : parcours TOUTES les pages et TOUS les tableaux, n'omets aucune ligne chiffrée (même courte, même répétée sur plusieurs pages, même si son prix est dans un tableau récapitulatif). Avant de répondre, additionne quantité × prix unitaire de toutes tes lignes et compare avec le total général du devis : si l'écart dépasse 1 %, relis le document et ajoute les lignes manquantes. N'inclus jamais une ligne de titre, de sous-total ou de total dans price_lines. N'invente JAMAIS un prix : une ligne de travaux dont le devis ne donne PAS de prix unitaire est quand même listée dans price_lines, avec unit_price = null (le prix sera cherché plus tard). 'devis_total' = le total général du devis s'il est écrit, sinon null. Pour CHAQUE ligne, recopie aussi le texte d'origine : ref = le numéro de la ligne tel qu'écrit (ex. \"0.1\", \"I.4\", \"XI.15\"), description = le texte complet de l'article tel qu'écrit dans le devis (sans le numéro, sans l'unité, sans les nombres, sans la ligne « Concerne »), concerne = ce qui suit « Concerne : » (chaîne vide s'il n'y en a pas). COLONNES : lis chaque ligne en suivant les en-têtes du tableau — unit = colonne « Unité », quantity = colonne « Quantité » (peut avoir des décimales), unit_price = colonne « Prix unitaire », amount = colonne « Montant » de la même ligne. Ne mélange JAMAIS quantity et unit_price : vérifie que quantity × unit_price = amount ; si ce n'est pas le cas, relis la ligne. Les nombres écrits avec des espaces comme séparateurs de milliers (« 2 762.40 », « 28 525.00 ») sont UN seul nombre. designation = titre court qui garde le VERBE D'ACTION de l'article (« Réparation », « Fourniture et pose », « Dépose », « Réfection »…) : ne transforme jamais une réparation en fourniture. Quand plusieurs lignes chiffrées (par exemple « Dimension : 280*250 ») dépendent d'un même article descriptif placé au-dessus, chacune garde le verbe et l'objet de cet article dans designation et description (texte de l'article + la ligne de dimension). 'tmp_percent' = le pourcentage de la ligne « TMP » écrite sous le total (ex. 8 pour « TMP 8% »), sinon null.",
         "Extrais la liste des travaux à réaliser : chaque poste ou ligne de travail réel devient une entrée.",
         "Donne un titre court et clair pour chaque travail (sans numérotation ni prix).",
         "Ignore les lignes qui ne sont que des titres de section, des sous-totaux ou des totaux : elles ne sont pas des travaux.",
@@ -114,8 +116,9 @@ export async function extractDevisFromPdf(file: File): Promise<DevisExtractionRe
                     ref: { type: "string" },
                     description: { type: "string" },
                     concerne: { type: "string" },
+                    amount: { type: ["number", "null"] },
                   },
-                  required: ["category", "subcategory", "designation", "unit", "quantity", "unit_price", "ref", "description", "concerne"],
+                  required: ["category", "subcategory", "designation", "unit", "quantity", "unit_price", "ref", "description", "concerne", "amount"],
                 },
               },
               devis_total: { type: ["number", "null"] },
@@ -165,7 +168,7 @@ export async function extractDevisFromPdf(file: File): Promise<DevisExtractionRe
     return { ok: false, status: 502, body: { error: `Réponse IA vide${reasonNote}. Réessayez.` } };
   }
 
-  let parsed: { project_name?: string; location?: string; works?: string[]; price_lines?: Array<{ category?: string; subcategory?: string; designation?: string; unit?: string; quantity?: number | null; unit_price?: number | null; ref?: string; description?: string; concerne?: string }>; devis_total?: number | null; tmp_percent?: number | null };
+  let parsed: { project_name?: string; location?: string; works?: string[]; price_lines?: Array<{ category?: string; subcategory?: string; designation?: string; unit?: string; quantity?: number | null; unit_price?: number | null; ref?: string; description?: string; concerne?: string; amount?: number | null }>; devis_total?: number | null; tmp_percent?: number | null };
   try {
     parsed = JSON.parse(outputText);
   } catch {
@@ -203,8 +206,17 @@ export async function extractDevisFromPdf(file: File): Promise<DevisExtractionRe
       ref: String(line.ref ?? "").trim(),
       description: String(line.description ?? "").trim(),
       concerne: String(line.concerne ?? "").trim(),
+      amount: Number(line.amount) > 0 ? Number(line.amount) : 0,
     }))
     .filter((line) => line.designation);
+  // Contrôle quantité × prix unitaire = montant (tous les devis ajoutés par PDF).
+  const warnings: string[] = [];
+  for (const line of allLines) {
+    const check = reconcileLine({ quantity: line.quantity, unit_price: line.unit_price, amount: line.amount, unit: line.unit });
+    line.quantity = check.quantity;
+    line.unit_price = check.unit_price;
+    if (check.status === "fixed" || check.status === "warning") warnings.push(`${check.status === "fixed" ? "Corrigé" : "À vérifier"} — ${line.designation} : ${check.note}`);
+  }
   const priceLines = allLines.filter((line) => line.unit_price > 0);
   return {
     ok: true,
@@ -215,6 +227,7 @@ export async function extractDevisFromPdf(file: File): Promise<DevisExtractionRe
       price_lines: priceLines,
       all_lines: allLines,
       devis_total: Number(parsed.devis_total) > 0 ? Number(parsed.devis_total) : null,
+      warnings,
       tmp_percent: Number(parsed.tmp_percent) > 0 ? Number(parsed.tmp_percent) : null,
     },
   };
