@@ -14,7 +14,7 @@ export const revalidate = 0;
 // - mode "external" : uniquement les prix externes (client), colonnes « PRIX UNITAIRE » et « MONTANT » ;
 // - mode "internal" : uniquement les prix internes (tes coûts), colonnes « PRIX UNITAIRE INTERNE » et « MONTANT INTERNE ».
 // Le PDF est renvoyé directement (pas de stockage Supabase), en A4 portrait.
-type Row = { designation: string | null; unit: string | null; quantity: number | string | null; unit_price: number | string | null; external_unit_price: number | string | null; is_internal: boolean | null; category: string | null; subcategory: string | null; position: string | null };
+type Row = { designation: string | null; unit: string | null; quantity: number | string | null; unit_price: number | string | null; external_unit_price: number | string | null; is_internal: boolean | null; category: string | null; subcategory: string | null; position: string | null; ref?: string | null; description?: string | null; concerne?: string | null };
 
 function roman(value: number) {
   const table: Array<[number, string]> = [[1000, "M"], [900, "CM"], [500, "D"], [400, "CD"], [100, "C"], [90, "XC"], [50, "L"], [40, "XL"], [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"]];
@@ -37,10 +37,17 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const { data: project } = await supabase.from("projects").select("id,name").eq("id", id).eq("organization_id", member.organization_id).maybeSingle();
   if (!project) return NextResponse.json({ error: "Devis introuvable dans votre organisation." }, { status: 404 });
 
+  // Taux « TMP » lu sur le devis d'origine (colonne ajoutée par le SQL 20261013 : absente = pas de TMP).
+  let tmpPercent = 0;
+  {
+    const tmpResult = await supabase.from("projects").select("tmp_percent").eq("id", id).maybeSingle();
+    if (!tmpResult.error) tmpPercent = Number((tmpResult.data as { tmp_percent?: number | string | null } | null)?.tmp_percent) || 0;
+  }
+
   const rows: Row[] = [];
   for (let from = 0; ; from += 1000) {
     let page: Row[] | null = null;
-    for (const columns of ["designation,unit,quantity,unit_price,external_unit_price,is_internal,category,subcategory,position", "designation,unit,quantity,unit_price,external_unit_price,is_internal"]) {
+    for (const columns of ["designation,unit,quantity,unit_price,external_unit_price,is_internal,category,subcategory,position,ref,description,concerne", "designation,unit,quantity,unit_price,external_unit_price,is_internal,category,subcategory,position", "designation,unit,quantity,unit_price,external_unit_price,is_internal"]) {
       const result = await supabase.from("project_price_items").select(columns).eq("project_id", id).order("created_at", { ascending: true }).range(from, from + 999);
       if (!result.error) { page = (result.data as unknown as Row[]); break; }
     }
@@ -89,7 +96,11 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       closeSection();
       currentSection = section;
       // « Installation et repli de chantier » en tête porte le n° 0, les autres rubriques I, II, III…
-      if (sectionCount === 0 && /installation|repli/i.test(section)) currentSectionNumber = "0";
+      // Numéro d'origine (« XI.15 » → rubrique XI) quand il a été lu à l'import ; sinon numérotation calculée.
+      const refPrefix = String(row.ref ?? "").trim().split(".")[0];
+      if (row.is_internal) currentSectionNumber = "A";
+      else if (refPrefix) currentSectionNumber = refPrefix;
+      else if (sectionCount === 0 && /installation|repli/i.test(section)) currentSectionNumber = "0";
       else { romanCounter += 1; currentSectionNumber = roman(romanCounter); }
       sectionCount += 1;
       itemInSection = 0;
@@ -105,7 +116,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const total = unitPrice === null ? null : Math.round(quantity * unitPrice * 100) / 100;
     currentSubtotal += total ?? 0;
     grandTotal += total ?? 0;
-    pdfRows.push({ kind: "item", number: `${currentSectionNumber}.${itemInSection}`, designation: String(row.designation ?? "").trim(), unit: String(row.unit ?? "").trim(), quantity, unitPrice, total });
+    const fullText = String(row.description ?? "").trim() || String(row.designation ?? "").trim();
+    pdfRows.push({ kind: "item", number: String(row.ref ?? "").trim() || `${currentSectionNumber}.${itemInSection}`, designation: fullText, concerne: String(row.concerne ?? "").trim() || undefined, unit: String(row.unit ?? "").trim(), quantity, unitPrice, total });
   });
   closeSection();
 
@@ -131,6 +143,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     },
     recapGroups: [{ reference: "", title: "Bordereau détail quantitatif et estimatif", entries: recapEntries }],
     includeExternalRecap: mode === "external",
+    // TMP (taxe écrite sous le total du devis d'origine) : seulement dans le devis externe.
+    extraTotals: mode === "external" && tmpPercent > 0
+      ? [
+          { label: `TMP ${tmpPercent.toLocaleString("fr-FR")} %`, amount: Math.round(grandTotal * tmpPercent) / 100 },
+          { label: `TOTAL AVEC TMP ${tmpPercent.toLocaleString("fr-FR")} %`, amount: Math.round(grandTotal * (100 + tmpPercent)) / 100 },
+        ]
+      : undefined,
   });
   const fileName = `devis-${mode === "internal" ? "interne" : "externe"}-${id.slice(0, 8)}.pdf`;
   return NextResponse.json({ ok: true, fileName, pdfBase64: Buffer.from(pdf).toString("base64") });

@@ -4,8 +4,8 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { formatAr } from "@/components/money";
 
-type Line = { category: string; subcategory: string; designation: string; unit: string; quantity: number; unit_price: number };
-type Extraction = { project_name: string; location: string; works: string[]; lines: Line[]; devis_total: number | null };
+type Line = { category: string; subcategory: string; designation: string; unit: string; quantity: number; unit_price: number; ref?: string; description?: string; concerne?: string };
+type Extraction = { project_name: string; location: string; works: string[]; lines: Line[]; devis_total: number | null; tmp_percent?: number | null };
 
 // « Ajouter un devis » à partir d'un PDF : lecture par l'IA (une seule fois),
 // vérification à l'écran, puis création du chantier, du planning et des prix.
@@ -48,7 +48,7 @@ export function ImportDevisClient({ kind }: { kind: "internal" | "external" }) {
     const response = await fetch("/api/devis/import/create", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ kind, name, location, works: extraction.works, lines: extraction.lines, margin_percent: margin }),
+      body: JSON.stringify({ kind, name, location, works: extraction.works, lines: extraction.lines, tmp_percent: extraction.tmp_percent ?? null, margin_percent: margin }),
     });
     const result = await response.json().catch(() => ({}));
     setBusy(false);

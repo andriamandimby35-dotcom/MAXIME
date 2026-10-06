@@ -62,6 +62,38 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
     }
     return external - internal;
   }, [rows]);
+  // Autres dépenses internes (lignes « interne seulement » : salaires et transport des matériaux).
+  const otherCosts = useMemo(() => {
+    const labor = rows.find((row) => row.is_internal && row.designation === "Main-d'œuvre (salaires)");
+    const transport = rows.find((row) => row.is_internal && row.designation === "Transport des matériaux");
+    const amountOf = (row?: DevisLine) => (row ? (num(row.unit_price) * (num(row.quantity) || 1)) : 0);
+    return { labor: amountOf(labor), transport: amountOf(transport), total: amountOf(labor) + amountOf(transport) };
+  }, [rows]);
+  const [laborInput, setLaborInput] = useState("");
+  const [transportInput, setTransportInput] = useState("");
+  const [laborPercent, setLaborPercent] = useState("30");
+  const [transportPercent, setTransportPercent] = useState("8");
+  const [costsBusy, setCostsBusy] = useState(false);
+  useEffect(() => { setLaborInput(otherCosts.labor > 0 ? String(Math.round(otherCosts.labor)) : ""); setTransportInput(otherCosts.transport > 0 ? String(Math.round(otherCosts.transport)) : ""); }, [otherCosts.labor, otherCosts.transport]);
+
+  async function saveOtherCosts(values: { labor?: string; transport?: string }) {
+    setCostsBusy(true);
+    try {
+      const response = await fetch(`/api/devis/projects/${project.id}/other-costs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(values) });
+      const result = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) { setMessage(result.error ?? "Dépenses non enregistrées."); return; }
+      setMessage("Salaires et transport enregistrés dans le devis interne.");
+      router.refresh();
+    } finally { setCostsBusy(false); }
+  }
+  function estimateOtherCosts() {
+    const base = summary.internalTotal;
+    if (!(base > 0)) { setMessage("Calcule d'abord les prix internes : l'estimation part du coût des matériaux."); return; }
+    const labor = Math.round(base * (Number(laborPercent.replace(",", ".")) || 0) / 100);
+    const transport = Math.round(base * (Number(transportPercent.replace(",", ".")) || 0) / 100);
+    setLaborInput(String(labor)); setTransportInput(String(transport));
+    void saveOtherCosts({ labor: String(labor), transport: String(transport) });
+  }
   const visibleRows = view === "external" ? rows.filter((row) => !row.is_internal) : rows;
   const canGiveMargin = summary.missingExternal > 0 && summary.lines - summary.missingInternal > 0;
 
@@ -251,9 +283,10 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
         <div className="estimateVersionsHeading"><p className="estimatePanelEyebrow">Résumé</p><h3>Deux versions du devis</h3></div>
         <p className="estimatePanelDescription">Le devis externe est celui que tu as importé (prix du client, utilisé pour la facture). Le devis interne garde tes coûts. La marge est calculée : externe ÷ interne − 1.</p>
         <div className="estimateFinancialSummary">
-          <div><span>Coût interne</span><strong>{summary.internalTotal > 0 ? formatAr(summary.internalTotal) : "—"}</strong></div>
+          <div><span>Coût interne (matériaux)</span><strong>{summary.internalTotal > 0 ? formatAr(summary.internalTotal) : "—"}</strong></div>
+          <div><span>Salaires + transport</span><strong>{otherCosts.total > 0 ? formatAr(otherCosts.total) : "à renseigner"}</strong></div>
           <div><span>Marge (calculée)</span><strong>{margin !== null ? `${margin.toLocaleString("fr-FR", { maximumFractionDigits: 2 })} %` : "—"}</strong></div>
-          <div><span>Bénéfice attendu</span><strong>{summary.internalTotal > 0 && summary.externalTotal > 0 ? formatAr(pairedProfit) : "—"}</strong></div>
+          <div><span>Bénéfice attendu (après salaires et transport)</span><strong>{summary.internalTotal > 0 && summary.externalTotal > 0 ? formatAr(pairedProfit - otherCosts.total) : "—"}</strong></div>
           <div className="estimateClientTotal"><span>Montant externe (client)</span><strong>{summary.externalTotal > 0 ? formatAr(summary.externalTotal) : "—"}</strong></div>
         </div>
         {(summary.missingInternal > 0 || summary.missingExternal > 0) && <p style={{ ...small, marginTop: 8 }}>
@@ -317,6 +350,29 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
               </div>
             </details>
           )}
+        </section>
+      )}
+
+      {isAdmin && (
+        <section className="estimateVersionsPanel" style={{ marginBottom: 16 }}>
+          <p className="estimatePanelEyebrow">Dépenses internes</p>
+          <h3>Salaires et transport des matériaux</h3>
+          <p className="estimatePanelDescription">Les lignes du devis ne contiennent que les matériaux. Ajoute ici les salaires (main-d'œuvre) et le transport des matériaux : ils apparaissent dans le devis interne (PDF compris) et réduisent le bénéfice, mais jamais dans le devis externe ni la facture.</p>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "end", marginTop: 8 }}>
+            <label style={{ display: "grid", gap: 4, fontSize: ".85rem" }}>Salaires — main-d'œuvre (Ar)
+              <input type="text" inputMode="decimal" value={laborInput} placeholder="0" onChange={(event) => setLaborInput(event.target.value)} style={{ width: 170, textAlign: "right" }} /></label>
+            <label style={{ display: "grid", gap: 4, fontSize: ".85rem" }}>Transport des matériaux (Ar)
+              <input type="text" inputMode="decimal" value={transportInput} placeholder="0" onChange={(event) => setTransportInput(event.target.value)} style={{ width: 170, textAlign: "right" }} /></label>
+            <button type="button" className="estimatePrimaryAction" disabled={costsBusy} onClick={() => void saveOtherCosts({ labor: laborInput, transport: transportInput })}>{costsBusy ? "Enregistrement…" : "Enregistrer"}</button>
+          </div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "end", marginTop: 12 }}>
+            <label style={{ display: "grid", gap: 4, fontSize: ".85rem" }}>Salaires = % des matériaux
+              <input type="number" step="1" value={laborPercent} onChange={(event) => setLaborPercent(event.target.value)} style={{ width: 90 }} /></label>
+            <label style={{ display: "grid", gap: 4, fontSize: ".85rem" }}>Transport = % des matériaux
+              <input type="number" step="1" value={transportPercent} onChange={(event) => setTransportPercent(event.target.value)} style={{ width: 90 }} /></label>
+            <button type="button" className="estimateSecondaryAction" disabled={costsBusy} onClick={estimateOtherCosts}>Estimer d'après le coût des matériaux</button>
+          </div>
+          <p style={{ ...small, marginTop: 8 }}>L'estimation est un point de départ à ajuster avec tes vrais salaires et tes vrais transports (les pourcentages sont modifiables). Les dépenses réelles restent dans la page Dépenses du chantier.</p>
         </section>
       )}
 

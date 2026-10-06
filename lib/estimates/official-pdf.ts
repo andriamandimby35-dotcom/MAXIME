@@ -3,7 +3,7 @@ import { amountInWordsFr } from "@/lib/number-to-words-fr";
 export type OfficialPdfRow =
   | { kind: "section"; title: string; number?: string }
   // unitPrice / total à null : prix pas encore connu, la case reste vide.
-  | { kind: "item"; number: string; designation: string; unit: string; quantity: number; unitPrice: number | null; total: number | null }
+  | { kind: "item"; number: string; designation: string; /** Ligne « Concerne : … » du bordereau d'origine. */ concerne?: string; unit: string; quantity: number; unitPrice: number | null; total: number | null }
   | { kind: "subsection"; title: string }
   | { kind: "subtotal"; title: string; total: number };
 
@@ -13,6 +13,8 @@ export type OfficialPdfInput = {
   daoTitle: string;
   /** Titre en haut à droite (par défaut « DEVIS OFFICIEL - DAO »). */
   documentLabel?: string;
+  /** Lignes après le total (ex. « TMP 8 % » puis « TOTAL AVEC TMP 8 % »), dans le détail et dans la récapitulation. */
+  extraTotals?: Array<{ label: string; amount: number }>;
   /** Mot devant le titre (par défaut « DAO » ; « Chantier » pour un devis ajouté par PDF). */
   titleLabel?: string;
   daoReference?: string;
@@ -214,7 +216,7 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
     const textX = align === "center" ? x + Math.max(4, (width - estimatedWidth) / 2) : align === "right" ? x + Math.max(4, width - estimatedWidth - 4) : x + 5;
     addText(rendered, textX, top - Math.min(12, height - 5), size, bold);
   };
-  const recapPage = (title: string, entries: Array<{ reference?: string; title: string; total: number }>, withSignature = false, showTotal = true, reference = "") => {
+  const recapPage = (title: string, entries: Array<{ reference?: string; title: string; total: number }>, withSignature = false, showTotal = true, reference = "", showExtras = false) => {
     page = { draw: [], lines: [], fills: [] }; pages.push(page); y = PAGE_HEIGHT - TOP;
     addText(input.companyName, LEFT, y, 14, true);
     addText("BDQE - RÉCAPITULATION", PAGE_WIDTH - RIGHT - 175, y, 12, true);
@@ -244,7 +246,13 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
       const total = entries.reduce((sum, entry) => sum + entry.total, 0);
       drawCell(LEFT, y, refWidth + titleWidth, 24, (template?.total_label || `TOTAL ${title}`).toLocaleUpperCase("fr-FR"), true, "right");
       drawCell(LEFT + refWidth + titleWidth, y, amountWidth, 24, money(total), true, "right");
-      y -= 38;
+      y -= 24;
+      for (const extra of showExtras ? (input.extraTotals ?? []) : []) {
+        drawCell(LEFT, y, refWidth + titleWidth, 22, cleanText(extra.label).toLocaleUpperCase("fr-FR"), true, "right");
+        drawCell(LEFT + refWidth + titleWidth, y, amountWidth, 22, money(extra.amount), true, "right");
+        y -= 22;
+      }
+      y -= 14;
     } else y -= 16;
     if (withSignature) {
       addText("Arrêté le présent bordereau détail quantitatif et estimatif à la somme de :", LEFT, y, 9); y -= 14;
@@ -305,7 +313,9 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
       y -= height; continue;
     }
     const designationLines = wrapText(row.designation, COLUMN_WIDTHS[1] - 10, 8);
-    const height = Math.max(22, designationLines.length * 10 + 10); ensureSpace(height);
+    const concerneLines = cleanText(row.concerne) ? wrapText(`Concerne : ${cleanText(row.concerne)}`, COLUMN_WIDTHS[1] - 10, 8) : [];
+    const textLines = [...designationLines, ...concerneLines];
+    const height = Math.max(22, textLines.length * 10 + 10 + (concerneLines.length ? 3 : 0)); ensureSpace(height);
     const top = y + 5; const bottom = y - height + 5;
     // Numéro, unité, quantité, prix et montant : centrés ou alignés à droite, au milieu de la ligne.
     const middle = (top + bottom) / 2 - 2.6;
@@ -315,6 +325,7 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
     addColumnText(amountCell(row.unitPrice), 4, middle, "right");
     addColumnText(amountCell(row.total), 5, middle, "right");
     designationLines.forEach((line, index) => addText(line, columnX(1) + 5, y - 9 - index * 10, 8));
+    concerneLines.forEach((line, index) => addText(line, columnX(1) + 5, y - 9 - (designationLines.length + index) * 10 - 3, 8, true));
     drawGrid(top, bottom);
     y -= height;
   }
@@ -325,6 +336,15 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
     addText("TOTAL GÉNÉRAL DU DEVIS", columnX(1) + 5, y - 12, 10, true);
     addColumnText(amountCell(input.grandTotal), 5, y - 12, "right", 10, true);
     page.lines.push({ x1: LEFT, y1: top, x2: PAGE_WIDTH - RIGHT, y2: top, width: 0.8 }, { x1: LEFT, y1: bottom, x2: PAGE_WIDTH - RIGHT, y2: bottom, width: 0.8 }, { x1: LEFT, y1: top, x2: LEFT, y2: bottom, width: 0.8 }, { x1: PAGE_WIDTH - RIGHT, y1: top, x2: PAGE_WIDTH - RIGHT, y2: bottom, width: 0.8 }, { x1: columnX(5), y1: top, x2: columnX(5), y2: bottom, width: 0.8 });
+    y -= 28;
+    for (const extra of input.extraTotals ?? []) {
+      ensureSpace(30);
+      const extraTop = y + 5; const extraBottom = y - 19;
+      addText(cleanText(extra.label).toLocaleUpperCase("fr-FR"), columnX(1) + 5, y - 9, 9, true);
+      addColumnText(amountCell(extra.amount), 5, y - 9, "right", 9, true);
+      page.lines.push({ x1: LEFT, y1: extraTop, x2: PAGE_WIDTH - RIGHT, y2: extraTop, width: 0.6 }, { x1: LEFT, y1: extraBottom, x2: PAGE_WIDTH - RIGHT, y2: extraBottom, width: 0.6 }, { x1: LEFT, y1: extraTop, x2: LEFT, y2: extraBottom, width: 0.6 }, { x1: PAGE_WIDTH - RIGHT, y1: extraTop, x2: PAGE_WIDTH - RIGHT, y2: extraBottom, width: 0.6 }, { x1: columnX(5), y1: extraTop, x2: columnX(5), y2: extraBottom, width: 0.6 });
+      y -= 24;
+    }
   }
 
   // Les rubriques de récapitulation viennent du DAO et sont séparées du
@@ -332,7 +352,7 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
   // avec signature ne figure que dans la version externe à soumettre.
   for (const group of input.recapGroups ?? []) {
     const extractedTitle = (input.bdqeLayout?.recap_tables ?? []).find((item) => cleanText(item.reference) === cleanText(group.reference))?.title;
-    recapPage(extractedTitle || `Récapitulation ${group.title}`, group.entries, false, true, group.reference || "");
+    recapPage(extractedTitle || `Récapitulation ${group.title}`, group.entries, false, true, group.reference || "", true);
   }
   if ((input.internalFinancialSummary?.length ?? 0) > 0) {
     recapPage("Synthèse financière interne", input.internalFinancialSummary!.map((entry) => ({ title: entry.title, total: entry.total })), false, false);

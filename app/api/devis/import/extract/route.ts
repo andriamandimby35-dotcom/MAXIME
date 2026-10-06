@@ -27,5 +27,6 @@ export async function POST(request: Request) {
     works: data.works,
     lines: data.all_lines,
     devis_total: data.devis_total,
+    tmp_percent: data.tmp_percent,
   });
 }

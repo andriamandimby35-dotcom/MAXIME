@@ -13,7 +13,7 @@ import { resolveItemTasks, type PlanningTask } from "@/lib/billing/task-matching
 //   fabrique les prix externes ; sans prix, tout reste à remplir.
 export const maxDuration = 120;
 
-type InLine = { category?: string; subcategory?: string; designation?: string; unit?: string; quantity?: number; unit_price?: number };
+type InLine = { category?: string; subcategory?: string; designation?: string; unit?: string; quantity?: number; unit_price?: number; ref?: string; description?: string; concerne?: string };
 
 export async function POST(request: Request) {
   const supabase = await createServerClient();
@@ -21,7 +21,7 @@ export async function POST(request: Request) {
   if ("error" in auth) return auth.error;
 
   const body = await request.json().catch(() => ({})) as {
-    kind?: string; name?: string; location?: string; works?: string[]; lines?: InLine[]; margin_percent?: number | string | null;
+    kind?: string; name?: string; location?: string; works?: string[]; lines?: InLine[]; margin_percent?: number | string | null; tmp_percent?: number | string | null;
   };
   const kind = body.kind === "internal" ? "internal" : "external";
   const name = String(body.name ?? "").trim();
@@ -101,11 +101,16 @@ export async function POST(request: Request) {
       category: String(line.category ?? "").trim() || null,
       subcategory: String(line.subcategory ?? "").trim() || null,
       task_id: taskIdByLine[index],
+      // Texte d'origine du bordereau (colonnes ajoutées par le SQL 20261013 : ignorées si absentes).
+      ref: String(line.ref ?? "").trim() || null,
+      description: String(line.description ?? "").trim() || null,
+      concerne: String(line.concerne ?? "").trim() || null,
     };
   });
   let { error } = await supabase.from("project_price_items").insert(rows);
-  if (error && /task_id/.test(error.message)) ({ error } = await supabase.from("project_price_items").insert(rows.map(({ task_id: _t, ...rest }) => rest)));
-  if (error && /category|subcategory/.test(error.message)) ({ error } = await supabase.from("project_price_items").insert(rows.map(({ task_id: _t, category: _c, subcategory: _s, ...rest }) => rest)));
+  if (error && /\b(ref|description|concerne)\b/.test(error.message)) ({ error } = await supabase.from("project_price_items").insert(rows.map(({ ref: _r, description: _d, concerne: _n, ...rest }) => rest)));
+  if (error && /task_id/.test(error.message)) ({ error } = await supabase.from("project_price_items").insert(rows.map(({ task_id: _t, ref: _r, description: _d, concerne: _n, ...rest }) => rest)));
+  if (error && /category|subcategory/.test(error.message)) ({ error } = await supabase.from("project_price_items").insert(rows.map(({ task_id: _t, category: _c, subcategory: _s, ref: _r, description: _d, concerne: _n, ...rest }) => rest)));
   if (error) return NextResponse.json({ error: `Chantier créé, mais le devis n'a pas pu être enregistré : ${error.message}`, projectId }, { status: 400 });
 
   // 4. Marge connue dès maintenant (devis interne avec prix) : retenue sur le chantier.
@@ -113,6 +118,13 @@ export async function POST(request: Request) {
   if (margin !== null) {
     const { error: marginError } = await supabase.from("projects").update({ expected_margin_percent: margin }).eq("id", projectId);
     if (marginError) warning = "La marge n'a pas pu être retenue (fichier SQL « 20261006_project_pricing.sql » pas encore exécuté).";
+  }
+
+  // 5. Taux « TMP » lu sous le total du devis (ex. 8 %) : repris dans le PDF externe.
+  const tmpRaw = Number(String(body.tmp_percent ?? "").replace(",", "."));
+  if (Number.isFinite(tmpRaw) && tmpRaw > 0 && tmpRaw < 100) {
+    const { error: tmpError } = await supabase.from("projects").update({ tmp_percent: tmpRaw }).eq("id", projectId);
+    if (tmpError && !warning) warning = "Le taux TMP n'a pas pu être retenu (fichier SQL « 20261013_devis_texte_complet.sql » pas encore exécuté).";
   }
 
   return NextResponse.json({
