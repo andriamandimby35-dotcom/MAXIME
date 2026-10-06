@@ -1297,16 +1297,6 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     </div>
 
     <section className="mb-6 rounded-xl border bg-white p-5">
-      <h2 className="text-xl font-bold">Informations réutilisables de l’entreprise</h2>
-      <p className="mt-1 text-sm text-gray-600">Elles préremplissent les futurs formulaires et sont partagées uniquement avec les DAO de cette entreprise.</p>
-      <div className="mt-4 grid gap-3 md:grid-cols-2">
-        {profileFields.map(([key, label]) => <label key={key} className="grid gap-1 text-sm font-semibold">{label}
-          <input value={profile[key] ?? ""} onChange={(event) => updateProfile(key, event.target.value)} />
-        </label>)}
-      </div>
-    </section>
-
-    <section className="mb-6 rounded-xl border bg-white p-5">
       <h2 className="text-xl font-bold">BDQE automatique</h2>
       <p className="mt-1 text-sm text-gray-600">Le BDQE externe provient du devis enregistré pour ce DAO, avec ses récapitulatifs. Imprimez-le, faites signer et parapher les pages demandées, puis joignez la version signée.</p>
       <div className="mt-3 grid gap-2">
