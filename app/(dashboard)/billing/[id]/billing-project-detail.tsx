@@ -117,6 +117,55 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     margin_value: pricing.settingsMarginPercent !== null ? String(pricing.settingsMarginPercent) : pricing.settingsMarginAmount !== null ? String(pricing.settingsMarginAmount) : "",
   });
   const [pricingMessage, setPricingMessage] = useState("");
+  const [editingPricing, setEditingPricing] = useState(false);
+  const hasSavedPricing = Boolean(pricing.contractAmount) || pricing.settingsMarginPercent !== null || pricing.settingsMarginAmount !== null;
+
+  // Import des prix du devis (PDF) pour un chantier créé sans prix.
+  type ImportLine = { category: string; subcategory: string; designation: string; unit: string; quantity: number; unit_price: number };
+  const [importLines, setImportLines] = useState<ImportLine[] | null>(null);
+  const [importTotal, setImportTotal] = useState<number | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importMessage, setImportMessage] = useState("");
+
+  async function deletePricing() {
+    if (!window.confirm("Supprimer le prix / la marge enregistrés pour ce chantier ?")) return;
+    setBusy(true); setPricingMessage("");
+    const response = await fetch(`/api/billing/projects/${project.id}/pricing`, { method: "DELETE" });
+    const result = await response.json().catch(() => ({}));
+    setBusy(false);
+    if (!response.ok) return setPricingMessage(result.error ?? "Suppression impossible.");
+    setPricingForm({ kind: "price", contract_amount: "", margin_kind: "percent", margin_value: "" });
+    setEditingPricing(false);
+    router.refresh();
+  }
+
+  async function readDevisPdf(file: File) {
+    setImportBusy(true); setImportMessage(""); setImportLines(null);
+    const form = new FormData();
+    form.append("file", file);
+    const response = await fetch(`/api/billing/projects/${project.id}/import-devis`, { method: "POST", body: form });
+    const result = await response.json().catch(() => ({}));
+    setImportBusy(false);
+    if (!response.ok) return setImportMessage(result.error ?? "Lecture du PDF impossible.");
+    setImportLines(result.price_lines ?? []);
+    setImportTotal(result.devis_total ?? null);
+  }
+
+  async function saveImportedDevis() {
+    if (!importLines) return;
+    setImportBusy(true); setImportMessage("");
+    const response = await fetch(`/api/billing/projects/${project.id}/import-devis`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ price_lines: importLines }),
+    });
+    const result = await response.json().catch(() => ({}));
+    setImportBusy(false);
+    if (!response.ok) return setImportMessage(result.error ?? "Enregistrement impossible.");
+    setImportLines(null);
+    setImportMessage("Prix du devis enregistrés.");
+    router.refresh();
+  }
 
   function startEditPayment(payment: Payment) {
     setEditingPaymentId(payment.id);
@@ -154,6 +203,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     setBusy(false);
     if (!response.ok) return setPricingMessage(result.error ?? "Enregistrement impossible.");
     setPricingMessage("Prix et marge enregistrés.");
+    setEditingPricing(false);
     router.refresh();
   }
 
@@ -316,7 +366,26 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
         </p>
       )}
 
-      {isAdmin && !pricing.hasDevis && (
+      {isAdmin && !pricing.hasDevis && hasSavedPricing && !editingPricing && (
+        <div className="panel" style={{ marginTop: "16px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px" }}>
+          <div>
+            <span style={{ fontSize: ".8rem", color: "#666" }}>{pricing.contractAmount ? "Prix de l'offre (fixe)" : "Marge attendue"}</span>
+            <div style={{ fontSize: "1.3rem", fontWeight: 700 }}>
+              {pricing.contractAmount
+                ? `${ariary.format(pricing.contractAmount)} Ar`
+                : pricing.settingsMarginPercent !== null
+                  ? `${pricing.settingsMarginPercent} %`
+                  : `${ariary.format(pricing.settingsMarginAmount ?? 0)} Ar (bénéfice)`}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button type="button" className="ghostButton" disabled={busy} onClick={() => setEditingPricing(true)}>Modifier</button>
+            <button type="button" className="ghostButton" disabled={busy} onClick={() => void deletePricing()} style={{ color: "#b3261e" }}>Supprimer</button>
+          </div>
+        </div>
+      )}
+
+      {isAdmin && !pricing.hasDevis && (!hasSavedPricing || editingPricing) && (
         <div className="panel" style={{ marginTop: "16px" }}>
           <h3 style={{ marginTop: 0 }}>Prix et marge de ce chantier</h3>
           <p style={{ fontSize: ".85rem", color: "#666" }}>
@@ -324,12 +393,12 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
             le <strong>prix de l'offre</strong> (somme fixe que le client paie, seule ta marge change selon les dépenses ; on facture selon l'avancement du planning)
             ou la <strong>marge attendue</strong> (le prix suit alors les dépenses réelles).
           </p>
-          <div style={{ display: "flex", gap: "18px", flexWrap: "wrap", margin: "8px 0" }}>
-            <label style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-              <input type="radio" name="pricingKind" checked={pricingForm.kind === "price"} onChange={() => setPricingForm({ ...pricingForm, kind: "price" })} /> Prix de l'offre (fixe)
+          <div style={{ display: "flex", gap: "24px", flexWrap: "wrap", margin: "10px 0" }}>
+            <label style={{ display: "flex", flexDirection: "row", gap: "8px", alignItems: "center", width: "auto" }}>
+              <input type="radio" name="pricingKind" style={{ width: "auto", margin: 0 }} checked={pricingForm.kind === "price"} onChange={() => setPricingForm({ ...pricingForm, kind: "price" })} /> <span>Prix de l'offre (fixe)</span>
             </label>
-            <label style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-              <input type="radio" name="pricingKind" checked={pricingForm.kind === "margin"} onChange={() => setPricingForm({ ...pricingForm, kind: "margin" })} /> Marge attendue
+            <label style={{ display: "flex", flexDirection: "row", gap: "8px", alignItems: "center", width: "auto" }}>
+              <input type="radio" name="pricingKind" style={{ width: "auto", margin: 0 }} checked={pricingForm.kind === "margin"} onChange={() => setPricingForm({ ...pricingForm, kind: "margin" })} /> <span>Marge attendue</span>
             </label>
           </div>
           {pricingForm.kind === "price" ? (
@@ -345,8 +414,50 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
               </span>
             </label>
           )}
-          <button type="button" className="button" disabled={busy} onClick={() => void savePricing()}>Enregistrer le prix / la marge</button>
+          <div style={{ display: "flex", gap: "8px", marginTop: "8px", flexWrap: "wrap" }}>
+            <button type="button" className="button" disabled={busy} onClick={() => void savePricing()}>Enregistrer le prix / la marge</button>
+            {editingPricing && <button type="button" className="ghostButton" disabled={busy} onClick={() => setEditingPricing(false)}>Annuler</button>}
+          </div>
           {pricingMessage && <p className="notice" style={{ marginTop: "10px" }}>{pricingMessage}</p>}
+        </div>
+      )}
+
+      {isAdmin && !pricing.hasDevis && (
+        <div className="panel" style={{ marginTop: "16px" }}>
+          <h3 style={{ marginTop: 0 }}>Importer les prix du devis (PDF)</h3>
+          <p style={{ fontSize: ".85rem", color: "#666" }}>
+            Si les prix du devis n'ont pas été lus à la création du chantier, donne ici le PDF du devis chiffré : l'application en extrait les catégories, sous-catégories et prix,
+            tu les vérifies, puis la facture sera faite exactement comme le devis (avancement tiré du planning). Le planning du chantier n'est pas modifié.
+          </p>
+          {!importLines && (
+            <input type="file" accept="application/pdf" disabled={importBusy} onChange={(e) => { const file = e.target.files?.[0]; if (file) void readDevisPdf(file); e.target.value = ""; }} />
+          )}
+          {importBusy && !importLines && <p className="notice" style={{ marginTop: "10px" }}>Lecture du PDF en cours (cela peut prendre une minute)…</p>}
+          {importLines && (
+            <div style={{ marginTop: "10px" }}>
+              <p><strong>{importLines.length} lignes chiffrées trouvées</strong>{importTotal ? ` · total écrit dans le devis : ${ariary.format(importTotal)} Ar` : ""} · total calculé : <strong>{ariary.format(importLines.reduce((sum, line) => sum + line.quantity * line.unit_price, 0))} Ar</strong></p>
+              <div style={{ maxHeight: "320px", overflow: "auto" }}>
+                <table style={{ width: "100%", fontSize: ".85rem" }}>
+                  <thead><tr><th>Catégorie</th><th>Sous-catégorie</th><th>Désignation</th><th>Qté</th><th>Prix unitaire</th><th>Montant</th></tr></thead>
+                  <tbody>
+                    {importLines.map((line, index) => (
+                      <tr key={index}>
+                        <td>{line.category}</td><td>{line.subcategory}</td><td>{line.designation}</td>
+                        <td>{line.quantity} {line.unit}</td>
+                        <td>{ariary.format(line.unit_price)}</td>
+                        <td>{ariary.format(line.quantity * line.unit_price)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ display: "flex", gap: "8px", marginTop: "10px", flexWrap: "wrap" }}>
+                <button type="button" className="button" disabled={importBusy} onClick={() => void saveImportedDevis()}>{importBusy ? "Enregistrement…" : "Enregistrer ces prix"}</button>
+                <button type="button" className="ghostButton" disabled={importBusy} onClick={() => setImportLines(null)}>Annuler</button>
+              </div>
+            </div>
+          )}
+          {importMessage && <p className="notice" style={{ marginTop: "10px" }}>{importMessage}</p>}
         </div>
       )}
 

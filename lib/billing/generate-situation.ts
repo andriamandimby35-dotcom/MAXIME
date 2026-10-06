@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { canonicalMaterialKey } from "@/lib/material-normalization";
-import { computePricing, distributeByCoefficient, roundAr } from "@/lib/billing/pricing";
+import { computePricing, roundAr } from "@/lib/billing/pricing";
 import { loadProjectFinance } from "@/lib/billing/project-finance";
 
 // Calcul du "brouillon" d'une facture (situation de travaux), à partir :
@@ -223,7 +223,12 @@ export async function computeSituationDraft(
       ? storedExternalPrice
       : Math.round(baseUnitPrice * (1 + marginPercent / 100) * 100) / 100;
     const previousQuantity = previousQuantityByDesignation.get(normalizeDesignation(item.designation)) || 0;
-    const match = bestMatchingTask(item.designation, tasks ?? []);
+    // La ligne est d'abord rapprochée d'une tâche par son propre titre ; sinon
+    // par sa sous-catégorie, puis sa catégorie (le planning est souvent écrit
+    // par grands postes : « Terrassement », « Fondations »…).
+    const match = bestMatchingTask(item.designation, tasks ?? [])
+      ?? (item.subcategory ? bestMatchingTask(String(item.subcategory), tasks ?? []) : null)
+      ?? (item.category ? bestMatchingTask(String(item.category), tasks ?? []) : null);
     const needsReview = !match;
     if (needsReview) unmatchedCount += 1;
     // Une ligne non reconnue reste à son avancement déjà facturé (0 % de
@@ -267,57 +272,40 @@ export async function computeSituationDraft(
   const otherPaid = sumAmount(otherOrders.data);
   const salaryPaid = (salaryPayments.data ?? []).reduce((sum, row) => sum + (Number(row.total_amount) || 0), 0);
 
+  // Les dépenses qui ne sont pas des lignes du devis ne sont jamais listées une
+  // par une : tout est regroupé dans UNE seule ligne « Autre ».
+  // Les anciennes factures avaient parfois trois lignes (Transport, Main
+  // d'œuvre, Autre) : on les additionne pour retrouver ce qui a déjà été
+  // facturé et ne rien facturer deux fois.
+  const previousOtherAmount = ["autre", "transport", "main d'œuvre"]
+    .reduce((sum, label) => sum + (previousQuantityByDesignation.get(label) || 0), 0);
+
   let noDevisWarning: string | null = null;
-  const depenseLines: SituationDraftLine[] = noDevis
-    ? (() => {
-        const pricing = finance.pricing.mode !== "none"
-          ? finance.pricing
-          : computePricing({ settings: { marginPercent }, realCost: finance.realCost, progress: finance.progress });
-        if (pricing.mode === "fixed" && finance.progress === null) {
-          noDevisWarning = "Ce chantier n'a aucune tâche dans le planning : toute la somme de l'offre est répartie sur les dépenses déjà payées. Ajoute les travaux au planning pour facturer selon l'avancement.";
-        }
-        const flat = finance.categories.flatMap((category) => category.lines.map((line) => ({
-          category: category.label,
-          designation: line.label,
-          cost: line.cost,
-        })));
-        const coefficient = pricing.coefficient ?? 1 + marginPercent / 100;
-        const amounts = distributeByCoefficient(flat.map((row) => row.cost), coefficient, pricing.forceTotal ? pricing.certified : null);
-        return flat.map((row, index) => {
-          const currentAmount = amounts[index];
-          const previousAmount = previousQuantityByDesignation.get(normalizeDesignation(row.designation)) || 0;
-          const current = Math.max(previousAmount, currentAmount);
-          return {
-            kind: "depense" as const,
-            position: index + 1,
-            designation: row.designation,
-            category: row.category,
-            unit: "forfait",
-            contractQuantity: null,
-            unitPrice: null,
-            previousQuantity: previousAmount,
-            currentQuantity: current,
-            previousAmount,
-            currentAmount: current,
-            amountThisTime: roundAr(current - previousAmount),
-          };
-        });
-      })()
-    : [
-    { label: "Transport", cumulativePaid: transportPaid },
-    { label: "Main d'œuvre", cumulativePaid: salaryPaid },
-    { label: "Autre", cumulativePaid: otherPaid },
-  ].map(({ label, cumulativePaid }, index) => {
-    const currentAmount = Math.round(cumulativePaid * (1 + marginPercent / 100) * 100) / 100;
-    const previousAmount = previousQuantityByDesignation.get(normalizeDesignation(label)) || 0;
-    // Sur ces lignes, "quantité" représente directement un montant en
-    // Ariary (prix unitaire = 1) : il n'y a pas de quantité/prix séparés à
-    // afficher, seulement des dépenses réelles.
+  const depenseLines: SituationDraftLine[] = (() => {
+    let currentAmount: number;
+    if (noDevis) {
+      const pricing = finance.pricing.mode !== "none"
+        ? finance.pricing
+        : computePricing({ settings: { marginPercent }, realCost: finance.realCost, progress: finance.progress });
+      if (pricing.mode === "fixed" && finance.progress === null) {
+        noDevisWarning = "Ce chantier n'a aucune tâche dans le planning : toute la somme de l'offre est facturée d'un coup. Ajoute les travaux au planning pour facturer selon l'avancement.";
+      }
+      // Sans prix de devis, tout le chantier tient dans la ligne « Autre » (prix
+      // de l'offre × avancement, ou dépenses réelles + marge).
+      currentAmount = pricing.forceTotal ? pricing.certified : roundAr(finance.realCost * (pricing.coefficient ?? 1 + marginPercent / 100));
+      noDevisWarning = `${noDevisWarning ? `${noDevisWarning} ` : ""}Ce chantier n'a pas de prix de devis : tout est regroupé dans une seule ligne « Autre ». Utilise « Importer les prix du devis (PDF) » pour une facture avec les catégories et sous-catégories du devis.`;
+    } else {
+      // Avec devis : transport, main d'œuvre et autres dépenses (les achats de
+      // matériaux sont déjà dans les lignes du devis) majorés de la marge.
+      currentAmount = roundAr((transportPaid + salaryPaid + otherPaid) * (1 + marginPercent / 100));
+    }
+    const previousAmount = previousOtherAmount;
     const current = Math.max(previousAmount, currentAmount);
-    return {
+    if (current <= 0 && previousAmount <= 0 && !noDevis) return [];
+    return [{
       kind: "depense" as const,
-      position: items.length + index + 1,
-      designation: label,
+      position: items.length + 1,
+      designation: "Autre",
       unit: "forfait",
       contractQuantity: null,
       unitPrice: null,
@@ -325,9 +313,9 @@ export async function computeSituationDraft(
       currentQuantity: current,
       previousAmount,
       currentAmount: current,
-      amountThisTime: Math.round((current - previousAmount) * 100) / 100,
-    };
-  });
+      amountThisTime: roundAr(current - previousAmount),
+    }];
+  })();
 
   const lines = [...devisLines, ...depenseLines];
   const grossAmount = Math.round(lines.reduce((sum, line) => sum + line.amountThisTime, 0) * 100) / 100;

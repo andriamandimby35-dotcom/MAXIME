@@ -148,10 +148,17 @@ export function generateProgressClaimPdf(input: SituationPdfInput) {
     if (input.daoReference) leftDetails.push(`Référence DAO : ${input.daoReference}`);
     const rightDetails = [`Date d'émission : ${input.issueDate}`];
     if (input.periodLabel) rightDetails.push(`Période : ${input.periodLabel}`);
-    leftDetails.forEach((text, index) => addText(text, LEFT + 330, PAGE_HEIGHT - TOP - 20 - index * 12, index === 0 ? 9 : 8, index === 0));
+    // Les textes de gauche (nom du chantier, client...) sont coupés en
+    // plusieurs lignes pour ne jamais passer sous « Date d'émission ».
+    const leftRows: Array<{ text: string; bold: boolean; size: number }> = [];
+    leftDetails.forEach((text, index) => {
+      const size = index === 0 ? 9 : 8;
+      wrapText(text, 215, size).slice(0, index === 0 ? 3 : 2).forEach((part) => leftRows.push({ text: part, bold: index === 0, size }));
+    });
+    leftRows.forEach((row, index) => addText(row.text, LEFT + 330, PAGE_HEIGHT - TOP - 20 - index * 11, row.size, row.bold));
     rightDetails.forEach((text, index) => addText(text, LEFT + 560, PAGE_HEIGHT - TOP - 20 - index * 12, 8));
 
-    const headerLines = Math.max(leftDetails.length, rightDetails.length);
+    const headerLines = Math.max(leftRows.length * 11 / 12, rightDetails.length);
     y = PAGE_HEIGHT - TOP - 20 - (headerLines - 1) * 12 - 14;
     page.lines.push({ x1: LEFT, y1: y, x2: PAGE_WIDTH - RIGHT, y2: y, width: 1 }); y -= 16;
     drawTableHeader();
