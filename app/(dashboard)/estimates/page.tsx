@@ -1,6 +1,7 @@
 import { EstimateList } from "@/components/estimates/EstimateList";
 import { getContext } from "@/lib/organization";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
+import { summarizeDevis, type DevisItem } from "@/lib/devis/pricing";
 
 type LineData = Record<string, unknown>;
 
@@ -64,8 +65,34 @@ export default async function EstimatesPage() {
       margin: Number(estimate.profit_margin_percent) || 0,
     };
   });
+  // Devis ajoutés par PDF (ou chantiers sans devis du DAO) : leur devis vit dans
+  // le bordereau du chantier, avec prix externe (client) et prix interne (coût).
+  const { data: importedProjects } = await supabase
+    .from("projects")
+    .select("id,name,created_at")
+    .eq("organization_id", organizationId)
+    .is("source_estimate_id", null)
+    .order("created_at", { ascending: false });
+  const importedIds = (importedProjects ?? []).map((project) => project.id);
+  const itemsByProject = new Map<string, DevisItem[]>();
+  if (importedIds.length > 0) {
+    for (let from = 0; ; from += 1000) {
+      const { data: page, error } = await supabase
+        .from("project_price_items")
+        .select("project_id,quantity,unit_price,external_unit_price,is_internal")
+        .in("project_id", importedIds)
+        .range(from, from + 999);
+      if (error || !page || page.length === 0) break;
+      for (const row of page as Array<DevisItem & { project_id: string }>) itemsByProject.set(row.project_id, [...(itemsByProject.get(row.project_id) ?? []), row]);
+      if (page.length < 1000) break;
+    }
+  }
+  const imported = (importedProjects ?? [])
+    .map((project) => ({ project, summary: summarizeDevis(itemsByProject.get(project.id) ?? []) }))
+    .filter(({ summary }) => summary.lines > 0)
+    .map(({ project, summary }) => ({ id: project.id, name: project.name, createdAt: project.created_at ?? null, ...summary }));
   return <>
     <RealtimeRefresh channelName="estimates-list" tables={[{ table: "estimates", filter: `organization_id=eq.${organizationId}` }, "estimate_lines"]} />
-    <EstimateList estimates={rows} />
+    <EstimateList estimates={rows} imported={imported} />
   </>;
 }

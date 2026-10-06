@@ -7,6 +7,7 @@ import { createClient } from "@/lib/supabase/client";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
 import type { ExpensePdfData, ExpensePdfSection } from "@/lib/expenses/general-expense-pdf";
 import type { AllocationResult, AllocationLine } from "@/lib/expenses/allocation";
+import { BudgetByCategoryCard } from "@/components/expenses/BudgetByCategoryCard";
 
 type RoleHistoryEntry = { role_name: string; effective_from: string };
 type StaffMember = { id: string; project_id: string; full_name: string; role_name?: string | null; active?: boolean; mvola_number?: string | null; mvola_enabled?: boolean; call_enabled?: boolean; created_at?: string | null; linked_assignment_id?: string | null; role_history?: RoleHistoryEntry[] | null };
@@ -894,6 +895,11 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     {message && <div className="notice">{message.text}</div>}
 
     <div className="projectSiteGrid">
+      {canManage && <section className="projectSiteCard">
+        <div className="projectCardHead"><div><p className="projectEyebrow">BUDGET</p><h2>Budget par catégorie</h2></div></div>
+        <p className="projectHint">Les dépenses de chaque catégorie comparées à la somme prévue au devis interne.</p>
+        <BudgetByCategoryCard projectId={project.id} allocation={allocation} />
+      </section>}
       {canManage && <section className="projectSiteCard">
         <div className="projectCardHead"><div><p className="projectEyebrow">DÉPENSES PAR CATÉGORIE</p><h2>Détail par catégorie du devis</h2></div><span>{allocation ? money(allocation.allocated.total + allocation.other.total) : ""}</span></div>
         <p className="projectHint">Chaque matériau utilisé (au prix d’achat), son transport et la main d’œuvre payée sont rangés dans la catégorie travaillée dans le rapport journalier. Ce qui n’est pas encore utilisé ou classé reste dans « Autre ».</p>

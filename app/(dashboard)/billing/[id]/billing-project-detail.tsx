@@ -8,6 +8,9 @@ import { usePdfViewer } from "@/components/PdfViewerProvider";
 import { overpaidAmount } from "@/lib/billing/pricing";
 import { matchTaskForItem } from "@/lib/billing/task-matching";
 
+// L'ajout de devis se fait maintenant depuis le menu Devis ; l'ancien écran d'import est gardé caché.
+const SHOW_LEGACY_DEVIS_IMPORT = false;
+
 type Project = { id: string; project_code: string | null; name: string; location: string | null; budget_amount: number | string | null; status: string | null; source_estimate_id: string | null; manual_margin_percent: number | string | null };
 type Payment = { id: string; progress_claim_id: string | null; payment_date: string; amount: number | string; method: string; reference: string | null; payment_type: string };
 type Claim = { id: string; claim_number: string; issue_date: string; status: string; gross_amount: number | string; retention_amount: number | string; tax_amount: number | string; net_amount: number | string; period_start?: string | null; period_end?: string | null; refresh_note?: string | null; refreshed_at?: string | null };
@@ -636,6 +639,18 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
       )}
 
       {isAdmin && (
+        <div className="panel" style={{ marginTop: "16px" }}>
+          <h3 style={{ marginTop: 0 }}>Devis du chantier</h3>
+          <p style={{ fontSize: ".85rem", color: "#666", margin: 0 }}>
+            {pricing.hasDevis
+              ? "Le devis de ce chantier est enregistré : la facture suit ses lignes et son avancement. "
+              : "Ce chantier n'a pas encore de devis chiffré. "}
+            L'ajout d'un devis (interne ou externe), le remplissage des prix et la marge se font maintenant dans le menu <a href="/estimates"><strong>Devis</strong></a>.
+          </p>
+        </div>
+      )}
+
+      {SHOW_LEGACY_DEVIS_IMPORT && isAdmin && (
         <div className="panel" style={{ marginTop: "16px" }}>
           <h3 style={{ marginTop: 0 }}>{pricing.hasDevis ? "Devis chiffré du chantier" : "Importer les prix du devis (PDF)"}</h3>
           <p style={{ fontSize: ".85rem", color: "#666" }}>

@@ -5,7 +5,7 @@
 // Le PDF n'est jamais stocké : copie temporaire côté IA, supprimée aussitôt.
 
 export type DevisPriceLine = { category: string; subcategory: string; designation: string; unit: string; quantity: number; unit_price: number };
-export type DevisExtraction = { works: string[]; project_name: string; location: string; price_lines: DevisPriceLine[]; devis_total: number | null };
+export type DevisExtraction = { works: string[]; project_name: string; location: string; price_lines: DevisPriceLine[]; /** Toutes les lignes du devis, y compris celles sans prix (unit_price = 0). */ all_lines: DevisPriceLine[]; devis_total: number | null };
 export type DevisExtractionResult = { ok: true; data: DevisExtraction } | { ok: false; status: number; body: Record<string, unknown> };
 
 function extractResponseText(payload: { output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }) {
@@ -66,7 +66,7 @@ export async function extractDevisFromPdf(file: File): Promise<DevisExtractionRe
       instructions: [
         "Tu lis un devis de travaux de bâtiment (BTP) à Madagascar.",
         "Pour la liste 'works' (planning), ignore les prix et les montants : seuls les travaux comptent.",
-        "En plus, remplis 'price_lines' avec chaque ligne CHIFFRÉE du devis, dans l'ordre du document : category = titre de la catégorie ou du lot principal auquel la ligne appartient (chaîne vide s'il n'y en a pas), subcategory = titre de la sous-catégorie ou sous-section à l'intérieur de cette catégorie (chaîne vide s'il n'y en a pas), exactement comme écrits dans le devis, designation = le même titre court que dans 'works', unit = unité écrite, quantity = quantité, unit_price = prix unitaire en Ariary tel qu'écrit dans le devis. Le relevé doit être COMPLET : parcours TOUTES les pages et TOUS les tableaux, n'omets aucune ligne chiffrée (même courte, même répétée sur plusieurs pages, même si son prix est dans un tableau récapitulatif). Avant de répondre, additionne quantité × prix unitaire de toutes tes lignes et compare avec le total général du devis : si l'écart dépasse 1 %, relis le document et ajoute les lignes manquantes. N'inclus jamais une ligne de titre, de sous-total ou de total dans price_lines. N'invente JAMAIS un prix : si le devis ne contient aucun prix, 'price_lines' est un tableau vide. 'devis_total' = le total général du devis s'il est écrit, sinon null.",
+        "En plus, remplis 'price_lines' avec chaque ligne CHIFFRÉE du devis, dans l'ordre du document : category = titre de la catégorie ou du lot principal auquel la ligne appartient (chaîne vide s'il n'y en a pas), subcategory = titre de la sous-catégorie ou sous-section à l'intérieur de cette catégorie (chaîne vide s'il n'y en a pas), exactement comme écrits dans le devis, designation = le même titre court que dans 'works', unit = unité écrite, quantity = quantité, unit_price = prix unitaire en Ariary tel qu'écrit dans le devis. Le relevé doit être COMPLET : parcours TOUTES les pages et TOUS les tableaux, n'omets aucune ligne chiffrée (même courte, même répétée sur plusieurs pages, même si son prix est dans un tableau récapitulatif). Avant de répondre, additionne quantité × prix unitaire de toutes tes lignes et compare avec le total général du devis : si l'écart dépasse 1 %, relis le document et ajoute les lignes manquantes. N'inclus jamais une ligne de titre, de sous-total ou de total dans price_lines. N'invente JAMAIS un prix : une ligne de travaux dont le devis ne donne PAS de prix unitaire est quand même listée dans price_lines, avec unit_price = null (le prix sera cherché plus tard). 'devis_total' = le total général du devis s'il est écrit, sinon null.",
         "Extrais la liste des travaux à réaliser : chaque poste ou ligne de travail réel devient une entrée.",
         "Donne un titre court et clair pour chaque travail (sans numérotation ni prix).",
         "Ignore les lignes qui ne sont que des titres de section, des sous-totaux ou des totaux : elles ne sont pas des travaux.",
@@ -187,7 +187,7 @@ export async function extractDevisFromPdf(file: File): Promise<DevisExtractionRe
 
   // Lignes chiffrées : on ne garde que celles qui ont vraiment un prix
   // unitaire (jamais de prix deviné) ; une quantité absente compte pour 1.
-  const priceLines = (parsed.price_lines ?? [])
+  const allLines = (parsed.price_lines ?? [])
     .map((line) => ({
       category: String(line.category ?? "").trim(),
       subcategory: String(line.subcategory ?? "").trim(),
@@ -196,7 +196,8 @@ export async function extractDevisFromPdf(file: File): Promise<DevisExtractionRe
       quantity: Number(line.quantity) > 0 ? Number(line.quantity) : 1,
       unit_price: Number(line.unit_price) || 0,
     }))
-    .filter((line) => line.designation && line.unit_price > 0);
+    .filter((line) => line.designation);
+  const priceLines = allLines.filter((line) => line.unit_price > 0);
   return {
     ok: true,
     data: {
@@ -204,6 +205,7 @@ export async function extractDevisFromPdf(file: File): Promise<DevisExtractionRe
       project_name: (parsed.project_name || "").trim(),
       location: (parsed.location || "").trim(),
       price_lines: priceLines,
+      all_lines: allLines,
       devis_total: Number(parsed.devis_total) > 0 ? Number(parsed.devis_total) : null,
     },
   };
