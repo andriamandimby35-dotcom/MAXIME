@@ -12,6 +12,13 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (!member?.organization_id) return NextResponse.json({ error: "Organisation introuvable." }, { status: 403 });
 
   const body = await request.json().catch(() => ({}));
+  // La ligne orange (« facture mise à jour ») est effacée quand l'administrateur
+  // a ouvert la facture mise à jour.
+  if (body.clear_refresh_note === true) {
+    const { error: clearError } = await supabase.from("progress_claims").update({ refresh_note: null }).eq("id", id).eq("organization_id", member.organization_id);
+    if (clearError && !/refresh_note/.test(clearError.message)) return NextResponse.json({ error: clearError.message }, { status: 400 });
+    return NextResponse.json({ success: true });
+  }
   const allowedStatuses = ["draft", "submitted", "approved", "partially_paid", "paid", "rejected"];
   if (!allowedStatuses.includes(body.status)) return NextResponse.json({ error: "Statut invalide." }, { status: 400 });
 

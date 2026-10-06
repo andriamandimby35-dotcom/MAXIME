@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { claimRemainingAmount, syncClaimPaymentStatus } from "@/lib/billing/claim-status";
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -55,6 +56,16 @@ export async function POST(request: Request) {
     }
 
     progressClaimId = claim.id;
+
+    // Un paiement relié à une facture ne peut pas dépasser ce qui reste à payer dessus.
+    const state = await claimRemainingAmount(supabase, member.organization_id, claim.id);
+    if (state) {
+      if (state.status === "rejected") return NextResponse.json({ error: "Cette facture est refusée : on ne peut pas enregistrer de paiement dessus." }, { status: 400 });
+      if (state.remaining <= 0.5) return NextResponse.json({ error: "Cette facture est déjà entièrement payée." }, { status: 400 });
+      if (amount > state.remaining + 0.5) {
+        return NextResponse.json({ error: `Le montant dépasse le reste à payer sur cette facture (${Math.round(state.remaining).toLocaleString("fr-FR")} Ar).` }, { status: 400 });
+      }
+    }
   }
 
   const paymentType = ["avancement", "attachement", "solde"].includes(body.payment_type) ? body.payment_type : "avancement";
@@ -78,6 +89,9 @@ export async function POST(request: Request) {
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 400 });
   }
+
+  // La facture passe en « Payée » ou « Partiellement payée » selon le total reçu.
+  await syncClaimPaymentStatus(supabase, member.organization_id, progressClaimId);
 
   return NextResponse.json({ id: data.id }, { status: 201 });
 }

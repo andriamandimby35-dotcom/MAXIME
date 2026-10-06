@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, Fragment, useState } from "react";
+import { CSSProperties, FormEvent, Fragment, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { certifiedAmount } from "@/lib/billing";
 import { usePdfViewer } from "@/components/PdfViewerProvider";
@@ -10,7 +10,7 @@ import { matchTaskForItem } from "@/lib/billing/task-matching";
 
 type Project = { id: string; project_code: string | null; name: string; location: string | null; budget_amount: number | string | null; status: string | null; source_estimate_id: string | null; manual_margin_percent: number | string | null };
 type Payment = { id: string; progress_claim_id: string | null; payment_date: string; amount: number | string; method: string; reference: string | null; payment_type: string };
-type Claim = { id: string; claim_number: string; issue_date: string; status: string; gross_amount: number | string; retention_amount: number | string; tax_amount: number | string; net_amount: number | string };
+type Claim = { id: string; claim_number: string; issue_date: string; status: string; gross_amount: number | string; retention_amount: number | string; tax_amount: number | string; net_amount: number | string; period_start?: string | null; period_end?: string | null; refresh_note?: string | null; refreshed_at?: string | null };
 // Le chantier facturé peut provenir d'un appel d'offres remporté (source_tender_id) :
 // on rappelle alors ici de quel DAO il s'agit, purement informatif — le calcul
 // du client de la facture continue de se faire côté serveur (generate-situation.ts).
@@ -54,7 +54,11 @@ type Draft = {
   expensesWarning: string | null;
   unmatchedCount: number;
   tasks: Array<{ id: string; title: string; progress: number }>;
+  periodStart?: string;
+  periodEnd?: string;
 };
+
+type Gap = { start: string; end: string };
 
 type PricingInfo = {
   mode: "fixed" | "floating" | "none";
@@ -85,9 +89,19 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     payment_type: "avancement",
     method: "bank_transfer",
     reference: "",
+    progress_claim_id: "",
   });
 
   const [draft, setDraft] = useState<Draft | null>(null);
+  // Choix « À l'instant » / « Entre deux dates », puis une facture par période
+  // pas encore facturée (file d'attente de périodes).
+  const [genOpen, setGenOpen] = useState(false);
+  const [genMode, setGenMode] = useState<"now" | "period">("now");
+  const [genStart, setGenStart] = useState("");
+  const [genEnd, setGenEnd] = useState(today);
+  const [gapQueue, setGapQueue] = useState<Gap[]>([]);
+  const [gapTotal, setGapTotal] = useState(0);
+  const [currentGap, setCurrentGap] = useState<Gap | null>(null);
   const [needsMargin, setNeedsMargin] = useState(false);
   const [marginInput, setMarginInput] = useState("");
   const [needsClientName, setNeedsClientName] = useState(false);
@@ -114,6 +128,54 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     ? pricing.certified
     : claims.length > 0 ? netClaimsTotal : certifiedAmount(Number(project.budget_amount) || 0);
   const received = payments.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  // Fin réelle d'une facture (pour classer les listes par date de période, pas par date de création).
+  const claimEndKey = (claim: Claim) => String(claim.period_end || claim.issue_date).slice(0, 10);
+  const claimById = new Map(claims.map((claim) => [claim.id, claim]));
+  const paidByClaim = new Map<string, number>();
+  for (const payment of payments) if (payment.progress_claim_id) paidByClaim.set(payment.progress_claim_id, (paidByClaim.get(payment.progress_claim_id) ?? 0) + Number(payment.amount || 0));
+  // Factures payées : elles quittent la liste des factures et apparaissent dans les paiements reçus.
+  const openClaims = claims.filter((claim) => claim.status !== "paid").sort((a, b) => claimEndKey(b).localeCompare(claimEndKey(a)));
+  const payableClaims = claims.filter((claim) => ["draft", "submitted", "approved", "partially_paid"].includes(claim.status));
+  const claimRemaining = (claim: Claim) => Math.max(0, Number(claim.net_amount || 0) - (paidByClaim.get(claim.id) ?? 0));
+  const sortedPayments = [...payments].sort((a, b) => {
+    const dateOf = (payment: Payment) => { const linked = payment.progress_claim_id ? claimById.get(payment.progress_claim_id) : undefined; return linked ? claimEndKey(linked) : payment.payment_date.slice(0, 10); };
+    return dateOf(b).localeCompare(dateOf(a));
+  });
+  const formatDay = (value: string) => new Intl.DateTimeFormat("fr-FR").format(new Date(value));
+  // Couleur de la carte d'une facture : bleu = paiement partiel, orange = facture
+  // mise à jour (prix, avancement ou dépense classée), vert = payée.
+  const claimRowStyle = (claim: Claim): CSSProperties => {
+    if (claim.status === "paid") return { background: "#eaf7ee", boxShadow: "inset 4px 0 0 #1f9d55" };
+    if (claim.status === "partially_paid") return { background: "#e8f1fd", boxShadow: "inset 4px 0 0 #2f7bd9" };
+    if (claim.refresh_note && claim.status === "submitted") return { background: "#fff1dd", boxShadow: "inset 4px 0 0 #f08c00" };
+    return {};
+  };
+  function openClaimPdf(claim: Claim) {
+    // Le numéro de version change quand la facture est mise à jour : le navigateur
+    // ne ressert alors jamais l'ancien PDF gardé en mémoire.
+    const version = claim.refreshed_at ? `?v=${encodeURIComponent(claim.refreshed_at)}` : "";
+    void openPdf(`Facture ${claim.claim_number}`, `/api/billing/claims/${claim.id}/pdf${version}`, { cache: "force-cache" });
+    if (claim.refresh_note) {
+      // Facture mise à jour vue : la ligne orange s'efface.
+      void fetch(`/api/billing/claims/${claim.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ clear_refresh_note: true }) }).then(() => router.refresh());
+    }
+  }
+  function chooseClaimForPayment(claimId: string) {
+    const claim = claimId ? claimById.get(claimId) : undefined;
+    setPaymentForm((form) => ({ ...form, progress_claim_id: claimId, amount: claim ? String(Math.round(claimRemaining(claim))) : form.amount, payment_type: claim ? "avancement" : form.payment_type }));
+  }
+  // Met à jour la dernière facture non payée si un prix, un avancement ou le
+  // classement d'une dépense a changé depuis (voir /api/billing/projects/[id]/refresh-claim).
+  async function refreshLatestClaim() {
+    if (!isAdmin || !claims.some((claim) => claim.status === "submitted" && claim.period_start)) return;
+    const response = await fetch(`/api/billing/projects/${project.id}/refresh-claim`, { method: "POST" }).catch(() => null);
+    const result = response ? await response.json().catch(() => ({})) : {};
+    if (response?.ok && result.updated) {
+      setMessage(`Facture ${result.claimNumber} mise à jour automatiquement. ${result.note}`);
+      router.refresh();
+    }
+  }
+  useEffect(() => { void refreshLatestClaim(); }, [project.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const outstanding = Math.max(0, certified - received);
   const percent = certified > 0 ? Math.min(100, Math.round((received / certified) * 100)) : 0;
   const overpaid = overpaidAmount(certified, received);
@@ -217,6 +279,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     setImportFile(null);
     setImportMessage(`Devis enregistré (${result.count} lignes).${result.createdTasks ? ` ${result.createdTasks} tâche(s) ajoutée(s) au planning, à 0 %.` : ""}${result.unmatched ? ` ${result.unmatched} ligne(s) restent sans tâche : tu pourras les relier depuis « Générer une facture ».` : ""}`);
     router.refresh();
+    void refreshLatestClaim();
   }
 
   // Totaux de la facture selon les options choisies (même calcul que le serveur).
@@ -266,6 +329,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     setPricingMessage("Prix et marge enregistrés.");
     setEditingPricing(false);
     router.refresh();
+    void refreshLatestClaim();
   }
 
   async function submitPayment(event: FormEvent) {
@@ -280,12 +344,14 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     setBusy(false);
     if (!response.ok) return setMessage(result.error ?? "Enregistrement impossible.");
     setMessage("Paiement enregistré.");
-    setPaymentForm({ payment_date: today, amount: "0", payment_type: "avancement", method: "bank_transfer", reference: "" });
+    setPaymentForm({ payment_date: today, amount: "0", payment_type: "avancement", method: "bank_transfer", reference: "", progress_claim_id: "" });
     router.refresh();
   }
 
   async function cancelPayment(paymentId: string) {
-    if (!window.confirm("Annuler ce paiement ?")) return;
+    const linkedPayment = payments.find((item) => item.id === paymentId);
+    const linkedClaim = linkedPayment?.progress_claim_id ? claimById.get(linkedPayment.progress_claim_id) : undefined;
+    if (!window.confirm(linkedClaim ? `Annuler ce paiement ? La facture ${linkedClaim.claim_number} reviendra dans la liste des factures à payer.` : "Annuler ce paiement ?")) return;
     setBusy(true); setMessage("");
     const response = await fetch(`/api/billing/payments/${paymentId}`, { method: "DELETE" });
     setBusy(false);
@@ -294,10 +360,13 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     router.refresh();
   }
 
-  async function openInvoiceGenerator() {
-    setDraft(null); setNeedsMargin(false); setNeedsClientName(false); setDraftMessage(""); setDraftBusy(true);
-    const response = await fetch(`/api/billing/claims/draft?project_id=${project.id}`);
-    const result = await response.json();
+  // Période de la facture en cours de préparation, ajoutée à chaque calcul.
+  const gapParams = (gap: Gap | null = currentGap) => (gap ? `&start=${gap.start}&end=${gap.end}` : "");
+
+  async function loadDraftForGap(gap: Gap) {
+    setCurrentGap(gap); setDraft(null); setNeedsMargin(false); setNeedsClientName(false); setDraftBusy(true);
+    const response = await fetch(`/api/billing/claims/draft?project_id=${project.id}${gapParams(gap)}`);
+    const result = await response.json().catch(() => ({}));
     setDraftBusy(false);
     if (!response.ok) return setDraftMessage(result.error ?? "Calcul impossible.");
     if (result.needsMarginInput) { setNeedsMargin(true); return; }
@@ -307,11 +376,34 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     setIssueDateInput(today);
   }
 
+  // Cherche les périodes pas encore facturées (une facture par « trou ») puis prépare la première.
+  async function startGenerator() {
+    setDraft(null); setNeedsMargin(false); setNeedsClientName(false); setDraftMessage("");
+    const query = new URLSearchParams({ project_id: project.id });
+    if (genMode === "period") {
+      if (!genStart || !genEnd) return setDraftMessage("Choisis la date de début et la date de fin.");
+      if (genStart > genEnd) return setDraftMessage("La date de début doit être avant la date de fin.");
+      query.set("start", genStart); query.set("end", genEnd);
+    }
+    setDraftBusy(true);
+    const response = await fetch(`/api/billing/claims/gaps?${query.toString()}`);
+    const result = await response.json().catch(() => ({}));
+    setDraftBusy(false);
+    if (!response.ok) return setDraftMessage(result.error ?? "Calcul impossible.");
+    const gaps: Gap[] = Array.isArray(result.gaps) ? result.gaps : [];
+    if (gaps.length === 0) return setDraftMessage("Tout est déjà facturé sur cette période : aucune nouvelle facture à générer.");
+    setGenOpen(false);
+    setGapTotal(gaps.length);
+    setGapQueue(gaps.slice(1));
+    if (gaps.length > 1) setDraftMessage(`${gaps.length} factures à générer (une par période pas encore facturée) : ${gaps.map((gap) => `${formatDay(gap.start)} au ${formatDay(gap.end)}`).join(" · ")}.`);
+    await loadDraftForGap(gaps[0]);
+  }
+
   async function confirmMargin() {
     const margin = Number(marginInput);
     if (!Number.isFinite(margin)) return setDraftMessage("Indique un pourcentage valide.");
     setDraftBusy(true); setDraftMessage("");
-    const response = await fetch(`/api/billing/claims/draft?project_id=${project.id}&margin=${margin}${clientNameInput ? `&client_name=${encodeURIComponent(clientNameInput.trim())}` : ""}`);
+    const response = await fetch(`/api/billing/claims/draft?project_id=${project.id}${gapParams()}&margin=${margin}${clientNameInput ? `&client_name=${encodeURIComponent(clientNameInput.trim())}` : ""}`);
     const result = await response.json();
     setDraftBusy(false);
     if (!response.ok) return setDraftMessage(result.error ?? "Calcul impossible.");
@@ -325,7 +417,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
   async function confirmClientName() {
     if (!clientNameInput.trim()) return setDraftMessage("Indique le nom du client.");
     setDraftBusy(true); setDraftMessage("");
-    const response = await fetch(`/api/billing/claims/draft?project_id=${project.id}&client_name=${encodeURIComponent(clientNameInput.trim())}${marginInput ? `&margin=${Number(marginInput)}` : ""}`);
+    const response = await fetch(`/api/billing/claims/draft?project_id=${project.id}${gapParams()}&client_name=${encodeURIComponent(clientNameInput.trim())}${marginInput ? `&margin=${Number(marginInput)}` : ""}`);
     const result = await response.json();
     setDraftBusy(false);
     if (!response.ok) return setDraftMessage(result.error ?? "Calcul impossible.");
@@ -338,7 +430,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
 
   async function reloadDraft() {
     if (!draft) return;
-    const response = await fetch(`/api/billing/claims/draft?project_id=${project.id}&client_name=${encodeURIComponent(draft.clientName)}&margin=${Number(draft.marginPercent) || 0}`);
+    const response = await fetch(`/api/billing/claims/draft?project_id=${project.id}${gapParams()}&client_name=${encodeURIComponent(draft.clientName)}&margin=${Number(draft.marginPercent) || 0}`);
     const result = await response.json().catch(() => ({}));
     if (!response.ok) return setDraftMessage(result.error ?? "Calcul impossible.");
     if (result.needsMarginInput || result.needsClientInput) return;
@@ -358,6 +450,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     const result = await response.json().catch(() => ({}));
     if (!response.ok) { setLinkBusy(false); return setDraftMessage(result.error ?? "Enregistrement des liens impossible."); }
     await reloadDraft();
+    void refreshLatestClaim();
     setLinkBusy(false);
     setDraftMessage(result.created ? `${result.created} tâche(s) ajoutée(s) au planning (à 0 %). Mets à jour leur avancement dans le planning du chantier.` : "Liens enregistrés, facture recalculée.");
   }
@@ -373,6 +466,8 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
         claim_number: claimNumberInput,
         client_name: draft.clientName,
         issue_date: issueDateInput,
+        period_start: currentGap?.start ?? draft.periodStart ?? null,
+        period_end: currentGap?.end ?? draft.periodEnd ?? null,
         retention_rate: useRetention ? Number(retentionRateInput) || 0 : 0,
         tax_rate: useTax ? Number(taxRateInput) || 0 : 0,
         advance_repayment: draft.advanceRepayment,
@@ -398,6 +493,16 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     setDraft(null);
     setDraftMessage("");
     router.refresh();
+    // Plusieurs périodes à facturer : on prépare tout de suite la suivante.
+    if (gapQueue.length > 0) {
+      const [next, ...rest] = gapQueue;
+      const done = gapTotal - gapQueue.length;
+      setGapQueue(rest);
+      setDraftMessage(`Facture ${done} sur ${gapTotal} enregistrée. Voici la suivante (période du ${formatDay(next.start)} au ${formatDay(next.end)}).`);
+      await loadDraftForGap(next);
+      return;
+    }
+    setGapTotal(0); setCurrentGap(null);
     void openPdf(`Facture ${claimNumberInput}`, `/api/billing/claims/${result.id}/pdf`, { cache: "force-cache" });
   }
 
@@ -599,10 +704,35 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
       <div className="panel" style={{ marginTop: "20px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px" }}>
           <h3 style={{ margin: 0 }}>Factures</h3>
-          <button type="button" className="button" disabled={draftBusy} onClick={() => void openInvoiceGenerator()}>
+          <button type="button" className="button" disabled={draftBusy} onClick={() => { setGenOpen((open) => !open); setDraftMessage(""); }}>
             {draftBusy && !draft ? "Calcul…" : "Générer une facture"}
           </button>
         </div>
+
+        {genOpen && !draft && (
+          <div className="panel" style={{ marginTop: "12px", background: "#f4f8f5" }}>
+            <strong>Quelle période facturer ?</strong>
+            <label style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "10px" }}>
+              <input type="radio" name="genMode" checked={genMode === "now"} onChange={() => setGenMode("now")} style={{ width: "auto" }} />
+              <span><strong>À l'instant</strong> — du début du chantier (ou de la dernière facture) jusqu'à maintenant</span>
+            </label>
+            <label style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "8px" }}>
+              <input type="radio" name="genMode" checked={genMode === "period"} onChange={() => setGenMode("period")} style={{ width: "auto" }} />
+              <span><strong>Entre deux dates</strong> — l'avancement et les dépenses de cette période</span>
+            </label>
+            {genMode === "period" && (
+              <div className="formPair" style={{ marginTop: "10px" }}>
+                <label>Du<input type="date" value={genStart} max={genEnd || today} onChange={(e) => setGenStart(e.target.value)} /></label>
+                <label>Au<input type="date" value={genEnd} max={today} onChange={(e) => setGenEnd(e.target.value)} /></label>
+              </div>
+            )}
+            <p style={{ fontSize: ".8rem", color: "#666", marginTop: "8px" }}>Les jours déjà couverts par une facture sont ignorés : s'il y a des trous, une facture est proposée pour chacun.</p>
+            <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
+              <button type="button" className="button" disabled={draftBusy} onClick={() => void startGenerator()}>{draftBusy ? "Calcul…" : "Continuer"}</button>
+              <button type="button" className="ghostButton" onClick={() => setGenOpen(false)}>Annuler</button>
+            </div>
+          </div>
+        )}
 
         {draftMessage && <p className="notice" style={{ marginTop: "12px" }}>{draftMessage}</p>}
 
@@ -633,7 +763,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
               <label>N° de facture<input value={claimNumberInput} onChange={(e) => setClaimNumberInput(e.target.value)} /></label>
               <label>Date d'émission<input type="date" value={issueDateInput} onChange={(e) => setIssueDateInput(e.target.value)} /></label>
             </div>
-            <p style={{ fontSize: ".85rem", color: "#666" }}>Client : <strong>{draft.clientName}</strong></p>
+            <p style={{ fontSize: ".85rem", color: "#666" }}>Client : <strong>{draft.clientName}</strong>{(currentGap || draft.periodStart) && <> · Période : <strong>du {formatDay(currentGap?.start ?? draft.periodStart ?? today)} au {formatDay(currentGap?.end ?? draft.periodEnd ?? today)}</strong></>}{gapTotal > 1 && <> · Facture {gapTotal - gapQueue.length} sur {gapTotal}</>}</p>
             {draft.previousClaimNumber && <p style={{ fontSize: ".85rem", color: "#666" }}>Facture précédente : {draft.previousClaimNumber} (les montants ci-dessous sont déjà nets de ce qui a été facturé dessus).</p>}
             {draft.expensesWarning && <p className="notice" style={{ background: "#fbeee0" }}>⚠ {draft.expensesWarning}</p>}
             {draft.unmatchedCount > 0 && (
@@ -724,60 +854,85 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
 
             <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
               <button type="button" className="button" disabled={draftBusy} onClick={() => void validateInvoice()}>{draftBusy ? "Enregistrement…" : "Valider et générer le PDF"}</button>
-              <button type="button" className="ghostButton" onClick={() => setDraft(null)}>Annuler</button>
+              <button type="button" className="ghostButton" onClick={() => { setDraft(null); setGapQueue([]); setGapTotal(0); setCurrentGap(null); }}>Annuler</button>
             </div>
           </div>
         )}
 
         <div className="panel table" style={{ marginTop: "14px" }}>
           <table>
-            <thead><tr><th>N°</th><th>Date</th><th>Statut</th><th>Net à payer</th><th /></tr></thead>
-            <tbody>{claims.map((claim) => (
-              <tr key={claim.id}>
-                <td>{claim.claim_number}</td>
-                <td>{new Intl.DateTimeFormat("fr-FR").format(new Date(claim.issue_date))}</td>
+            <thead><tr><th>N°</th><th>Période</th><th>Statut</th><th>Net à payer</th><th /></tr></thead>
+            <tbody>{openClaims.map((claim) => (
+              <tr key={claim.id} style={claimRowStyle(claim)}>
+                <td>
+                  {claim.claim_number}
+                  {claim.status === "partially_paid" && <small style={{ display: "block", color: "#1f5fae" }}>Partiellement payée — reste {ariary.format(claimRemaining(claim))} Ar</small>}
+                  {claim.refresh_note && claim.status === "submitted" && <small style={{ display: "block", color: "#9a5b00" }}>{claim.refresh_note}</small>}
+                </td>
+                <td>{claim.period_start && claim.period_end ? `${formatDay(claim.period_start)} → ${formatDay(claim.period_end)}` : formatDay(claim.issue_date)}</td>
                 <td><span className="pill">{claimStatusLabel[claim.status] || claim.status}</span></td>
                 <td><strong>{ariary.format(Number(claim.net_amount))} Ar</strong></td>
                 <td style={{ display: "flex", gap: "8px" }}>
-                  <button type="button" className="ghostButton" onClick={() => void openPdf(`Facture ${claim.claim_number}`, `/api/billing/claims/${claim.id}/pdf`, { cache: "force-cache" })}>Ouvrir / Imprimer</button>
+                  <button type="button" className="ghostButton" onClick={() => openClaimPdf(claim)}>Ouvrir / Imprimer</button>
                   {(claim.status === "draft" || claim.status === "submitted") && <button type="button" className="dangerButton" disabled={busy} onClick={() => void deleteClaim(claim.id)}>Supprimer</button>}
                 </td>
               </tr>
             ))}</tbody>
           </table>
-          {!claims.length && <p className="emptyState">Aucune facture générée pour ce chantier.</p>}
+          {!openClaims.length && <p className="emptyState">{claims.length ? "Toutes les factures sont payées (voir les paiements reçus ci-dessous)." : "Aucune facture générée pour ce chantier."}</p>}
+          <p style={{ fontSize: ".68rem", color: "#777", margin: "8px 0 0", display: "flex", gap: "12px", flexWrap: "wrap" }}>
+            <span><span style={{ display: "inline-block", width: 8, height: 8, background: "#d9dedb", borderRadius: 2, marginRight: 4 }} />Émise</span>
+            <span><span style={{ display: "inline-block", width: 8, height: 8, background: "#f08c00", borderRadius: 2, marginRight: 4 }} />Orange : mise à jour (prix, avancement ou dépense classée)</span>
+            <span><span style={{ display: "inline-block", width: 8, height: 8, background: "#2f7bd9", borderRadius: 2, marginRight: 4 }} />Bleu : paiement partiel</span>
+            <span><span style={{ display: "inline-block", width: 8, height: 8, background: "#1f9d55", borderRadius: 2, marginRight: 4 }} />Vert : payée (dans les paiements reçus)</span>
+          </p>
         </div>
       </div>
 
       <div className="billingGrid" style={{ marginTop: "20px" }}>
         <form className="panel businessForm" onSubmit={submitPayment}>
           <h3>Paiement entrant</h3>
+          <label>Facture payée (facultatif)
+            <select value={paymentForm.progress_claim_id} onChange={(e) => chooseClaimForPayment(e.target.value)}>
+              <option value="">Aucune facture (paiement libre)</option>
+              {payableClaims.map((claim) => <option key={claim.id} value={claim.id}>{claim.claim_number} — reste {ariary.format(claimRemaining(claim))} Ar</option>)}
+            </select>
+          </label>
           <label>Origine du fonds<select value={paymentForm.payment_type} onChange={(e) => setPaymentForm({ ...paymentForm, payment_type: e.target.value })}><option value="avancement">Avancement</option><option value="attachement">Attachement</option><option value="solde">Solde de fin de travaux</option></select></label>
           <div className="formPair"><label>Date<input type="date" value={paymentForm.payment_date} onChange={(e) => setPaymentForm({ ...paymentForm, payment_date: e.target.value })} required /></label><label>Montant (Ar)<input type="number" min="0" value={paymentForm.amount} onChange={(e) => setPaymentForm({ ...paymentForm, amount: e.target.value })} required /></label></div>
           <label>Mode<select value={paymentForm.method} onChange={(e) => setPaymentForm({ ...paymentForm, method: e.target.value })}><option value="bank_transfer">Virement bancaire</option><option value="cheque">Chèque</option><option value="cash">Espèces</option><option value="mobile_money">Mobile Money</option><option value="other">Autre</option></select></label>
           <label>Référence<input value={paymentForm.reference} onChange={(e) => setPaymentForm({ ...paymentForm, reference: e.target.value })} placeholder="N° virement, chèque…" /></label>
           <div style={{ display: "flex", gap: "10px" }}>
             <button type="submit" disabled={busy} className="button">{busy ? "Enregistrement…" : "Valider le paiement"}</button>
-            <button type="button" className="ghostButton" onClick={() => setPaymentForm({ payment_date: today, amount: "0", payment_type: "avancement", method: "bank_transfer", reference: "" })}>Annuler la saisie</button>
+            <button type="button" className="ghostButton" onClick={() => setPaymentForm({ payment_date: today, amount: "0", payment_type: "avancement", method: "bank_transfer", reference: "", progress_claim_id: "" })}>Annuler la saisie</button>
           </div>
         </form>
 
         <div className="panel table">
           <table>
-            <thead><tr><th>Date</th><th>Origine</th><th>Montant</th><th>Mode</th><th>Référence</th><th /></tr></thead>
-            <tbody>{payments.map((payment) => (
-              <tr key={payment.id}>
+            <thead><tr><th>Date</th><th>Facture</th><th>Origine</th><th>Montant</th><th>Mode</th><th>Référence</th><th /></tr></thead>
+            <tbody>{sortedPayments.map((payment) => {
+              const linkedClaim = payment.progress_claim_id ? claimById.get(payment.progress_claim_id) : undefined;
+              return (
+              <tr key={payment.id} style={linkedClaim ? claimRowStyle(linkedClaim.status === "paid" ? linkedClaim : { ...linkedClaim, refresh_note: null }) : undefined}>
                 <td>{new Intl.DateTimeFormat("fr-FR").format(new Date(payment.payment_date))}</td>
+                <td>{linkedClaim ? <>
+                  <strong>{linkedClaim.claim_number}</strong>
+                  <small style={{ display: "block", color: "#666" }}>{linkedClaim.period_start && linkedClaim.period_end ? `${formatDay(linkedClaim.period_start)} → ${formatDay(linkedClaim.period_end)}` : formatDay(linkedClaim.issue_date)} · net {ariary.format(Number(linkedClaim.net_amount))} Ar</small>
+                  <small style={{ display: "block", color: linkedClaim.status === "paid" ? "#1f7a45" : "#1f5fae" }}>{linkedClaim.status === "paid" ? "Facture payée" : "Paiement partiel"}</small>
+                </> : "—"}</td>
                 <td><span className="pill">{paymentTypeLabel[payment.payment_type] || payment.payment_type}</span></td>
                 <td><strong>{ariary.format(Number(payment.amount))} Ar</strong></td>
                 <td>{payment.method}</td>
                 <td>{payment.reference ?? "—"}</td>
                 <td style={{ display: "flex", gap: "8px" }}>
+                  {linkedClaim && <button type="button" className="ghostButton" onClick={() => openClaimPdf(linkedClaim)}>Ouvrir</button>}
                   {isAdmin && <button type="button" className="ghostButton" disabled={busy} onClick={() => startEditPayment(payment)}>Modifier</button>}
                   <button type="button" className="dangerButton" disabled={busy} onClick={() => void cancelPayment(payment.id)}>Annuler</button>
                 </td>
               </tr>
-            ))}</tbody>
+              );
+            })}</tbody>
           </table>
           {editingPaymentId && (
             <div className="panel" style={{ marginTop: "12px", background: "#fbf6e8" }}>

@@ -46,13 +46,18 @@ export default async function BillingProjectPage({ params }: { params: Promise<{
       .eq("organization_id", organizationId)
       .eq("project_id", id)
       .order("payment_date", { ascending: false }),
-    supabase
-      .from("progress_claims")
-      .select("id,claim_number,issue_date,status,gross_amount,retention_amount,tax_amount,net_amount")
-      .eq("organization_id", organizationId)
-      .eq("project_id", id)
-      .order("issue_date", { ascending: false })
-      .order("created_at", { ascending: false }),
+    // Colonnes de période / « facture mise à jour » ajoutées par un fichier SQL :
+    // tant qu'il n'est pas exécuté, on relit sans elles.
+    (async () => {
+      const base = "id,claim_number,issue_date,status,gross_amount,retention_amount,tax_amount,net_amount";
+      const full = await supabase.from("progress_claims").select(`${base},period_start,period_end,refresh_note,refreshed_at`)
+        .eq("organization_id", organizationId).eq("project_id", id)
+        .order("issue_date", { ascending: false }).order("created_at", { ascending: false });
+      if (!full.error) return full;
+      return supabase.from("progress_claims").select(base)
+        .eq("organization_id", organizationId).eq("project_id", id)
+        .order("issue_date", { ascending: false }).order("created_at", { ascending: false });
+    })(),
   ]);
 
   return (

@@ -291,7 +291,7 @@ async function fetchAll<T>(build: (from: number, to: number) => PromiseLike<{ da
   return { rows, error: null };
 }
 
-export async function loadExpenseAllocation(supabase: SupabaseClient, projectId: string): Promise<AllocationResult> {
+export async function loadExpenseAllocationInput(supabase: SupabaseClient, projectId: string): Promise<AllocationInput> {
   const itemBase = "id,designation,category,subcategory,created_at";
   let priceItems: PriceItem[] = [];
   for (const columns of [`${itemBase},task_id`, itemBase, "id,designation,created_at"]) {
@@ -319,7 +319,7 @@ export async function loadExpenseAllocation(supabase: SupabaseClient, projectId:
     supabase.from("project_salary_payments").select("id,paid_at,total_amount,project_salary_payment_lines(staff_member_id,full_name,role_name,daily_rate,days_worked,amount)").eq("project_id", projectId).is("deleted_at", null),
   ]);
 
-  return computeAllocation({
+  return {
     priceItems,
     tasks: (tasksResult.data ?? []) as unknown as TaskRow[],
     reports: reportsResult.rows,
@@ -330,5 +330,24 @@ export async function loadExpenseAllocation(supabase: SupabaseClient, projectId:
     orders,
     attendance: attendanceResult.rows,
     salaries: (salariesResult.data ?? []) as unknown as SalaryPayment[],
-  });
+  };
+}
+
+export async function loadExpenseAllocation(supabase: SupabaseClient, projectId: string): Promise<AllocationResult> {
+  return computeAllocation(await loadExpenseAllocationInput(supabase, projectId));
+}
+
+/** Ne garde que ce qui existait à la fin de la journée `date` (pour une facture sur une période). */
+export function filterAllocationInputAsOf(input: AllocationInput, date: string): AllocationInput {
+  const day = (value: string | null | undefined) => String(value ?? "").slice(0, 10);
+  const reportIds = new Set(input.reports.filter((report) => day(report.report_date) <= date).map((report) => report.id));
+  return {
+    ...input,
+    reports: input.reports.filter((report) => reportIds.has(report.id)),
+    taskLogs: input.taskLogs.filter((log) => day(log.report_date) <= date),
+    usages: input.usages.filter((usage) => reportIds.has(usage.report_id)),
+    orders: input.orders.filter((order) => day(order.paid_at || order.created_at) <= date),
+    attendance: input.attendance.filter((row) => day(row.report_date) <= date),
+    salaries: input.salaries.filter((payment) => day(payment.paid_at) <= date),
+  };
 }

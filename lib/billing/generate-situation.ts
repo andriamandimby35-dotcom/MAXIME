@@ -2,7 +2,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { computePricing, roundAr } from "@/lib/billing/pricing";
 import { loadProjectFinance } from "@/lib/billing/project-finance";
 import { matchTaskForItem, type PlanningTask } from "@/lib/billing/task-matching";
-import { loadExpenseAllocation } from "@/lib/expenses/allocation";
+import { computeAllocation, filterAllocationInputAsOf, loadExpenseAllocationInput } from "@/lib/expenses/allocation";
+import { baseClaimBefore, claimEnd, computeGaps, dayAfter, dayBefore, todayKey, type ClaimPeriodRow } from "@/lib/billing/claim-periods";
+import { loadProgressEvents, progressAt } from "@/lib/billing/progress-history";
 
 // Calcul du "brouillon" d'une facture (situation de travaux), à partir :
 // - du devis externe du chantier (les lignes réellement vendues au client),
@@ -55,6 +57,9 @@ export type SituationDraft = {
   unmatchedCount: number;
   /** Tâches du planning (pour relier à la main les lignes non reconnues). */
   tasks: Array<{ id: string; title: string; progress: number }>;
+  /** Période couverte par cette facture (jours pas encore facturés). */
+  periodStart: string;
+  periodEnd: string;
 };
 
 export type SituationDraftResult =
@@ -69,13 +74,21 @@ function normalizeDesignation(value: string) {
 
 export async function computeSituationDraft(
   supabase: SupabaseClient,
-  params: { organizationId: string; projectId: string; marginOverride?: number; clientNameOverride?: string },
+  params: {
+    organizationId: string; projectId: string; marginOverride?: number; clientNameOverride?: string;
+    /** Période à facturer ; sans elle : premier trou non facturé jusqu'à aujourd'hui. */
+    periodStart?: string; periodEnd?: string;
+    /** Mise à jour d'une facture existante : on l'ignore dans ce qui est « déjà facturé ». */
+    excludeClaimId?: string;
+    /** Mise à jour d'une facture existante : une ligne ne descend jamais sous sa quantité déjà facturée. */
+    minCurrentByDesignation?: Map<string, number>;
+  },
 ): Promise<SituationDraftResult> {
   const { organizationId, projectId, marginOverride, clientNameOverride } = params;
 
   const { data: project, error: projectError } = await supabase
     .from("projects")
-    .select("id,name,project_code,source_estimate_id,source_tender_id,manual_margin_percent,manual_client_name,next_claim_seq")
+    .select("id,name,project_code,source_estimate_id,source_tender_id,manual_margin_percent,manual_client_name,next_claim_seq,created_at")
     .eq("id", projectId)
     .eq("organization_id", organizationId)
     .maybeSingle();
@@ -158,27 +171,58 @@ export async function computeSituationDraft(
     return { error: "Ce chantier n'a ni devis chiffré ni dépense payée : rien à facturer pour l'instant." };
   }
 
-  const { data: tasksData } = await supabase
-    .from("project_tasks")
-    .select("id,title,progress_percent")
-    .eq("project_id", projectId);
+  let tasksData: Array<Record<string, unknown>> | null = null;
+  {
+    const withStart = await supabase.from("project_tasks").select("id,title,progress_percent,planned_start_date").eq("project_id", projectId);
+    if (!withStart.error) tasksData = withStart.data as unknown as Array<Record<string, unknown>>;
+    else {
+      const plain = await supabase.from("project_tasks").select("id,title,progress_percent").eq("project_id", projectId);
+      tasksData = (plain.data ?? null) as unknown as Array<Record<string, unknown>> | null;
+    }
+  }
   const tasks = (tasksData ?? []) as unknown as PlanningTask[];
   const taskById = new Map(tasks.map((task) => [task.id, task]));
 
-  // Situation précédente (la plus récente, hors refusée) : sert à retrouver
-  // ce qui a déjà été facturé, poste par poste, pour ne jamais facturer deux
-  // fois le même avancement. Le rapprochement se fait par désignation, faute
-  // d'un lien direct entre les lignes d'une situation et celles du devis.
-  const { data: previousClaims } = await supabase
-    .from("progress_claims")
-    .select("id,claim_number,issue_date,created_at")
-    .eq("project_id", projectId)
-    .eq("organization_id", organizationId)
-    .neq("status", "rejected")
-    .order("issue_date", { ascending: false })
-    .order("created_at", { ascending: false })
-    .limit(1);
-  const previousClaim = previousClaims?.[0] ?? null;
+  // Factures déjà établies (hors refusées) : elles couvrent chacune une
+  // période. Une ancienne facture sans période couvre tout jusqu'à sa date.
+  type ClaimRow = ClaimPeriodRow & { id: string; claim_number: string };
+  let claimRows: ClaimRow[] = [];
+  {
+    const withPeriods = await supabase
+      .from("progress_claims")
+      .select("id,claim_number,issue_date,period_start,period_end,created_at")
+      .eq("project_id", projectId).eq("organization_id", organizationId).neq("status", "rejected");
+    if (!withPeriods.error) claimRows = (withPeriods.data ?? []) as unknown as ClaimRow[];
+    else {
+      const plain = await supabase.from("progress_claims").select("id,claim_number,issue_date,created_at")
+        .eq("project_id", projectId).eq("organization_id", organizationId).neq("status", "rejected");
+      claimRows = (plain.data ?? []) as unknown as ClaimRow[];
+    }
+  }
+  if (params.excludeClaimId) claimRows = claimRows.filter((claim) => claim.id !== params.excludeClaimId);
+
+  const today = todayKey();
+  // Début du chantier : le plus ancien entre sa création dans l'application et
+  // la première tâche planifiée.
+  const taskStarts = (tasksData ?? []).map((task) => String(task.planned_start_date ?? "").slice(0, 10)).filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value));
+  const projectStart = [String(project.created_at ?? today).slice(0, 10), ...taskStarts].sort()[0] || today;
+  let periodStart = params.periodStart;
+  let periodEnd = params.periodEnd;
+  if (!periodStart || !periodEnd) {
+    const gaps = computeGaps(claimRows, projectStart, today);
+    if (gaps.length === 0) return { error: "Tout est déjà facturé jusqu'à aujourd'hui." };
+    periodStart = gaps[0].start;
+    periodEnd = gaps[0].end;
+  }
+  if (periodStart > periodEnd) return { error: "La date de début doit être avant la date de fin." };
+  const startDay = dayBefore(periodStart);
+
+  // Facture qui précède cette période : sert à retrouver ce qui a déjà été
+  // facturé, poste par poste, pour ne jamais facturer deux fois le même
+  // avancement. Le rapprochement se fait par désignation, faute d'un lien
+  // direct entre les lignes d'une situation et celles du devis.
+  const previousClaim = baseClaimBefore(claimRows, periodStart);
+  const adjacentToPrevious = previousClaim ? claimEnd(previousClaim) === startDay : false;
 
   const previousQuantityByDesignation = new Map<string, number>();
   if (previousClaim) {
@@ -191,6 +235,10 @@ export async function computeSituationDraft(
     }
   }
 
+  // Avancement des tâches à la date de début et de fin de la période.
+  const progressEvents = await loadProgressEvents(supabase, projectId);
+  const round3 = (value: number) => Math.round(value * 1000) / 1000;
+
   let unmatchedCount = 0;
   const devisLines: SituationDraftLine[] = items.map((item, index) => {
     const contractQuantity = Number(item.quantity) || 0;
@@ -199,7 +247,8 @@ export async function computeSituationDraft(
     const unitPrice = Number.isFinite(storedExternalPrice) && storedExternalPrice > 0
       ? storedExternalPrice
       : Math.round(baseUnitPrice * (1 + marginPercent / 100) * 100) / 100;
-    const previousQuantity = previousQuantityByDesignation.get(normalizeDesignation(item.designation)) || 0;
+    const designationKey = normalizeDesignation(item.designation);
+    const storedPreviousQuantity = previousQuantityByDesignation.get(designationKey) || 0;
     // Lien enregistré sur la ligne (corrigé à la main ou trouvé à l'import) ;
     // sinon rapprochement par le texte : titre de la ligne, puis sa
     // sous-catégorie, puis sa catégorie.
@@ -209,10 +258,19 @@ export async function computeSituationDraft(
       : matchTaskForItem({ designation: item.designation, subcategory: item.subcategory, category: item.category }, tasks);
     const needsReview = !match;
     if (needsReview) unmatchedCount += 1;
+    // Avancement gagné PENDANT la période (fin moins début). Quand la facture
+    // précédente se termine la veille, on repart exactement de ce qu'elle a
+    // facturé (rien ne se perd, rien n'est compté deux fois).
+    const currentTaskProgress = match ? Number(taskById.get(match.id)?.progress_percent) || 0 : 0;
+    const startProgress = match ? progressAt(progressEvents, match.id, startDay, currentTaskProgress, today) : 0;
+    const endProgress = match ? progressAt(progressEvents, match.id, periodEnd, currentTaskProgress, today) : 0;
+    const startFromHistory = round3(contractQuantity * (startProgress / 100));
+    const previousQuantity = adjacentToPrevious ? storedPreviousQuantity : Math.max(storedPreviousQuantity, startFromHistory);
     // Une ligne non reconnue reste à son avancement déjà facturé (0 % de
     // plus cette fois) : on ne facture jamais un travail juste "prévu".
-    const targetQuantity = match ? Math.round(contractQuantity * (match.progress / 100) * 1000) / 1000 : previousQuantity;
-    const currentQuantity = Math.max(previousQuantity, targetQuantity);
+    const targetQuantity = match ? round3(contractQuantity * (endProgress / 100)) : previousQuantity;
+    const floorQuantity = params.minCurrentByDesignation?.get(designationKey) || 0;
+    const currentQuantity = Math.max(previousQuantity, targetQuantity, floorQuantity);
     const previousAmount = Math.round(previousQuantity * unitPrice * 100) / 100;
     const currentAmount = Math.round(currentQuantity * unitPrice * 100) / 100;
     return {
@@ -259,15 +317,18 @@ export async function computeSituationDraft(
   const previousOtherAmount = ["autre", "transport", "main d'œuvre"]
     .reduce((sum, label) => sum + (previousQuantityByDesignation.get(label) || 0), 0);
 
-  // Part des transports, salaires et autres dépenses pas encore classée dans
-  // une catégorie du devis. Si le calcul échoue (tables pas encore à jour),
-  // on retombe sur le comportement d'avant : tout est refacturé en « Autre ».
-  let unallocatedOther: number | null = null;
+  // Dépenses (transport, main d'œuvre, autres) PAS encore classées dans une
+  // catégorie du devis (le « Autre » de la page Dépenses) : seules celles-ci
+  // sont refacturées sur la ligne « Autre ». Pour une période, on prend ce qui
+  // s'est ajouté entre le début et la fin de la période.
+  let autreCostForPeriod = 0;
   if (!noDevis) {
-    try {
-      const allocation = await loadExpenseAllocation(supabase, projectId);
-      unallocatedOther = Math.max(0, allocation.unallocated.transport + allocation.unallocated.labor + allocation.unallocated.other);
-    } catch { unallocatedOther = null; }
+    const allocationInput = await loadExpenseAllocationInput(supabase, projectId);
+    const unallocatedAt = (date: string) => {
+      const result = computeAllocation(filterAllocationInputAsOf(allocationInput, date)).unallocated;
+      return result.transport + result.labor + result.other;
+    };
+    autreCostForPeriod = Math.max(0, unallocatedAt(periodEnd) - unallocatedAt(startDay));
   }
 
   let noDevisWarning: string | null = null;
@@ -285,13 +346,10 @@ export async function computeSituationDraft(
       currentAmount = pricing.forceTotal ? pricing.certified : roundAr(finance.realCost * (pricing.coefficient ?? 1 + marginPercent / 100));
       noDevisWarning = `${noDevisWarning ? `${noDevisWarning} ` : ""}Ce chantier n'a pas de prix de devis : tout est regroupé dans une seule ligne « Autre ». Utilise « Importer les prix du devis (PDF) » pour une facture avec les catégories et sous-catégories du devis.`;
     } else {
-      // Avec devis : transport, main d'œuvre et autres dépenses (les achats de
-      // matériaux sont déjà dans les lignes du devis) majorés de la marge.
-      // Seul ce qui n'est PAS encore classé dans une catégorie du devis (le
-      // « Autre » de la page Dépenses) est refacturé ici : le reste est déjà
-      // compris dans les lignes du devis, facturées selon l'avancement.
-      const autreBase = unallocatedOther ?? (transportPaid + salaryPaid + otherPaid);
-      currentAmount = roundAr(autreBase * (1 + marginPercent / 100));
+      // Avec devis : seul le non classé de la période (transport, main d'œuvre,
+      // autres dépenses ; les achats de matériaux sont déjà dans les lignes du
+      // devis) est ajouté à ce qui a déjà été facturé en « Autre », avec la marge.
+      currentAmount = previousOtherAmount + roundAr(autreCostForPeriod * (1 + marginPercent / 100));
     }
     const previousAmount = previousOtherAmount;
     const current = Math.max(previousAmount, currentAmount);
@@ -323,6 +381,11 @@ export async function computeSituationDraft(
     : 0;
   const expensesRatio = internalBudget > 0 ? (totalExpenses / internalBudget) * 100 : 0;
   let expensesWarning: string | null = noDevisWarning;
+  // Période passée sans aucun avancement enregistré : le suivi par date est
+  // récent, l'application ne connaît pas l'avancement à cette date.
+  if (!noDevis && periodEnd < today && progressEvents.size === 0 && tasks.length > 0) {
+    expensesWarning = "L'avancement à cette date n'est pas enregistré (le suivi de l'avancement par date vient d'être mis en place) : les lignes du devis risquent de rester à 0 sur cette période.";
+  }
   if (internalBudget > 0 && Math.abs(expensesRatio - globalProgressFromMatches) > 20) {
     expensesWarning = `L'avancement calculé (${globalProgressFromMatches.toFixed(0)} % en moyenne) semble incohérent avec les dépenses déjà engagées (${expensesRatio.toFixed(0)} % du coût interne prévu). Vérifie ces chiffres avant d'envoyer la facture.`;
   }
@@ -369,5 +432,7 @@ export async function computeSituationDraft(
     expensesWarning,
     unmatchedCount,
     tasks: tasks.map((task) => ({ id: task.id, title: task.title, progress: Math.max(0, Math.min(100, Number(task.progress_percent) || 0)) })),
+    periodStart,
+    periodEnd,
   };
 }
