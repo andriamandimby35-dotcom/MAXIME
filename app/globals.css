@@ -1062,3 +1062,7 @@ table tbody tr:hover { background: #f4fbf6; }
    "Non validé" (dossier généré mais incomplet), pour éviter la confusion
    d'un nombre de pièces affiché alors qu'aucun dossier n'existe réellement. */
 .submissionStatus.isPending { color: #7a5b00; background: #fff3cd; }
+
+/* Curseur « travail » partout dans l'appli pendant un chargement, une génération
+   ou une analyse (voir components/busy-cursor.tsx, qui pose data-busy sur <html>). */
+html[data-busy="1"], html[data-busy="1"] *, html[data-busy="1"] *:disabled, html[data-busy="1"] input[type="file"]::file-selector-button { cursor: progress !important; }

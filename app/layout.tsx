@@ -1,3 +1,4 @@
+import { BusyCursor } from "@/components/busy-cursor";
 import { PwaRegister } from "@/components/pwa-register";
 import { companyProfile } from "@/lib/company";
 import type { Metadata, Viewport } from "next";
@@ -14,5 +15,5 @@ export const metadata: Metadata = {
 export const viewport: Viewport = { themeColor: "#163f2c" };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
-  return <html lang="fr"><body><PwaRegister />{children}</body></html>;
+  return <html lang="fr"><body><PwaRegister /><BusyCursor />{children}</body></html>;
 }
