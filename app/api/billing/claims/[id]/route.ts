@@ -20,9 +20,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   return NextResponse.json({ success: true });
 }
 
-// On ne permet de supprimer qu'un brouillon : une facture déjà envoyée au
-// client (statut différent de "draft") ne doit plus disparaître comme ça,
-// même par erreur.
+// On ne permet de supprimer qu'une facture « brouillon » ou « émise » : une
+// facture approuvée ou déjà payée ne doit plus disparaître comme ça, même par erreur.
 export async function DELETE(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const supabase = await createClient();
@@ -34,7 +33,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
 
   const { data: claim } = await supabase.from("progress_claims").select("id,status").eq("id", id).eq("organization_id", member.organization_id).maybeSingle();
   if (!claim) return NextResponse.json({ error: "Facture introuvable." }, { status: 404 });
-  if (claim.status !== "draft") return NextResponse.json({ error: "Seul un brouillon peut être supprimé." }, { status: 400 });
+  if (claim.status !== "draft" && claim.status !== "submitted") return NextResponse.json({ error: "Une facture approuvée ou payée ne peut plus être supprimée." }, { status: 400 });
 
   const { error } = await supabase.from("progress_claims").delete().eq("id", id).eq("organization_id", member.organization_id);
   if (error) return NextResponse.json({ error: error.message }, { status: 400 });

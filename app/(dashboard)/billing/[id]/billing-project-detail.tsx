@@ -72,7 +72,7 @@ type PricingInfo = {
 const ariary = new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 0 });
 const today = new Date().toISOString().slice(0, 10);
 const paymentTypeLabel: Record<string, string> = { avancement: "Avancement", attachement: "Attachement", solde: "Solde de fin de travaux" };
-const claimStatusLabel: Record<string, string> = { draft: "Brouillon", submitted: "Envoyée", approved: "Approuvée", partially_paid: "Partiellement payée", paid: "Payée", rejected: "Refusée" };
+const claimStatusLabel: Record<string, string> = { draft: "Brouillon", submitted: "Émise", approved: "Approuvée", partially_paid: "Partiellement payée", paid: "Payée", rejected: "Refusée" };
 
 export function BillingProjectDetail({ project, tender, payments, claims, isAdmin, pricing }: { project: Project; tender: Tender | null; payments: Payment[]; claims: Claim[]; isAdmin: boolean; pricing: PricingInfo }) {
   const router = useRouter();
@@ -402,7 +402,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
   }
 
   async function deleteClaim(claimId: string) {
-    if (!window.confirm("Supprimer ce brouillon de facture ?")) return;
+    if (!window.confirm("Supprimer cette facture ?")) return;
     setBusy(true); setMessage("");
     const response = await fetch(`/api/billing/claims/${claimId}`, { method: "DELETE" });
     setBusy(false);
@@ -740,7 +740,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
                 <td><strong>{ariary.format(Number(claim.net_amount))} Ar</strong></td>
                 <td style={{ display: "flex", gap: "8px" }}>
                   <button type="button" className="ghostButton" onClick={() => void openPdf(`Facture ${claim.claim_number}`, `/api/billing/claims/${claim.id}/pdf`)}>Ouvrir / Imprimer</button>
-                  {claim.status === "draft" && <button type="button" className="dangerButton" disabled={busy} onClick={() => void deleteClaim(claim.id)}>Supprimer</button>}
+                  {(claim.status === "draft" || claim.status === "submitted") && <button type="button" className="dangerButton" disabled={busy} onClick={() => void deleteClaim(claim.id)}>Supprimer</button>}
                 </td>
               </tr>
             ))}</tbody>

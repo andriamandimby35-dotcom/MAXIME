@@ -238,6 +238,23 @@ async function generateOfficialPdfResponse(
 
   const fixedFileName = `devis-${mode === "internal" ? "interne" : "soumission"}-${safeName(tender?.reference || estimateId)}.pdf`;
   if (!shouldSave) {
+    // Simple aperçu : le PDF est renvoyé directement, SANS être enregistré dans
+    // Supabase (ni stockage, ni transfert Supabase à chaque ouverture) et sans
+    // téléchargement forcé.
+    if (returnPdfPayload) {
+      return NextResponse.json({ ok: true, fileName: fixedFileName, pdfBase64: Buffer.from(pdf).toString("base64") });
+    }
+    if (openDirectly) {
+      return new NextResponse(Buffer.from(pdf), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/pdf",
+          "Content-Disposition": `inline; filename="${fixedFileName}"`,
+          "Cache-Control": "private, no-store",
+        },
+      });
+    }
+    // Ancien mode « lien d'aperçu » (appel sans en-tête PDF) : nécessite un fichier temporaire.
     const previewPath = `${member.organization_id}/${estimateId}/${mode}-preview/${fixedFileName}`;
     const previewUpload = await supabase.storage.from("estimate-pdfs").upload(previewPath, pdf, {
       contentType: "application/pdf",
@@ -251,12 +268,6 @@ async function generateOfficialPdfResponse(
     if (previewSigned.error) {
       return NextResponse.json({ error: `Lien de prévisualisation indisponible : ${previewSigned.error.message}` }, { status: 400 });
     }
-    // Le même fichier d'aperçu est conservé dans le stockage privé.  Le lien
-    // direct permet à la liste des devis de l'ouvrir sans passer par une page JSON.
-    if (returnPdfPayload) {
-      return NextResponse.json({ ok: true, fileName: fixedFileName, pdfBase64: Buffer.from(pdf).toString("base64") });
-    }
-    if (openDirectly) return NextResponse.redirect(previewSigned.data.signedUrl);
     return NextResponse.json({ ok: true, previewUrl: previewSigned.data.signedUrl });
   }
 

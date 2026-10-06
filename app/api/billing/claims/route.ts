@@ -75,7 +75,9 @@ export async function POST(request: Request) {
   const taxable = Math.max(0, gross - retention - advance - other);
   const taxRate = Math.max(0, Number(body.tax_rate) || 0);
   const tax = Math.round(taxable * taxRate / 100 * 100) / 100;
-  const net = Math.round((taxable + tax) * 100) / 100;
+  // La taxe de l'État (comme la retenue de garantie) est DÉDUITE du total quand
+  // elle est mise sur la facture ; un taux à 0 veut dire « pas sur la facture ».
+  const net = Math.round(Math.max(0, taxable - tax) * 100) / 100;
 
   const { data: claim, error } = await supabase.from("progress_claims").insert({
     organization_id: member.organization_id,
@@ -85,7 +87,8 @@ export async function POST(request: Request) {
     period_start: body.period_start || null,
     period_end: body.period_end || null,
     issue_date: body.issue_date || new Date().toISOString().slice(0, 10),
-    status: "draft",
+    // Une facture générée est une facture émise, pas un brouillon.
+    status: "submitted",
     gross_amount: gross,
     retention_rate: retentionRate,
     retention_amount: retention,

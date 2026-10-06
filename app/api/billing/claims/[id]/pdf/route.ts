@@ -106,7 +106,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     clientName,
     legalMentions: [
       `${profile.companyName} — NIF ${profile.nif} — STAT ${profile.stat} — RCS ${profile.rcs}`,
-      `Facture soumise à la taxe de ${Number(claim.tax_rate) || 8} % (déjà incluse dans le montant net ci-dessus). Aucune TVA supplémentaire applicable.`,
+      ...(Number(claim.tax_rate) > 0 ? [`La taxe de l'État (${Number(claim.tax_rate)} %) est déduite du montant de cette facture, comme indiqué ci-dessus.`] : []),
     ],
     lines,
     grossAmount: Number(claim.gross_amount) || 0,
@@ -117,15 +117,25 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     taxRate: Number(claim.tax_rate) || 0,
     taxAmount: Number(claim.tax_amount) || 0,
     netAmount: Number(claim.net_amount) || 0,
+    // Anciennes factures : la taxe s'ajoutait au total. Les nouvelles la déduisent.
+    taxAdded: (() => {
+      const gross = Number(claim.gross_amount) || 0;
+      const taxable = Math.max(0, gross - (Number(claim.retention_amount) || 0) - (Number(claim.advance_repayment) || 0) - (Number(claim.other_deductions) || 0));
+      const tax = Number(claim.tax_amount) || 0;
+      return tax > 0 && Math.abs((Number(claim.net_amount) || 0) - (taxable + tax)) < 1 && Math.abs((Number(claim.net_amount) || 0) - Math.max(0, taxable - tax)) >= 1;
+    })(),
   });
 
+  // Le PDF est renvoyé directement au navigateur, pour être OUVERT (aperçu) :
+  // il n'est ni téléchargé, ni enregistré dans Supabase (aucun stockage, aucun
+  // transfert Supabase à chaque ouverture).
   const fileName = `facture-${safeName(claim.claim_number)}.pdf`;
-  const storagePath = `${member.organization_id}/${claim.project_id}/${fileName}`;
-  const upload = await supabase.storage.from("billing-pdfs").upload(storagePath, pdf, { contentType: "application/pdf", cacheControl: "300", upsert: true });
-  if (upload.error) return NextResponse.json({ error: `Enregistrement du PDF impossible : ${upload.error.message}` }, { status: 400 });
-
-  const signed = await supabase.storage.from("billing-pdfs").createSignedUrl(storagePath, 300, { download: fileName });
-  if (signed.error) return NextResponse.json({ error: `Lien privé indisponible : ${signed.error.message}` }, { status: 400 });
-
-  return NextResponse.redirect(signed.data.signedUrl);
+  return new NextResponse(Buffer.from(pdf), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `inline; filename="${fileName}"`,
+      "Cache-Control": "private, no-store",
+    },
+  });
 }

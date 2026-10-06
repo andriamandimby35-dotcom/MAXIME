@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { canonicalMaterialKey } from "@/lib/material-normalization";
 import { computePricing, roundAr } from "@/lib/billing/pricing";
 import { loadProjectFinance } from "@/lib/billing/project-finance";
+import { matchTaskForItem, type PlanningTask } from "@/lib/billing/task-matching";
 
 // Calcul du "brouillon" d'une facture (situation de travaux), à partir :
 // - du devis externe du chantier (les lignes réellement vendues au client),
@@ -30,6 +30,8 @@ export type SituationDraftLine = {
   /** Titre de catégorie / sous-catégorie du devis (repris sur la facture). */
   category?: string;
   subcategory?: string;
+  /** Ligne du bordereau (devis) d'où vient cette ligne, pour la relier à une tâche. */
+  priceItemId?: string;
 };
 
 export type SituationDraft = {
@@ -50,6 +52,8 @@ export type SituationDraft = {
   netAmount: number;
   expensesWarning: string | null;
   unmatchedCount: number;
+  /** Tâches du planning (pour relier à la main les lignes non reconnues). */
+  tasks: Array<{ id: string; title: string; progress: number }>;
 };
 
 export type SituationDraftResult =
@@ -60,35 +64,6 @@ export type SituationDraftResult =
 
 function normalizeDesignation(value: string) {
   return String(value ?? "").trim().toLocaleLowerCase("fr-FR");
-}
-
-function tokensOf(value: string) {
-  return canonicalMaterialKey(value).split(" ").filter(Boolean);
-}
-
-// Une tâche du planning ("Terrassement", "Fondations"...) et une ligne du
-// devis chiffré ("Fouille en pleine masse", "Béton de propreté 150 kg/m3"...)
-// ne partagent aucun identifiant commun dans la base (ce sont deux listes
-// séparées, même si elles viennent du même DAO à l'origine) : on les
-// rapproche donc par ressemblance de texte. Une ligne du devis est reliée à
-// la tâche dont le titre partage le plus de mots avec elle, seulement si
-// cette ressemblance est assez forte — sinon elle reste "non reconnue" (0 %,
-// à vérifier à la main), plutôt que de deviner un avancement au hasard.
-function bestMatchingTask(designation: string, tasks: Array<{ title: string; progress_percent: number | string }>) {
-  const designationTokens = new Set(tokensOf(designation));
-  if (designationTokens.size === 0) return null;
-  let best: { title: string; progress: number; score: number } | null = null;
-  for (const task of tasks) {
-    const taskTokens = new Set(tokensOf(task.title));
-    if (taskTokens.size === 0) continue;
-    const shared = [...designationTokens].filter((token) => taskTokens.has(token)).length;
-    const smaller = Math.min(designationTokens.size, taskTokens.size);
-    const score = smaller > 0 ? shared / smaller : 0;
-    if (score >= 0.6 && (!best || score > best.score)) {
-      best = { title: task.title, progress: Math.max(0, Math.min(100, Number(task.progress_percent) || 0)), score };
-    }
-  }
-  return best;
 }
 
 export async function computeSituationDraft(
@@ -151,27 +126,26 @@ export async function computeSituationDraft(
   // Les titres de catégorie / sous-catégorie sont dans deux colonnes ajoutées
   // par un fichier SQL : tant qu'il n'a pas été exécuté, on relit sans elles
   // (la facture reste alors "à plat", sans titres).
-  type PriceItemRow = { designation: string; unit: string | null; quantity: number | string | null; unit_price: number | string | null; external_unit_price: number | string | null; is_internal: boolean | null; created_at: string; category?: string | null; subcategory?: string | null };
+  type PriceItemRow = { id?: string; task_id?: string | null; designation: string; unit: string | null; quantity: number | string | null; unit_price: number | string | null; external_unit_price: number | string | null; is_internal: boolean | null; created_at: string; category?: string | null; subcategory?: string | null };
   let priceItems: PriceItemRow[] | null = null;
   {
-    const withTitles = await supabase
-      .from("project_price_items")
-      .select("designation,unit,quantity,unit_price,external_unit_price,is_internal,created_at,category,subcategory")
-      .eq("project_id", projectId)
-      .eq("is_internal", false)
-      .order("created_at", { ascending: true });
-    if (!withTitles.error) {
-      priceItems = withTitles.data as unknown as PriceItemRow[];
-    } else {
-      const plain = await supabase
+    // Colonnes ajoutées par des fichiers SQL (task_id, titres) : tant qu'ils ne
+    // sont pas exécutés, on relit sans elles (facture « à plat », rapprochement
+    // par le texte seulement).
+    const base = "id,designation,unit,quantity,unit_price,external_unit_price,is_internal,created_at";
+    const attempts = [`${base},category,subcategory,task_id`, `${base},category,subcategory`, `${base}`];
+    let lastError = "";
+    for (const columns of attempts) {
+      const result = await supabase
         .from("project_price_items")
-        .select("designation,unit,quantity,unit_price,external_unit_price,is_internal,created_at")
+        .select(columns)
         .eq("project_id", projectId)
         .eq("is_internal", false)
         .order("created_at", { ascending: true });
-      if (plain.error) return { error: plain.error.message };
-      priceItems = plain.data as unknown as PriceItemRow[];
+      if (!result.error) { priceItems = result.data as unknown as PriceItemRow[]; break; }
+      lastError = result.error.message;
     }
+    if (!priceItems) return { error: lastError };
   }
 
   // Chantier sans devis chiffré : la facture est bâtie à partir des dépenses
@@ -183,10 +157,12 @@ export async function computeSituationDraft(
     return { error: "Ce chantier n'a ni devis chiffré ni dépense payée : rien à facturer pour l'instant." };
   }
 
-  const { data: tasks } = await supabase
+  const { data: tasksData } = await supabase
     .from("project_tasks")
-    .select("title,progress_percent")
+    .select("id,title,progress_percent")
     .eq("project_id", projectId);
+  const tasks = (tasksData ?? []) as unknown as PlanningTask[];
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
 
   // Situation précédente (la plus récente, hors refusée) : sert à retrouver
   // ce qui a déjà été facturé, poste par poste, pour ne jamais facturer deux
@@ -223,12 +199,13 @@ export async function computeSituationDraft(
       ? storedExternalPrice
       : Math.round(baseUnitPrice * (1 + marginPercent / 100) * 100) / 100;
     const previousQuantity = previousQuantityByDesignation.get(normalizeDesignation(item.designation)) || 0;
-    // La ligne est d'abord rapprochée d'une tâche par son propre titre ; sinon
-    // par sa sous-catégorie, puis sa catégorie (le planning est souvent écrit
-    // par grands postes : « Terrassement », « Fondations »…).
-    const match = bestMatchingTask(item.designation, tasks ?? [])
-      ?? (item.subcategory ? bestMatchingTask(String(item.subcategory), tasks ?? []) : null)
-      ?? (item.category ? bestMatchingTask(String(item.category), tasks ?? []) : null);
+    // Lien enregistré sur la ligne (corrigé à la main ou trouvé à l'import) ;
+    // sinon rapprochement par le texte : titre de la ligne, puis sa
+    // sous-catégorie, puis sa catégorie.
+    const linked = item.task_id ? taskById.get(item.task_id) : undefined;
+    const match = linked
+      ? { id: linked.id, title: linked.title, progress: Math.max(0, Math.min(100, Number(linked.progress_percent) || 0)), score: 1 }
+      : matchTaskForItem({ designation: item.designation, subcategory: item.subcategory, category: item.category }, tasks);
     const needsReview = !match;
     if (needsReview) unmatchedCount += 1;
     // Une ligne non reconnue reste à son avancement déjà facturé (0 % de
@@ -251,6 +228,7 @@ export async function computeSituationDraft(
       amountThisTime: Math.round((currentAmount - previousAmount) * 100) / 100,
       matchedTaskTitle: match?.title ?? null,
       needsReview,
+      priceItemId: item.id,
       category: String(item.category ?? "").trim() || undefined,
       subcategory: String(item.subcategory ?? "").trim() || undefined,
     };
@@ -306,6 +284,8 @@ export async function computeSituationDraft(
       kind: "depense" as const,
       position: items.length + 1,
       designation: "Autre",
+      // Catégorie « Autre » : tout ce qui n'est pas une ligne du devis.
+      category: "Autre",
       unit: "forfait",
       contractQuantity: null,
       unitPrice: null,
@@ -331,14 +311,18 @@ export async function computeSituationDraft(
     expensesWarning = `L'avancement calculé (${globalProgressFromMatches.toFixed(0)} % en moyenne) semble incohérent avec les dépenses déjà engagées (${expensesRatio.toFixed(0)} % du coût interne prévu). Vérifie ces chiffres avant d'envoyer la facture.`;
   }
 
+  // Retenue de garantie et taxe de l'État sont des OPTIONS choisies à l'écran
+  // (désactivées par défaut) : si elles sont mises sur la facture, elles sont
+  // DÉDUITES du total, jamais ajoutées. Les taux ci-dessous ne sont que les
+  // valeurs proposées ; les montants sont recalculés à l'écran puis à
+  // l'enregistrement (POST /api/billing/claims).
   const retentionRate = 5;
-  const retentionAmount = Math.round(grossAmount * retentionRate / 100 * 100) / 100;
+  const retentionAmount = 0;
   const advanceRepayment = 0;
   const otherDeductions = 0;
-  const taxable = Math.max(0, grossAmount - retentionAmount - advanceRepayment - otherDeductions);
   const taxRate = 8;
-  const taxAmount = Math.round(taxable * taxRate / 100 * 100) / 100;
-  const netAmount = Math.round((taxable + taxAmount) * 100) / 100;
+  const taxAmount = 0;
+  const netAmount = grossAmount;
 
   // Le numéro s'appuie sur un compteur qui n'avance que dans un sens
   // (project.next_claim_seq), jamais sur le nombre de factures existantes :
@@ -368,5 +352,6 @@ export async function computeSituationDraft(
     netAmount,
     expensesWarning,
     unmatchedCount,
+    tasks: tasks.map((task) => ({ id: task.id, title: task.title, progress: Math.max(0, Math.min(100, Number(task.progress_percent) || 0)) })),
   };
 }
