@@ -72,12 +72,6 @@ export default function PriceSearch({ prices }: { prices: any[] }) {
   const activeQuery = query.trim();
   const isSearching = activeQuery.length > 0;
 
-  const searchResults = useMemo(() => {
-    if (!isSearching) return [];
-    const tokens = normalize(activeQuery).split(/\s+/).filter(Boolean);
-    return sortByDesignation(prices.filter((price) => matchesQuery(price, tokens)));
-  }, [prices, activeQuery, isSearching]);
-
   // Une offre sans fournisseur/région renseignée n'est plus mise dans un
   // groupe fourre-tout "Autre" : elle est simplement ignorée pour ce mode
   // d'affichage (le matériau reste bien sûr trouvable via "Nom" ou la
@@ -129,18 +123,43 @@ export default function PriceSearch({ prices }: { prices: any[] }) {
     ));
   }, [prices, drill]);
 
+  // Recherche par mots-clés. Si une région (ou un fournisseur) est choisi, on
+  // cherche UNIQUEMENT parmi les matériaux de cette région (ou de ce
+  // fournisseur). Sinon on cherche dans tout ("recherche le tout").
+  const searchResults = useMemo(() => {
+    if (!isSearching) return [];
+    const tokens = normalize(activeQuery).split(/\s+/).filter(Boolean);
+    const pool = drill ? drillResults : prices;
+    return sortByDesignation(pool.filter((price) => matchesQuery(price, tokens)));
+  }, [prices, drillResults, drill, activeQuery, isSearching]);
+
+  // On garde ce qui est tapé quand on change d'onglet : l'utilisateur peut
+  // taper d'abord, puis choisir la région/le fournisseur pour restreindre.
   function selectMode(next: Mode) {
-    setQuery("");
     setDrill(null);
     setMode(next);
+  }
+
+  function chooseScope(value: string) {
+    if (!value) {
+      setDrill(null);
+      return;
+    }
+    const list = mode === "fournisseur" ? supplierGroups : regionGroups;
+    const found = list.find((item) => item.key === value);
+    if (found && (mode === "fournisseur" || mode === "region")) {
+      setDrill({ type: mode, key: found.key, label: found.label });
+    }
   }
 
   function openDrill(type: "fournisseur" | "region", key: string, label: string) {
     setDrill({ type, key, label });
   }
 
+  const scopeNoun = drill?.type === "fournisseur" ? "fournisseur" : "région";
   let resultsHead = "";
-  if (isSearching) resultsHead = `Résultats pour « ${activeQuery} »`;
+  if (isSearching && drill) resultsHead = `Résultats pour « ${activeQuery} » — ${scopeNoun} : ${drill.label}`;
+  else if (isSearching) resultsHead = `Résultats pour « ${activeQuery} »`;
   else if (drill) resultsHead = `Matériaux — ${drill.label}`;
   else if (mode === "fournisseur") resultsHead = "Tous les fournisseurs disponibles";
   else if (mode === "region") resultsHead = "Toutes les régions disponibles";
@@ -150,7 +169,11 @@ export default function PriceSearch({ prices }: { prices: any[] }) {
     <div className="w-full">
       <input
         className="w-full border p-3 rounded-lg"
-        placeholder="Rechercher : un ou plusieurs mots-clés (ex : fer 6, sac ciment 50)"
+        placeholder={
+          drill
+            ? `Rechercher dans ${drill.label} : un ou plusieurs mots-clés`
+            : "Rechercher : un ou plusieurs mots-clés (ex : fer 6, sac ciment 50)"
+        }
         value={query}
         onChange={(e) => setQuery(e.target.value)}
       />
@@ -158,38 +181,64 @@ export default function PriceSearch({ prices }: { prices: any[] }) {
       <div className="modeRow">
         <button
           type="button"
-          className={!isSearching && !drill && mode === "fournisseur" ? "modeBtn active" : "modeBtn"}
+          className={mode === "fournisseur" ? "modeBtn active" : "modeBtn"}
           onClick={() => selectMode("fournisseur")}
         >
           Fournisseur
         </button>
         <button
           type="button"
-          className={!isSearching && !drill && mode === "region" ? "modeBtn active" : "modeBtn"}
+          className={mode === "region" ? "modeBtn active" : "modeBtn"}
           onClick={() => selectMode("region")}
         >
           Région
         </button>
         <button
           type="button"
-          className={!isSearching && !drill && mode === "nom" ? "modeBtn active" : "modeBtn"}
+          className={mode === "nom" ? "modeBtn active" : "modeBtn"}
           onClick={() => selectMode("nom")}
         >
           Nom
         </button>
       </div>
 
+      {(mode === "region" || mode === "fournisseur") && (
+        <div className="mt-2 flex items-center gap-2">
+          <label className="text-sm text-gray-600" htmlFor="price-scope">
+            {mode === "region" ? "Chercher dans la région :" : "Chercher chez le fournisseur :"}
+          </label>
+          <select
+            id="price-scope"
+            className="border p-2 rounded-lg"
+            value={drill && drill.type === mode ? drill.key : ""}
+            onChange={(e) => chooseScope(e.target.value)}
+          >
+            <option value="">{mode === "region" ? "Toutes les régions" : "Tous les fournisseurs"}</option>
+            {(mode === "region" ? regionGroups : supplierGroups).map((item) => (
+              <option key={item.key} value={item.key}>{item.label}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
       <p className="resultsHead">{resultsHead}</p>
 
       <div className="mt-2">
         {isSearching ? (
-          searchResults.length > 0 ? (
+          <>
+          {drill && (
+            <button type="button" className="tenderBackLink" onClick={() => setDrill(null)}>
+              ← Chercher partout
+            </button>
+          )}
+          {searchResults.length > 0 ? (
             <div className="priceGrid">
               {searchResults.map((price) => <PriceCard key={price.id} price={price} />)}
             </div>
           ) : (
-            <p className="text-gray-500">Aucun matériau ne correspond à « {activeQuery} ».</p>
-          )
+            <p className="text-gray-500">Aucun matériau ne correspond à « {activeQuery} »{drill ? ` dans ${drill.label}` : ""}.</p>
+          )}
+          </>
         ) : drill ? (
           <>
             <button type="button" className="tenderBackLink" onClick={() => setDrill(null)}>
