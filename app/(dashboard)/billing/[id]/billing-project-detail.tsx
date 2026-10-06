@@ -360,6 +360,33 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     router.refresh();
   }
 
+  // Affiche la facture préparée. Une ligne du devis qui n'a vraiment aucune
+  // tâche (ni par son texte, ni par ses voisines de même catégorie) reçoit
+  // automatiquement une tâche dans le planning, à 0 %, puis la facture est recalculée.
+  async function acceptDraft(result: Draft, gap: Gap | null = currentGap) {
+    let finalDraft = result;
+    const missing = result.lines.filter((line) => line.needsReview && line.priceItemId);
+    let createdCount = 0;
+    if (missing.length > 0) {
+      const linkResponse = await fetch(`/api/billing/projects/${project.id}/link-tasks`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ links: missing.map((line) => ({ price_item_id: line.priceItemId as string, task_id: "new" })) }),
+      });
+      const linkResult = await linkResponse.json().catch(() => ({}));
+      if (linkResponse.ok) {
+        createdCount = Number(linkResult.created) || 0;
+        const again = await fetch(`/api/billing/claims/draft?project_id=${project.id}${gapParams(gap)}&client_name=${encodeURIComponent(result.clientName)}&margin=${Number(result.marginPercent) || 0}`);
+        const next = await again.json().catch(() => ({}));
+        if (again.ok && next.lines) finalDraft = next;
+      }
+    }
+    setDraft(finalDraft);
+    setClaimNumberInput(finalDraft.claimNumber);
+    setIssueDateInput(today);
+    if (createdCount > 0) setDraftMessage(`${createdCount} ligne(s) du devis n'avaient aucune tâche : elles ont été ajoutées au planning (à 0 %). Mets à jour leur avancement dans le planning du chantier.`);
+  }
+
   // Période de la facture en cours de préparation, ajoutée à chaque calcul.
   const gapParams = (gap: Gap | null = currentGap) => (gap ? `&start=${gap.start}&end=${gap.end}` : "");
 
@@ -371,9 +398,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     if (!response.ok) return setDraftMessage(result.error ?? "Calcul impossible.");
     if (result.needsMarginInput) { setNeedsMargin(true); return; }
     if (result.needsClientInput) { setNeedsClientName(true); return; }
-    setDraft(result);
-    setClaimNumberInput(result.claimNumber);
-    setIssueDateInput(today);
+    await acceptDraft(result, gap);
   }
 
   // Cherche les périodes pas encore facturées (une facture par « trou ») puis prépare la première.
@@ -409,9 +434,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     if (!response.ok) return setDraftMessage(result.error ?? "Calcul impossible.");
     if (result.needsClientInput) { setNeedsMargin(false); setNeedsClientName(true); return; }
     setNeedsMargin(false);
-    setDraft(result);
-    setClaimNumberInput(result.claimNumber);
-    setIssueDateInput(today);
+    await acceptDraft(result);
   }
 
   async function confirmClientName() {
@@ -423,9 +446,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     if (!response.ok) return setDraftMessage(result.error ?? "Calcul impossible.");
     if (result.needsMarginInput) { setNeedsClientName(false); setNeedsMargin(true); return; }
     setNeedsClientName(false);
-    setDraft(result);
-    setClaimNumberInput(result.claimNumber);
-    setIssueDateInput(today);
+    await acceptDraft(result);
   }
 
   async function reloadDraft() {

@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { computePricing, roundAr } from "@/lib/billing/pricing";
 import { loadProjectFinance } from "@/lib/billing/project-finance";
-import { matchTaskForItem, type PlanningTask } from "@/lib/billing/task-matching";
+import { resolveItemTasks, type PlanningTask } from "@/lib/billing/task-matching";
 import { computeAllocation, filterAllocationInputAsOf, loadExpenseAllocationInput } from "@/lib/expenses/allocation";
 import { baseClaimBefore, claimEnd, computeGaps, dayAfter, dayBefore, todayKey, type ClaimPeriodRow } from "@/lib/billing/claim-periods";
 import { loadProgressEvents, progressAt } from "@/lib/billing/progress-history";
@@ -242,6 +242,8 @@ export async function computeSituationDraft(
   const round3 = (value: number) => Math.round(value * 1000) / 1000;
 
   let unmatchedCount = 0;
+  // Lien de chaque ligne : lien enregistré, texte, sinon tâche des lignes voisines.
+  const resolvedTasks = resolveItemTasks(items.map((item) => ({ designation: item.designation, subcategory: item.subcategory, category: item.category, task_id: item.task_id })), tasks);
   const devisLines: SituationDraftLine[] = items.map((item, index) => {
     const contractQuantity = Number(item.quantity) || 0;
     const baseUnitPrice = Number(item.unit_price) || 0;
@@ -254,10 +256,7 @@ export async function computeSituationDraft(
     // Lien enregistré sur la ligne (corrigé à la main ou trouvé à l'import) ;
     // sinon rapprochement par le texte : titre de la ligne, puis sa
     // sous-catégorie, puis sa catégorie.
-    const linked = item.task_id ? taskById.get(item.task_id) : undefined;
-    const match = linked
-      ? { id: linked.id, title: linked.title, progress: Math.max(0, Math.min(100, Number(linked.progress_percent) || 0)), score: 1 }
-      : matchTaskForItem({ designation: item.designation, subcategory: item.subcategory, category: item.category }, tasks);
+    const match = resolvedTasks[index];
     const needsReview = !match;
     if (needsReview) unmatchedCount += 1;
     // Avancement gagné PENDANT la période (fin moins début). Quand la facture

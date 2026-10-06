@@ -58,3 +58,57 @@ export function matchTaskForItem(item: { designation: string; subcategory?: stri
     ?? (item.subcategory ? bestTaskFor(String(item.subcategory), tasks) : null)
     ?? (item.category ? bestTaskFor(String(item.category), tasks) : null);
 }
+
+type ItemForLink = { designation: string; subcategory?: string | null; category?: string | null; task_id?: string | null };
+
+/**
+ * Relie TOUTES les lignes d'un devis à une tâche du planning, dans cet ordre :
+ * 1. le lien déjà enregistré sur la ligne ;
+ * 2. la ressemblance du texte (titre, sous-catégorie, catégorie) ;
+ * 3. sinon la tâche des autres lignes de la MÊME sous-catégorie (puis de la
+ *    même catégorie) : une ligne sans tâche à elle suit celle de ses voisines.
+ * Retourne, pour chaque ligne (même ordre), la tâche trouvée ou null.
+ */
+export function resolveItemTasks(items: ItemForLink[], tasks: PlanningTask[]): Array<TaskMatch | null> {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const asMatch = (task: PlanningTask, score: number): TaskMatch => ({ id: task.id, title: task.title, progress: Math.max(0, Math.min(100, Number(task.progress_percent) || 0)), score });
+  const result: Array<TaskMatch | null> = items.map((item) => {
+    const stored = item.task_id ? byId.get(item.task_id) : undefined;
+    if (stored) return asMatch(stored, 1);
+    return matchTaskForItem(item, tasks);
+  });
+  const key = (value: string | null | undefined) => String(value ?? "").trim().toLowerCase();
+  const dominant = (indexes: number[]): TaskMatch | null => {
+    const counts = new Map<string, { count: number; match: TaskMatch }>();
+    for (const i of indexes) {
+      const match = result[i];
+      if (!match) continue;
+      const entry = counts.get(match.id) ?? { count: 0, match };
+      entry.count += 1;
+      counts.set(match.id, entry);
+    }
+    const ranked = [...counts.values()].sort((a, b) => b.count - a.count);
+    if (ranked.length === 0) return null;
+    // Une seule tâche chez les voisines, ou une tâche nettement plus partagée
+    // que les autres ; sinon on ne devine pas.
+    if (ranked.length === 1 || ranked[0].count > ranked[1].count) return { ...ranked[0].match, score: 0.5 };
+    return null;
+  };
+  const resolved = [...result];
+  items.forEach((item, index) => {
+    if (resolved[index]) return;
+    const sub = key(item.subcategory);
+    const cat = key(item.category);
+    if (sub) {
+      const same = items.map((other, i) => (i !== index && key(other.subcategory) === sub && key(other.category) === cat ? i : -1)).filter((i) => i >= 0);
+      const found = dominant(same);
+      if (found) { resolved[index] = found; return; }
+    }
+    if (cat) {
+      const same = items.map((other, i) => (i !== index && key(other.category) === cat ? i : -1)).filter((i) => i >= 0);
+      const found = dominant(same);
+      if (found) resolved[index] = found;
+    }
+  });
+  return resolved;
+}

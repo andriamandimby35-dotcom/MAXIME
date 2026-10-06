@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { matchTaskForItem, type PlanningTask } from "@/lib/billing/task-matching";
+import { resolveItemTasks, type PlanningTask } from "@/lib/billing/task-matching";
 
 // Classement automatique des dépenses d'un chantier par catégorie / sous-
 // catégorie du devis.
@@ -75,8 +75,9 @@ export function computeAllocation(input: AllocationInput): AllocationResult {
   // ---- 1. Tâche du planning -> catégorie / sous-catégorie du devis ----
   const taskIds = new Set(input.tasks.map((task) => task.id));
   const bucketByTask = new Map<string, Bucket>();
+  const resolvedTasks = resolveItemTasks(input.priceItems.map((item) => ({ designation: item.designation, subcategory: item.subcategory, category: item.category, task_id: item.task_id && taskIds.has(item.task_id) ? item.task_id : null })), input.tasks);
   input.priceItems.forEach((item, index) => {
-    const linked = item.task_id && taskIds.has(item.task_id) ? item.task_id : matchTaskForItem({ designation: item.designation, subcategory: item.subcategory, category: item.category }, input.tasks)?.id;
+    const linked = resolvedTasks[index]?.id;
     if (!linked || bucketByTask.has(linked)) return;
     const category = String(item.category ?? "").trim() || String(item.designation ?? "").trim() || "Travaux";
     bucketByTask.set(linked, { category, subcategory: String(item.subcategory ?? "").trim(), order: index });
