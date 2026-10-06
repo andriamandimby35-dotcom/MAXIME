@@ -24,10 +24,11 @@ function savedPrice(row: PriceRow) {
   return positive(row.prix_entreprise) ?? positive(row.prix_retenu) ?? positive(row.prix_actuel) ?? positive(row.prix_ia);
 }
 
-export async function lookupLibraryPrices(supabase: SupabaseClient, organizationId: string, items: LookupItem[]): Promise<LookupHit[]> {
-  if (items.length === 0) return [];
-  // Bibliothèque lue UNE seule fois, page par page (Supabase ne renvoie jamais
-  // plus de 1000 lignes d'un coup), avec seulement les colonnes utiles.
+export type PriceLibraryRow = PriceRow;
+
+// Bibliothèque lue UNE seule fois, page par page (Supabase ne renvoie jamais
+// plus de 1000 lignes d'un coup), avec seulement les colonnes utiles.
+export async function loadPriceLibrary(supabase: SupabaseClient, organizationId: string): Promise<PriceLibraryRow[]> {
   const library: PriceRow[] = [];
   for (let from = 0; ; from += 1000) {
     let page = await supabase.from("price_library")
@@ -39,6 +40,12 @@ export async function lookupLibraryPrices(supabase: SupabaseClient, organization
     library.push(...(page.data as PriceRow[]));
     if (page.data.length < 1000) break;
   }
+  return library;
+}
+
+export async function lookupLibraryPrices(supabase: SupabaseClient, organizationId: string, items: LookupItem[], preloaded?: PriceLibraryRow[]): Promise<LookupHit[]> {
+  if (items.length === 0) return [];
+  const library = preloaded ?? await loadPriceLibrary(supabase, organizationId);
 
   // Catalogue partagé : une seule requête pour toutes les désignations du devis.
   const keys = [...new Set(items.map((item) => canonicalMaterialKey(item.designation)).filter(Boolean))];

@@ -1,11 +1,12 @@
 import { computeExternalUnitPrices } from "@/lib/estimates/external-pricing";
+import { isLaborLine } from "@/lib/compositions/labor";
 
 // Un devis importé vit dans le bordereau du chantier (project_price_items) :
 // - unit_price           = prix INTERNE (ton coût), vide tant qu'il n'est pas rempli ;
 // - external_unit_price  = prix EXTERNE (celui du client, utilisé pour la facture).
 // Marge = total externe ÷ total interne − 1, sur les lignes qui ont les deux prix.
 
-export type DevisItem = { quantity?: number | string | null; unit_price?: number | string | null; external_unit_price?: number | string | null; is_internal?: boolean | null };
+export type DevisItem = { designation?: string | null; quantity?: number | string | null; unit_price?: number | string | null; external_unit_price?: number | string | null; is_internal?: boolean | null };
 
 const num = (value: unknown) => Number(value) || 0;
 
@@ -14,6 +15,8 @@ export type DevisSummary = {
   internalTotal: number;
   externalTotal: number;
   missingInternal: number;
+  /** Lignes de main-d'œuvre / chantier : coût 0 (déjà dans les salaires), jamais « manquantes ». */
+  laborLines: number;
   missingExternal: number;
   /** Marge en % (externe ÷ interne − 1) sur les lignes qui ont les deux prix ; null si aucune. */
   marginPercent: number | null;
@@ -26,12 +29,15 @@ export function summarizeDevis(items: DevisItem[]): DevisSummary {
   let pairedInternal = 0;
   let pairedExternal = 0;
   let missingInternal = 0;
+  let laborLines = 0;
   let missingExternal = 0;
   for (const item of visible) {
     const quantity = num(item.quantity) || 1;
     const internal = num(item.unit_price);
     const external = num(item.external_unit_price);
-    if (internal > 0) internalTotal += quantity * internal; else missingInternal += 1;
+    if (internal > 0) internalTotal += quantity * internal;
+    else if (isLaborLine(item.designation)) laborLines += 1;
+    else missingInternal += 1;
     if (external > 0) externalTotal += quantity * external; else missingExternal += 1;
     if (internal > 0 && external > 0) {
       pairedInternal += quantity * internal;
@@ -43,6 +49,7 @@ export function summarizeDevis(items: DevisItem[]): DevisSummary {
     internalTotal,
     externalTotal,
     missingInternal,
+    laborLines,
     missingExternal,
     marginPercent: pairedInternal > 0 ? Math.round((pairedExternal / pairedInternal - 1) * 1000) / 10 : null,
   };

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { getDaoTemplate } from "@/lib/dao/get-dao-template";
 import { createClient } from "@/lib/supabase/client";
 import OfficialPdfButton from "@/components/estimates/OfficialPdfButton";
+import { compositeInputsFor } from "@/lib/compositions/works";
 
 type DaoColumn = {
   name: string;
@@ -1482,7 +1483,13 @@ export default function EstimateBuilder({
               alternative_group?: string;
             }>;
           };
-          const rawComponentInputs = (result.manual_price_inputs?.length ?? 0) > 0
+          // Compositions standard (mêmes règles que les devis PDF : dosage le plus bas,
+          // parpaing 15 cm, brique standard…) pour les ouvrages connus ; sinon
+          // composants proposés par la recherche, sinon composition par défaut.
+          const standardInputs = isInternalLaborLine(line) ? null : compositeInputsFor(designation, unit);
+          const rawComponentInputs = standardInputs
+            ? standardInputs
+            : (result.manual_price_inputs?.length ?? 0) > 0
             ? result.manual_price_inputs ?? []
             : isInternalLaborLine(line)
               ? fallbackLaborInputs(line, designationKey)
@@ -1688,7 +1695,10 @@ export default function EstimateBuilder({
         }>;
       };
       if (!response.ok) throw new Error(result.error || "Recherche ciblée impossible.");
-      const rawComponentInputs = (result.manual_price_inputs?.length ?? 0) > 0
+      const standardInputs = isInternalLaborLine(line) ? null : compositeInputsFor(designation, unit);
+      const rawComponentInputs = standardInputs
+        ? standardInputs
+        : (result.manual_price_inputs?.length ?? 0) > 0
         ? result.manual_price_inputs ?? []
         : isInternalLaborLine(line)
           ? fallbackLaborInputs(line, designationKey)

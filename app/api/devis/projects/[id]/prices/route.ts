@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { requireDevisAdmin } from "@/lib/devis/admin";
+import { isLaborLine } from "@/lib/compositions/labor";
 
 // Prix INTERNES (coûts) d'un devis déjà enregistré dans le bordereau du chantier.
 // - GET   : lignes dont le prix interne manque (à remplir par la recherche de prix) ;
@@ -25,7 +26,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     if (!result.error) { rows = result.data as unknown as Array<Record<string, unknown>>; break; }
   }
   const missing = (rows ?? [])
-    .filter((row) => !(Number(row.unit_price) > 0))
+    .filter((row) => !(Number(row.unit_price) > 0) && !isLaborLine(String(row.designation ?? "")))
     .map((row) => ({
       id: String(row.id),
       designation: String(row.designation ?? ""),

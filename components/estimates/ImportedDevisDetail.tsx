@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { formatAr } from "@/components/money";
 import { summarizeDevis } from "@/lib/devis/pricing";
+import { isLaborLine } from "@/lib/compositions/labor";
 import { openDevisPdf } from "@/components/estimates/openPdf";
 import { confirmDeletion } from "@/components/deletion/confirmDeletion";
 
@@ -23,6 +24,15 @@ export type DevisLine = {
 type Project = { id: string; name: string; createdAt: string | null; marginPercent: number | null };
 type View = "external" | "internal";
 
+type CalcPart = { designation: string; unit: string; quantity: number; unitPrice: number | null; amount: number; optional: boolean };
+type CalcDetail = { id: string; designation: string; unit: string; status: "bibliothèque" | "composition" | "matériau manquant" | "sans composition"; price: number | null; title?: string; notes?: string[]; parts?: CalcPart[]; missing?: string[] };
+type CalcResult = {
+  saved: number; computed: number; fromLibrary: number; fromShared: number; laborLines: number;
+  details: CalcDetail[];
+  missingMaterials: Array<{ designation: string; search: string; unit: string; lines: number }>;
+  noCompositionIds: string[];
+};
+
 const num = (value: unknown) => Number(value) || 0;
 
 // Page d'un devis ajouté par PDF. Même organisation que la page d'un devis du
@@ -37,7 +47,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   const [progress, setProgress] = useState<{ current: number; total: number; label: string } | null>(null);
   const [marginInput, setMarginInput] = useState("");
   const [libraryBusy, setLibraryBusy] = useState(false);
-  const [libraryDone, setLibraryDone] = useState<{ saved: number; remaining: number } | null>(null);
+  const [calc, setCalc] = useState<CalcResult | null>(null);
   const [pdfBusy, setPdfBusy] = useState<View | null>(null);
   const stopRef = useRef(false);
   useEffect(() => setRows(lines), [lines]);
@@ -69,38 +79,81 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
     return true;
   }
 
-  // Étape 1, GRATUITE : reprend les prix déjà connus (bibliothèque + catalogue
-  // partagé). Aucun crédit IA. Les lignes introuvables restent à compléter.
-  async function fillFromLibrary() {
+  // Étape 1, GRATUITE : main-d'œuvre à 0, prix déjà connus (bibliothèque +
+  // catalogue partagé), puis calcul par compositions de matériaux (ciment +
+  // sable + eau…, main-d'œuvre non comptée). Aucun crédit IA.
+  async function calculatePrices(quiet = false) {
     setLibraryBusy(true);
-    setMessage("Lecture de la bibliothèque de prix…");
+    if (!quiet) setMessage("Calcul des prix internes à partir de la bibliothèque…");
     try {
-      const response = await fetch(`/api/devis/projects/${project.id}/library-prices`, { method: "POST" });
-      const result = await response.json().catch(() => ({})) as { error?: string; saved?: number; fromLibrary?: number; fromShared?: number; updates?: Array<{ id: string; unit_price: number }>; remaining?: unknown[] };
-      if (!response.ok) { setMessage(result.error ?? "Lecture de la bibliothèque impossible."); return; }
+      const response = await fetch(`/api/devis/projects/${project.id}/compositions`, { method: "POST" });
+      const result = await response.json().catch(() => ({})) as Partial<CalcResult> & { error?: string; updates?: Array<{ id: string; unit_price: number }> };
+      if (!response.ok) { setMessage(result.error ?? "Calcul impossible."); return null; }
       const updates = result.updates ?? [];
       if (updates.length > 0) setRows((current) => current.map((row) => { const update = updates.find((item) => item.id === row.id); return update ? { ...row, unit_price: update.unit_price } : row; }));
-      const remaining = (result.remaining ?? []).length;
-      setLibraryDone({ saved: result.saved ?? 0, remaining });
-      if ((result.saved ?? 0) > 0) await applyMargin();
-      setMessage(`${result.saved ?? 0} prix remplis depuis la bibliothèque (${result.fromLibrary ?? 0} de ta bibliothèque, ${result.fromShared ?? 0} du catalogue partagé). ${remaining > 0 ? `Il reste ${remaining} prix introuvables : saisis-les toi-même dans l'onglet « Devis interne », ou lance la recherche internet (crédits IA).` : "Tous les prix internes sont remplis."}`);
+      const next: CalcResult = {
+        saved: result.saved ?? 0, computed: result.computed ?? 0, fromLibrary: result.fromLibrary ?? 0, fromShared: result.fromShared ?? 0, laborLines: result.laborLines ?? 0,
+        details: result.details ?? [], missingMaterials: result.missingMaterials ?? [], noCompositionIds: result.noCompositionIds ?? [],
+      };
+      setCalc(next);
+      if (next.saved > 0) await applyMargin();
+      const parts: string[] = [];
+      if (next.computed > 0) parts.push(`${next.computed} calculé(s) par compositions de matériaux`);
+      if (next.fromLibrary + next.fromShared > 0) parts.push(`${next.fromLibrary + next.fromShared} repris de la bibliothèque`);
+      if (next.laborLines > 0) parts.push(`${next.laborLines} ligne(s) de main-d'œuvre / chantier comptées 0 (déjà dans les salaires)`);
+      const blocked = next.details.filter((item) => item.status === "matériau manquant").length;
+      const notes: string[] = [];
+      if (blocked > 0) notes.push(`${blocked} ligne(s) attendent le prix de ${next.missingMaterials.length} matériau(x) (étape 2)`);
+      if (next.noCompositionIds.length > 0) notes.push(`${next.noCompositionIds.length} ligne(s) sans composition connue (étape 3 ou saisie à la main)`);
+      setMessage(`${next.saved} prix remplis${parts.length ? " : " + parts.join(", ") : ""}.${notes.length ? " Reste : " + notes.join(" ; ") + "." : " Tous les prix internes sont remplis."}`);
       router.refresh();
+      return next;
     } finally {
       setLibraryBusy(false);
     }
   }
 
-  async function fillInternalPrices() {
+  // Étape 2 (crédits IA) : cherche sur internet SEULEMENT le prix des matériaux
+  // manquants (ciment, sable, parpaing…), puis relance le calcul gratuit.
+  async function searchMissingMaterials() {
+    const materials = calc?.missingMaterials ?? [];
+    if (materials.length === 0) return;
+    const info = await fetch(`/api/devis/projects/${project.id}/prices`, { cache: "no-store" }).then((response) => response.json()).catch(() => ({})) as { project?: { location?: string } };
+    const location = String(info.project?.location ?? "").trim() || "Antananarivo, Analamanga";
+    if (!window.confirm(`${materials.length} matériau(x) vont être cherchés sur internet (${materials.map((item) => item.search).join(", ")}). Cela utilise des crédits IA, mais chaque prix trouvé servira ensuite à TOUS tes devis. Lancer ?`)) return;
+    stopRef.current = false;
+    let found = 0; let failed = "";
+    for (let index = 0; index < materials.length; index += 1) {
+      if (stopRef.current || failed) break;
+      const material = materials[index];
+      setProgress({ current: index + 1, total: materials.length, label: material.search });
+      try {
+        const response = await fetch("/api/prices/internet-search", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ designation: material.search, categorie: "Composants de prix", unite: material.unit, daoQuantity: 0, pricingContext: "", worksiteName: project.name, worksiteLocation: location }),
+        });
+        const result = await response.json().catch(() => ({})) as { error?: string; found?: boolean; selected_price?: number };
+        if (!response.ok) { failed = result.error || "La recherche de prix est momentanément indisponible."; break; }
+        if (result.found && Number(result.selected_price) > 0) found += 1;
+      } catch { failed = "Connexion interrompue pendant la recherche des prix."; break; }
+    }
+    setProgress(null);
+    const next = await calculatePrices(true);
+    setMessage(`${found}/${materials.length} matériau(x) trouvé(s) sur internet. ${next ? `${next.saved} prix de lignes remplis.` : ""}${failed ? ` Arrêt : ${failed}` : ""}${next && next.missingMaterials.length > 0 ? ` Il manque encore : ${next.missingMaterials.map((item) => item.search).join(", ")} (à saisir dans la bibliothèque de prix).` : ""}`);
+  }
+
+  async function fillInternalPrices(onlyIds?: string[]) {
     setMessage("");
     const listResponse = await fetch(`/api/devis/projects/${project.id}/prices`, { cache: "no-store" });
     const list = await listResponse.json().catch(() => ({})) as { error?: string; project?: { location?: string }; missing?: Array<{ id: string; designation: string; unit: string; quantity: number; category: string }> };
     if (!listResponse.ok) { setMessage(list.error ?? "Lecture du devis impossible."); return; }
-    const missing = list.missing ?? [];
+    const missing = (list.missing ?? []).filter((line) => !onlyIds || onlyIds.includes(line.id));
     if (missing.length === 0) { setMessage("Tous les prix internes sont déjà remplis."); return; }
     // La recherche de prix a besoin du lieu du chantier (transport, fournisseurs proches).
     // Si le chantier n'a pas de localisation, les prix sont cherchés à Antananarivo (Analamanga).
     const location = String(list.project?.location ?? "").trim() || "Antananarivo, Analamanga";
-    if (!window.confirm(`${missing.length} prix restant(s) vont être cherchés sur internet. Cela utilise des crédits IA (les prix déjà connus de ta bibliothèque ne sont pas concernés : utilise d'abord « Remplir depuis la bibliothèque »). Lancer ?`)) return;
+    if (!window.confirm(`${missing.length} ligne(s) sans composition connue vont être cherchées directement sur internet. Cela utilise des crédits IA (les lignes calculables par matériaux ne sont pas concernées). Lancer ?`)) return;
 
     stopRef.current = false;
     let pending: Array<{ id: string; unit_price: number }> = [];
@@ -219,8 +272,9 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
           <p className="estimatePanelEyebrow">Prix du devis</p>
           <h3>Compléter les prix manquants</h3>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
-            {summary.missingInternal > 0 && !progress && <button type="button" className="estimatePrimaryAction" disabled={libraryBusy} onClick={() => void fillFromLibrary()}>{libraryBusy ? "Lecture de la bibliothèque…" : "1. Remplir depuis la bibliothèque (gratuit)"}</button>}
-            {summary.missingInternal > 0 && !progress && <button type="button" className="estimateSecondaryAction" disabled={libraryBusy} onClick={() => void fillInternalPrices()}>{libraryDone ? `2. Chercher les ${summary.missingInternal} prix restants sur internet (crédits IA)` : "2. Chercher les prix manquants sur internet (crédits IA)"}</button>}
+            {summary.missingInternal > 0 && !progress && <button type="button" className="estimatePrimaryAction" disabled={libraryBusy} onClick={() => void calculatePrices()}>{libraryBusy ? "Calcul en cours…" : "1. Calculer les prix internes (gratuit)"}</button>}
+            {calc && calc.missingMaterials.length > 0 && !progress && <button type="button" className="estimateSecondaryAction" disabled={libraryBusy} onClick={() => void searchMissingMaterials()}>{`2. Chercher le prix de ${calc.missingMaterials.length} matériau(x) manquant(s) sur internet (crédits IA)`}</button>}
+            {calc && calc.noCompositionIds.length > 0 && !progress && <button type="button" className="estimateSecondaryAction" disabled={libraryBusy} onClick={() => void fillInternalPrices(calc.noCompositionIds)}>{`3. Chercher ${calc.noCompositionIds.length} ligne(s) sans composition sur internet (crédits IA)`}</button>}
             {progress && <button type="button" className="estimateSecondaryAction" onClick={() => { stopRef.current = true; }}>Arrêter</button>}
             {summary.missingInternal === 0 && <span style={{ color: "#1f7a46", fontWeight: 700 }}>Prix internes complets</span>}
             {canGiveMargin && !progress && (
@@ -234,6 +288,35 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
             <p style={{ ...small, marginTop: 8 }}>Recherche {progress.current}/{progress.total} : {progress.label}</p>
             <div className="appProgress appProgressCompact" role="progressbar" aria-valuemin={0} aria-valuemax={progress.total} aria-valuenow={progress.current}><span style={{ width: `${Math.round(progress.current / progress.total * 100)}%` }} /></div>
           </>}
+          {summary.laborLines > 0 && <p style={{ ...small, marginTop: 8 }}>{summary.laborLines} ligne(s) de main-d'œuvre / chantier (installation, repli, dépose, démolition, nettoyage…) comptent 0 : leur coût est déjà dans les salaires.</p>}
+          {calc && calc.details.length > 0 && (
+            <details style={{ marginTop: 10 }}>
+              <summary style={{ cursor: "pointer", fontWeight: 700 }}>Détail des calculs ({calc.details.length} ligne(s))</summary>
+              <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                {calc.details.map((item) => (
+                  <div key={item.id} style={{ border: "1px solid #d1d5db", borderRadius: 8, padding: 8, background: "#fff" }}>
+                    <strong>{item.designation}</strong> <span style={small}>({item.unit}) — {item.status}{item.price !== null ? ` — ${formatAr(item.price)} / ${item.unit}` : ""}</span>
+                    {item.title && <div style={small}>{item.title}</div>}
+                    {item.notes?.map((note) => <div key={note} style={small}>{note}</div>)}
+                    {item.parts && item.parts.length > 0 && (
+                      <table style={{ width: "100%", marginTop: 4, fontSize: ".78rem" }}>
+                        <tbody>
+                          {item.parts.map((part) => (
+                            <tr key={part.designation}>
+                              <td>{part.designation}</td>
+                              <td style={{ textAlign: "right" }}>{part.quantity.toLocaleString("fr-FR")} {part.unit}</td>
+                              <td style={{ textAlign: "right" }}>{part.unitPrice !== null ? formatAr(part.unitPrice) : part.optional ? "non compté" : "prix manquant"}</td>
+                              <td style={{ textAlign: "right" }}>{part.unitPrice !== null ? formatAr(part.amount) : "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
         </section>
       )}
 
@@ -264,7 +347,8 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
                 const external = num(row.external_unit_price);
                 const amount = quantity * (view === "internal" ? internal : external);
                 grandTotal += amount;
-                const missing = view === "internal" ? internal <= 0 : external <= 0;
+                const labor = internal <= 0 && isLaborLine(row.designation);
+                const missing = view === "internal" ? internal <= 0 && !labor : external <= 0;
                 return (
                   <FragmentRows key={row.id} header={header} colSpan={view === "internal" ? 7 : 6}>
                     <tr style={missing ? { background: "#fff7ed" } : undefined}>
@@ -275,8 +359,8 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
                       {view === "internal" ? <>
                         <td className="border p-2" style={{ textAlign: "right" }}>
                           {isAdmin && !row.is_internal
-                            ? <input key={`${row.id}-${internal}`} type="text" inputMode="decimal" defaultValue={internal > 0 ? String(internal) : ""} placeholder="à remplir" onBlur={(event) => void savePrice(row, event.target.value)} style={{ width: 110, textAlign: "right" }} />
-                            : internal > 0 ? formatAr(internal) : "—"}
+                            ? <input key={`${row.id}-${internal}`} type="text" inputMode="decimal" defaultValue={internal > 0 ? String(internal) : ""} placeholder={labor ? "main-d'œuvre" : "à remplir"} onBlur={(event) => void savePrice(row, event.target.value)} style={{ width: 110, textAlign: "right" }} />
+                            : internal > 0 ? formatAr(internal) : labor ? "main-d'œuvre" : "—"}
                         </td>
                         <td className="border p-2" style={{ textAlign: "right" }}>{internal > 0 ? formatAr(quantity * internal) : "—"}</td>
                         <td className="border p-2" style={{ textAlign: "right" }}>{row.is_internal ? "Interne seulement" : external > 0 ? formatAr(external) : "—"}</td>

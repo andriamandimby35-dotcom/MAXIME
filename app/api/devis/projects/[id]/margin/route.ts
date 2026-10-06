@@ -20,12 +20,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const body = await request.json().catch(() => ({})) as { margin_percent?: number | string | null };
   const { data: itemsData, error: itemsError } = await supabase
     .from("project_price_items")
-    .select("id,quantity,unit_price,external_unit_price,is_internal")
+    .select("id,designation,quantity,unit_price,external_unit_price,is_internal")
     .eq("project_id", id)
     .eq("is_internal", false)
     .order("created_at", { ascending: true });
   if (itemsError) return NextResponse.json({ error: itemsError.message }, { status: 400 });
-  const items = (itemsData ?? []) as Array<{ id: string; quantity: number | null; unit_price: number | null; external_unit_price: number | null; is_internal: boolean | null }>;
+  const items = (itemsData ?? []) as Array<{ id: string; designation?: string | null; quantity: number | null; unit_price: number | null; external_unit_price: number | null; is_internal: boolean | null }>;
   const before = summarizeDevis(items);
 
   let marginPercent: number | null = null;

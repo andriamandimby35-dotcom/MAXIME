@@ -79,7 +79,7 @@ export default async function EstimatesPage() {
     for (let from = 0; ; from += 1000) {
       const { data: page, error } = await supabase
         .from("project_price_items")
-        .select("project_id,quantity,unit_price,external_unit_price,is_internal")
+        .select("project_id,designation,quantity,unit_price,external_unit_price,is_internal")
         .in("project_id", importedIds)
         .range(from, from + 999);
       if (error || !page || page.length === 0) break;
