@@ -90,7 +90,18 @@ export default async function EstimatesPage() {
   const imported = (importedProjects ?? [])
     .map((project) => ({ project, summary: summarizeDevis(itemsByProject.get(project.id) ?? []) }))
     .filter(({ summary }) => summary.lines > 0)
-    .map(({ project, summary }) => ({ id: project.id, name: project.name, createdAt: project.created_at ?? null, ...summary }));
+    .map(({ project, summary }) => {
+      let pairedInternal = 0;
+      let pairedExternal = 0;
+      for (const item of itemsByProject.get(project.id) ?? []) {
+        if (item.is_internal) continue;
+        const quantity = Number(item.quantity) || 1;
+        const internal = Number(item.unit_price) || 0;
+        const external = Number(item.external_unit_price) || 0;
+        if (internal > 0 && external > 0) { pairedInternal += quantity * internal; pairedExternal += quantity * external; }
+      }
+      return { id: project.id, name: project.name, createdAt: project.created_at ?? null, ...summary, profit: pairedInternal > 0 ? pairedExternal - pairedInternal : null };
+    });
   return <>
     <RealtimeRefresh channelName="estimates-list" tables={[{ table: "estimates", filter: `organization_id=eq.${organizationId}` }, "estimate_lines"]} />
     <EstimateList estimates={rows} imported={imported} />

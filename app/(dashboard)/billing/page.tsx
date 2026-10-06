@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { BillingProjectList } from "./billing-project-list";
+import { ArchivedClaims, type ArchivedClaim } from "./archived-claims";
 import { RealtimeRefresh } from "@/components/realtime-refresh";
 import { certifiedAmount } from "@/lib/billing";
 import { loadFinanceForProjects } from "@/lib/billing/project-finance";
@@ -39,6 +40,18 @@ export default async function BillingPage() {
       ])
     : [{ data: [] }, { data: [] }, { data: [] }];
 
+  // Factures payées gardées après la suppression de leur chantier.
+  let archivedClaims: ArchivedClaim[] = [];
+  if (organizationId) {
+    const archived = await supabase
+      .from("progress_claims")
+      .select("id,claim_number,issue_date,net_amount,client_name,project_name")
+      .eq("organization_id", organizationId)
+      .is("project_id", null)
+      .order("issue_date", { ascending: false });
+    archivedClaims = ((archived.data ?? []) as unknown as ArchivedClaim[]);
+  }
+
   const receivedByProject = new Map<string, number>();
   for (const payment of paymentsResult.data ?? []) {
     const key = String(payment.project_id);
@@ -51,7 +64,7 @@ export default async function BillingPage() {
   const claimsCountByProject = new Map<string, number>();
   const certifiedByProject = new Map<string, number>();
   for (const claim of claimsResult.data ?? []) {
-    if (claim.status === "rejected") continue;
+    if (claim.status === "rejected" || !claim.project_id) continue;
     const key = String(claim.project_id);
     claimsCountByProject.set(key, (claimsCountByProject.get(key) ?? 0) + 1);
     certifiedByProject.set(key, (certifiedByProject.get(key) ?? 0) + Number(claim.net_amount || 0));
@@ -89,5 +102,6 @@ export default async function BillingPage() {
       { table: "progress_claims", filter: `organization_id=eq.${organizationId}` },
     ]} />}
     <BillingProjectList projects={projects} />
+    <ArchivedClaims claims={archivedClaims} />
   </>;
 }

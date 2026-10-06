@@ -29,13 +29,19 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   const { data: member } = await supabase.from("organization_members").select("organization_id,organizations(id,name)").eq("user_id", user.id).limit(1).maybeSingle();
   if (!member?.organization_id) return NextResponse.json({ error: "Organisation introuvable." }, { status: 403 });
 
-  const { data: claim, error: claimError } = await supabase
-    .from("progress_claims")
-    .select("id,project_id,claim_number,client_name,issue_date,period_start,period_end,gross_amount,retention_rate,retention_amount,advance_repayment,other_deductions,tax_rate,tax_amount,net_amount")
-    .eq("id", id).eq("organization_id", member.organization_id).maybeSingle();
-  if (claimError || !claim) return NextResponse.json({ error: "Facture introuvable dans votre organisation." }, { status: 404 });
+  // Une facture payée d'un chantier supprimé est « archivée » : project_id est
+  // vide et le nom du chantier est gardé sur la facture (project_name).
+  const claimColumns = "id,project_id,claim_number,client_name,issue_date,period_start,period_end,gross_amount,retention_rate,retention_amount,advance_repayment,other_deductions,tax_rate,tax_amount,net_amount";
+  type ClaimRow = { id: string; project_id: string | null; project_name?: string | null; claim_number: string; client_name: string | null; issue_date: string; period_start: string | null; period_end: string | null; gross_amount: number | string; retention_rate: number | string; retention_amount: number | string; advance_repayment: number | string; other_deductions: number | string; tax_rate: number | string; tax_amount: number | string; net_amount: number | string };
+  let claimResult = await supabase.from("progress_claims").select(`${claimColumns},project_name`).eq("id", id).eq("organization_id", member.organization_id).maybeSingle();
+  // Colonne project_name pas encore créée (fichier SQL non exécuté) : lecture sans elle.
+  if (claimResult.error) claimResult = await supabase.from("progress_claims").select(claimColumns).eq("id", id).eq("organization_id", member.organization_id).maybeSingle() as unknown as typeof claimResult;
+  const claim = claimResult.data as unknown as ClaimRow | null;
+  if (claimResult.error || !claim) return NextResponse.json({ error: "Facture introuvable dans votre organisation." }, { status: 404 });
 
-  const storagePath = `${member.organization_id}/${claim.project_id}/${claim.id}.pdf`;
+  const storagePath = claim.project_id
+    ? `${member.organization_id}/${claim.project_id}/${claim.id}.pdf`
+    : `${member.organization_id}/archive/${claim.id}.pdf`;
   const storedFileName = `facture-${safeName(claim.claim_number)}.pdf`;
   const stored = await supabase.storage.from("billing-pdfs").download(storagePath);
   if (!stored.error && stored.data) {
@@ -67,7 +73,9 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   // POST /api/billing/claims) : on ne le relit plus depuis le DAO ici, pour
   // qu'une modification ultérieure du DAO ne change jamais une facture déjà
   // émise.
-  const { data: project } = await supabase.from("projects").select("id,name,location,source_tender_id").eq("id", claim.project_id).maybeSingle();
+  const { data: project } = claim.project_id
+    ? await supabase.from("projects").select("id,name,location,source_tender_id").eq("id", claim.project_id).maybeSingle()
+    : { data: null };
   const clientName = claim.client_name || "";
   let daoReference = "";
   if (project?.source_tender_id) {
@@ -116,7 +124,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     claimNumber: claim.claim_number,
     issueDate: new Intl.DateTimeFormat("fr-FR").format(new Date(claim.issue_date)),
     periodLabel,
-    projectName: project?.name || "",
+    projectName: project?.name || claim.project_name || "",
     projectLocation: project?.location || "",
     daoReference,
     clientName,

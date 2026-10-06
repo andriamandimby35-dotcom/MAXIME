@@ -110,10 +110,17 @@ function exclusivePartnerReferences(line: EstimateLineData) {
 /** Une seule décision « brique ou parpaing » couvre toutes les paires analogues. */
 function masonryChoiceOption(line: EstimateLineData) {
   if (exclusivePartnerReferences(line).length === 0) return "";
-  const text = normalizedLabel(Object.values(line).map((value) => String(value ?? "")).join(" "));
-  if (text.includes("parpaing")) return "parpaing";
-  if (text.includes("brique")) return "brique";
-  return "";
+  // Seul le texte visible de la ligne compte (désignation, unité...) : les champs
+  // techniques « __xxx » (dont __masonryChoice, écrit par le choix lui-même) sont
+  // ignorés, sinon le choix « parpaing » faisait classer la ligne « brique » comme
+  // parpaing, et « brique » faisait tout disparaître.
+  const text = normalizedLabel(Object.entries(line).filter(([key]) => !key.startsWith("__")).map(([, value]) => String(value ?? "")).join(" "));
+  const parpaing = text.indexOf("parpaing");
+  const brique = text.indexOf("brique");
+  if (parpaing < 0 && brique < 0) return "";
+  if (parpaing < 0) return "brique";
+  if (brique < 0) return "parpaing";
+  return parpaing < brique ? "parpaing" : "brique";
 }
 
 function sectionSubtotal(lines: EstimateLineData[], subtotalIndex: number) {
@@ -644,7 +651,19 @@ export default function EstimateBuilder({
     })).sort((left, right) =>
       Number((left as EstimateLineData).__sortOrder ?? numberFrom(left, POSITION_KEYS)) -
       Number((right as EstimateLineData).__sortOrder ?? numberFrom(right, POSITION_KEYS)));
-    setEstimateLines(loadedLines);
+    // Répare un choix « parpaing / brique » enregistré avec l'ancien défaut : on
+    // réapplique le choix mémorisé avec la bonne classification (l'enregistrement
+    // automatique sauvegarde ensuite la correction).
+    const storedMasonryChoice = loadedLines.map((line) => String(line.__masonryChoice ?? "")).find((choice) => choice === "parpaing" || choice === "brique");
+    const healedLines = storedMasonryChoice
+      ? loadedLines.map((line) => {
+        const variant = masonryChoiceOption(line);
+        if (!variant) return line;
+        const excluded = variant !== storedMasonryChoice;
+        return line.__excludedByChoice === excluded && line.__masonryChoice === storedMasonryChoice ? line : { ...line, __masonryChoice: storedMasonryChoice, __excludedByChoice: excluded };
+      })
+      : loadedLines;
+    setEstimateLines(healedLines);
     autoSaveSnapshotRef.current = estimateLinesSnapshot(loadedLines);
     const storedContext = loadedLines.find((line) => line.__worksiteLocation || line.__worksiteName);
     setWorksiteLocation(String(storedContext?.__worksiteLocation ?? ""));
@@ -2848,7 +2867,13 @@ export default function EstimateBuilder({
       </div>
 
       <div className="estimateDetailPanel">
-        <h3 className="text-lg font-bold">Détail du devis</h3>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "space-between" }}>
+          <h3 className="text-lg font-bold">Détail du devis</h3>
+          <div role="tablist" aria-label="Version du devis affichée" style={{ display: "flex", gap: 8 }}>
+            <button type="button" role="tab" aria-selected={!externalMarginPreview} className={!externalMarginPreview ? "estimatePrimaryAction" : "estimateSecondaryAction"} onClick={() => setExternalMarginPreview(false)}>Devis interne</button>
+            <button type="button" role="tab" aria-selected={externalMarginPreview} className={externalMarginPreview ? "estimatePrimaryAction" : "estimateSecondaryAction"} onClick={() => setExternalMarginPreview(true)}>Devis externe</button>
+          </div>
+        </div>
         {hasMasonryVariants && (
           <section className="mb-4 mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
             <h4 className="font-bold text-emerald-950">Choix de la maçonnerie</h4>
@@ -2907,7 +2932,7 @@ export default function EstimateBuilder({
               </tr>
             )}
             {estimateLines.map((item, index) =>
-              item.__disabledInternal === true || item.__excludedByChoice === true ? null : daoRowType(item) === "section" ? (
+              item.__disabledInternal === true || item.__excludedByChoice === true || (externalMarginPreview && item.__internalOnly === true) ? null : daoRowType(item) === "section" ? (
                 <tr key={index}>
                   <td
                     colSpan={daoColumns.length + 1 + (externalMarginPreview ? 2 : 0)}
@@ -3004,12 +3029,6 @@ export default function EstimateBuilder({
                     {column.name === columnName(daoColumns, ["Désignation", "Designation"]) && String(item.__daoNote ?? "").trim() && (
                       <small style={{ display: "block", marginTop: 5, color: "#6b4f12", lineHeight: 1.35, whiteSpace: "pre-line" }}>
                         {String(item.__daoNote)}
-                      </small>
-                    )}
-                    {/* Diagnostic temporaire : à retirer une fois le bug du choix maçonnerie identifié. */}
-                    {column.name === columnName(daoColumns, ["Désignation", "Designation"]) && masonryChoiceOption(item) !== "" && (
-                      <small style={{ display: "block", marginTop: 4, color: "#b91c1c", fontWeight: 700 }}>
-                        [DIAG] variante={masonryChoiceOption(item)} · __masonryChoice={String(item.__masonryChoice ?? "(vide)")} · __excludedByChoice={String(item.__excludedByChoice ?? "(vide)")} · id={String(item[LINE_ID_KEY] ?? "(aucun)")}
                       </small>
                     )}
                   </td>

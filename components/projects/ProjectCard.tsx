@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
+import { DeletionImpact } from "@/components/deletion/DeletionImpact";
 
 type Project = {
   id: string;
@@ -40,6 +41,7 @@ export function ProjectCard({
   const [error, setError] = useState<string | null>(null);
   const [closedAt, setClosedAt] = useState(project.closed_at ?? null);
   const [removed, setRemoved] = useState(false);
+  const [deleteReady, setDeleteReady] = useState(false);
 
   async function reopen() {
     setBusy(true);
@@ -60,18 +62,18 @@ export function ProjectCard({
   async function remove() {
     setBusy(true);
     setError(null);
-    // Suppression définitive : le chantier et tout ce qui lui est rattaché
-    // (rapports, photos, stocks, dépenses, accès…) sont supprimés en chaîne
-    // par la base de données. Le devis et l'appel d'offres à l'origine du
-    // chantier, eux, ne sont jamais touchés par cette suppression.
-    // Passe par une fonction dédiée (admin_delete_project) plutôt qu'une
-    // suppression directe : elle neutralise le temps de l'opération le
-    // verrou "modification le jour même" qui bloquait sinon la suppression
-    // en chaîne dès qu'une des saisies du chantier datait d'un jour précédent.
-    const { error: deleteError } = await supabase.rpc("admin_delete_project", { p_project_id: project.id });
+    // Suppression définitive : le chantier, ses dépenses, son planning, ses
+    // rapports... et ses factures NON payées. Les factures payées sont gardées
+    // (« Factures archivées »). Le devis et le DAO à l'origine du chantier ne
+    // sont pas touchés : la hiérarchie va du haut (DAO) vers le bas.
+    // Le serveur utilise la fonction admin_delete_project, qui neutralise le
+    // verrou "modification le jour même" pour la suppression en chaîne.
+    const response = await fetch(`/api/projects/${project.id}`, { method: "DELETE" });
+    const result = await response.json().catch(() => ({})) as { error?: string };
     setBusy(false);
-    if (deleteError) { setError(`Suppression impossible : ${deleteError.message}`); return; }
+    if (!response.ok) { setError(`Suppression impossible : ${result.error ?? "erreur inconnue"}`); setConfirming(null); return; }
     setRemoved(true);
+    router.refresh();
   }
 
   if (removed) return null;
@@ -103,9 +105,10 @@ export function ProjectCard({
       {confirming === "delete" && typeof document !== "undefined" && createPortal(
         <div className="modalBackdrop" onClick={() => setConfirming(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
           <h2 className="font-bold text-xl mb-4">Supprimer « {project.name} » ?</h2>
-          <p className="projectHint">Suppression définitive et irréversible : le chantier et tout ce qui lui est rattaché (rapports, photos, stocks, dépenses, accès…) seront supprimés. Le devis et l’appel d’offres à l’origine de ce chantier, eux, ne sont pas touchés.</p>
+          <p className="projectHint">Suppression définitive et irréversible. Le devis et le DAO à l’origine de ce chantier ne sont pas touchés.</p>
+          <DeletionImpact kind="project" id={project.id} onReady={setDeleteReady} />
           <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
-            <button type="button" className="dangerButton" disabled={busy} onClick={() => void remove()}>{busy ? "Suppression…" : "Confirmer la suppression"}</button>
+            <button type="button" className="dangerButton" disabled={busy || !deleteReady} onClick={() => void remove()}>{busy ? "Suppression…" : "Confirmer la suppression"}</button>
             <button type="button" className="ghostButton" onClick={() => setConfirming(null)}>Annuler</button>
           </div>
         </div></div>,
@@ -129,9 +132,10 @@ export function ProjectCard({
     {confirming === "delete" && typeof document !== "undefined" && createPortal(
       <div className="modalBackdrop" onClick={(event) => { event.stopPropagation(); setConfirming(null); }}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(420px,100%)" }}>
         <h2 className="font-bold text-xl mb-4">Supprimer « {project.name} » ?</h2>
-        <p className="projectHint">Suppression définitive et irréversible : le chantier et tout ce qui lui est rattaché (rapports, photos, stocks, dépenses, accès…) seront supprimés, clôturé ou non. Le devis et l’appel d’offres à l’origine de ce chantier, eux, ne sont pas touchés.</p>
+        <p className="projectHint">Suppression définitive et irréversible, clôturé ou non. Le devis et le DAO à l’origine de ce chantier ne sont pas touchés.</p>
+        <DeletionImpact kind="project" id={project.id} onReady={setDeleteReady} />
         <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
-          <button type="button" className="dangerButton" disabled={busy} onClick={() => void remove()}>{busy ? "Suppression…" : "Confirmer la suppression"}</button>
+          <button type="button" className="dangerButton" disabled={busy || !deleteReady} onClick={() => void remove()}>{busy ? "Suppression…" : "Confirmer la suppression"}</button>
           <button type="button" className="ghostButton" onClick={() => setConfirming(null)}>Annuler</button>
         </div>
       </div></div>,
