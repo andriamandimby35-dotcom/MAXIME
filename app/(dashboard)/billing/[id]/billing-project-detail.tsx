@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { certifiedAmount } from "@/lib/billing";
 import { usePdfViewer } from "@/components/PdfViewerProvider";
 import { overpaidAmount } from "@/lib/billing/pricing";
+import { matchTaskForItem } from "@/lib/billing/task-matching";
 
 type Project = { id: string; project_code: string | null; name: string; location: string | null; budget_amount: number | string | null; status: string | null; source_estimate_id: string | null; manual_margin_percent: number | string | null };
 type Payment = { id: string; progress_claim_id: string | null; payment_date: string; amount: number | string; method: string; reference: string | null; payment_type: string };
@@ -31,6 +32,7 @@ type DraftLine = {
   needsReview?: boolean;
   category?: string;
   subcategory?: string;
+  priceItemId?: string;
 };
 
 type Draft = {
@@ -51,6 +53,7 @@ type Draft = {
   netAmount: number;
   expensesWarning: string | null;
   unmatchedCount: number;
+  tasks: Array<{ id: string; title: string; progress: number }>;
 };
 
 type PricingInfo = {
@@ -93,6 +96,15 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
   const [draftMessage, setDraftMessage] = useState("");
   const [claimNumberInput, setClaimNumberInput] = useState("");
   const [issueDateInput, setIssueDateInput] = useState(today);
+  // Retenue de garantie et taxe de l'État : options (désactivées par défaut) ;
+  // mises sur la facture, elles sont déduites du total.
+  const [useRetention, setUseRetention] = useState(false);
+  const [useTax, setUseTax] = useState(false);
+  const [retentionRateInput, setRetentionRateInput] = useState("5");
+  const [taxRateInput, setTaxRateInput] = useState("8");
+  // Liens « ligne du devis → tâche du planning » choisis à la main.
+  const [taskLinks, setTaskLinks] = useState<Record<string, string>>({});
+  const [linkBusy, setLinkBusy] = useState(false);
 
   const netClaimsTotal = claims.filter((claim) => claim.status !== "rejected").reduce((sum, claim) => sum + Number(claim.net_amount || 0), 0);
   // Certifié = ce que le client doit payer (devis, prix de l'offre, ou
@@ -121,12 +133,15 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
   const hasSavedPricing = Boolean(pricing.contractAmount) || pricing.settingsMarginPercent !== null || pricing.settingsMarginAmount !== null;
 
   // Import des prix du devis (PDF) pour un chantier créé sans prix.
-  type ImportLine = { category: string; subcategory: string; designation: string; unit: string; quantity: number; unit_price: number };
+  type ImportLine = { category: string; subcategory: string; designation: string; unit: string; quantity: number; unit_price: number; task_id?: string };
+  type ImportTask = { id: string; title: string; progress_percent: number | string | null };
   const [importLines, setImportLines] = useState<ImportLine[] | null>(null);
   const [importTotal, setImportTotal] = useState<number | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   const [importMessage, setImportMessage] = useState("");
   const [importFile, setImportFile] = useState<File | null>(null);
+  const [importTasks, setImportTasks] = useState<ImportTask[]>([]);
+  const [createMissingTasks, setCreateMissingTasks] = useState(true);
 
   async function deletePricing() {
     if (!window.confirm("Supprimer le prix / la marge enregistrés pour ce chantier ?")) return;
@@ -149,8 +164,43 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     setImportBusy(false);
     if (!response.ok) return setImportMessage(result.error ?? "Lecture du PDF impossible.");
     setImportLines(result.price_lines ?? []);
+    setImportTasks(result.tasks ?? []);
     setImportTotal(result.devis_total ?? null);
   }
+
+  // Charge les lignes déjà enregistrées pour les compléter à la main (sans IA).
+  async function loadExistingDevis() {
+    setImportBusy(true); setImportMessage(""); setImportLines(null);
+    const response = await fetch(`/api/billing/projects/${project.id}/import-devis`);
+    const result = await response.json().catch(() => ({}));
+    setImportBusy(false);
+    if (!response.ok) return setImportMessage(result.error ?? "Lecture du devis impossible.");
+    setImportLines(result.price_lines ?? []);
+    setImportTasks(result.tasks ?? []);
+    setImportTotal(null);
+  }
+
+  const updateImportLine = (index: number, patch: Partial<ImportLine>) =>
+    setImportLines((lines) => (lines ? lines.map((line, i) => (i === index ? { ...line, ...patch } : line)) : lines));
+  const removeImportLine = (index: number) => setImportLines((lines) => (lines ? lines.filter((_, i) => i !== index) : lines));
+  const addImportLine = (line?: Partial<ImportLine>) =>
+    setImportLines((lines) => [...(lines ?? []), { category: "", subcategory: "", designation: "", unit: "", quantity: 1, unit_price: 0, ...line }]);
+
+  // Contrôles de complétude, recalculés à chaque modification : lignes du devis
+  // sans tâche (à ajouter au planning) et tâches du planning sans prix (à ajouter
+  // à la facture).
+  const importCheck = importLines ? (() => {
+    const taskIdOf = importLines.map((line) => (line.task_id && importTasks.some((task) => task.id === line.task_id)
+      ? line.task_id
+      : matchTaskForItem({ designation: line.designation, subcategory: line.subcategory, category: line.category }, importTasks.map((task) => ({ id: task.id, title: task.title, progress_percent: task.progress_percent })))?.id ?? null));
+    const used = new Set(taskIdOf.filter(Boolean));
+    return {
+      total: importLines.reduce((sum, line) => sum + line.quantity * line.unit_price, 0),
+      linesWithoutTask: taskIdOf.filter((id) => !id).length,
+      tasksWithoutLine: importTasks.filter((task) => !used.has(task.id)),
+      withoutPrice: importLines.filter((line) => !(line.unit_price > 0) || !line.designation.trim()).length,
+    };
+  })() : null;
 
   async function saveImportedDevis() {
     if (!importLines) return;
@@ -158,16 +208,25 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     const response = await fetch(`/api/billing/projects/${project.id}/import-devis`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ price_lines: importLines }),
+      body: JSON.stringify({ price_lines: importLines, create_missing_tasks: createMissingTasks }),
     });
     const result = await response.json().catch(() => ({}));
     setImportBusy(false);
     if (!response.ok) return setImportMessage(result.error ?? "Enregistrement impossible.");
     setImportLines(null);
     setImportFile(null);
-    setImportMessage("Prix du devis enregistrés.");
+    setImportMessage(`Devis enregistré (${result.count} lignes).${result.createdTasks ? ` ${result.createdTasks} tâche(s) ajoutée(s) au planning, à 0 %.` : ""}${result.unmatched ? ` ${result.unmatched} ligne(s) restent sans tâche : tu pourras les relier depuis « Générer une facture ».` : ""}`);
     router.refresh();
   }
+
+  // Totaux de la facture selon les options choisies (même calcul que le serveur).
+  const round2 = (value: number) => Math.round(value * 100) / 100;
+  const totals = draft ? (() => {
+    const retention = useRetention ? round2(draft.grossAmount * (Number(retentionRateInput) || 0) / 100) : 0;
+    const taxable = Math.max(0, draft.grossAmount - retention - draft.advanceRepayment - draft.otherDeductions);
+    const tax = useTax ? round2(taxable * (Number(taxRateInput) || 0) / 100) : 0;
+    return { retention, tax, net: round2(Math.max(0, taxable - tax)) };
+  })() : null;
 
   function startEditPayment(payment: Payment) {
     setEditingPaymentId(payment.id);
@@ -277,6 +336,32 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
     setIssueDateInput(today);
   }
 
+  async function reloadDraft() {
+    if (!draft) return;
+    const response = await fetch(`/api/billing/claims/draft?project_id=${project.id}&client_name=${encodeURIComponent(draft.clientName)}&margin=${Number(draft.marginPercent) || 0}`);
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) return setDraftMessage(result.error ?? "Calcul impossible.");
+    if (result.needsMarginInput || result.needsClientInput) return;
+    setDraft(result);
+    setTaskLinks({});
+  }
+
+  // Enregistre les liens choisis (ou « créer la tâche »), puis recalcule la facture.
+  async function saveTaskLinks(links: Array<{ price_item_id: string; task_id: string }>) {
+    if (links.length === 0) return setDraftMessage("Choisis d'abord une tâche pour au moins une ligne.");
+    setLinkBusy(true); setDraftMessage("");
+    const response = await fetch(`/api/billing/projects/${project.id}/link-tasks`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ links }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) { setLinkBusy(false); return setDraftMessage(result.error ?? "Enregistrement des liens impossible."); }
+    await reloadDraft();
+    setLinkBusy(false);
+    setDraftMessage(result.created ? `${result.created} tâche(s) ajoutée(s) au planning (à 0 %). Mets à jour leur avancement dans le planning du chantier.` : "Liens enregistrés, facture recalculée.");
+  }
+
   async function validateInvoice() {
     if (!draft) return;
     setDraftBusy(true); setDraftMessage("");
@@ -288,8 +373,8 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
         claim_number: claimNumberInput,
         client_name: draft.clientName,
         issue_date: issueDateInput,
-        retention_rate: draft.retentionRate,
-        tax_rate: draft.taxRate,
+        retention_rate: useRetention ? Number(retentionRateInput) || 0 : 0,
+        tax_rate: useTax ? Number(taxRateInput) || 0 : 0,
         advance_repayment: draft.advanceRepayment,
         other_deductions: draft.otherDeductions,
         margin_percent: draft.marginPercent,
@@ -424,12 +509,13 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
         </div>
       )}
 
-      {isAdmin && !pricing.hasDevis && (
+      {isAdmin && (
         <div className="panel" style={{ marginTop: "16px" }}>
-          <h3 style={{ marginTop: 0 }}>Importer les prix du devis (PDF)</h3>
+          <h3 style={{ marginTop: 0 }}>{pricing.hasDevis ? "Devis chiffré du chantier" : "Importer les prix du devis (PDF)"}</h3>
           <p style={{ fontSize: ".85rem", color: "#666" }}>
-            Si les prix du devis n'ont pas été lus à la création du chantier, donne ici le PDF du devis chiffré : l'application en extrait les catégories, sous-catégories et prix,
-            tu les vérifies, puis la facture sera faite exactement comme le devis (avancement tiré du planning). Le planning du chantier n'est pas modifié.
+            {pricing.hasDevis
+              ? "Le devis chiffré de ce chantier est enregistré. S'il est incomplet, complète-le à la main ou relis le PDF (le nouveau relevé remplace l'ancien). La facture est faite exactement comme ce devis."
+              : "Si les prix du devis n'ont pas été lus à la création du chantier, donne ici le PDF du devis chiffré : l'application en extrait les catégories, sous-catégories et prix, tu les vérifies, puis la facture sera faite exactement comme le devis (avancement tiré du planning)."}
           </p>
           {!importLines && (
             <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
@@ -437,29 +523,69 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
               <button type="button" className="button" disabled={importBusy || !importFile} onClick={() => importFile && void readDevisPdf(importFile)}>
                 {importBusy ? "Lecture en cours…" : "Lire le devis (utilise l'IA)"}
               </button>
+              {pricing.hasDevis && <button type="button" className="ghostButton" disabled={importBusy} onClick={() => void loadExistingDevis()}>Compléter les lignes à la main</button>}
             </div>
           )}
-          {importBusy && !importLines && <p className="notice" style={{ marginTop: "10px" }}>Lecture du PDF en cours (cela peut prendre une minute)…</p>}
-          {importLines && (
+          {importBusy && !importLines && <p className="notice" style={{ marginTop: "10px" }}>Lecture en cours (cela peut prendre une minute)…</p>}
+          {importLines && importCheck && (
             <div style={{ marginTop: "10px" }}>
-              <p><strong>{importLines.length} lignes chiffrées trouvées</strong>{importTotal ? ` · total écrit dans le devis : ${ariary.format(importTotal)} Ar` : ""} · total calculé : <strong>{ariary.format(importLines.reduce((sum, line) => sum + line.quantity * line.unit_price, 0))} Ar</strong></p>
-              <div style={{ maxHeight: "320px", overflow: "auto" }}>
-                <table style={{ width: "100%", fontSize: ".85rem" }}>
-                  <thead><tr><th>Catégorie</th><th>Sous-catégorie</th><th>Désignation</th><th>Qté</th><th>Prix unitaire</th><th>Montant</th></tr></thead>
+              <p>
+                <strong>{importLines.length} lignes</strong> · total calculé : <strong>{ariary.format(importCheck.total)} Ar</strong>
+                {importTotal ? ` · total écrit dans le devis : ${ariary.format(importTotal)} Ar` : ""}
+              </p>
+              {importTotal && Math.abs(importCheck.total - importTotal) > Math.max(1, importTotal * 0.001) && (
+                <p className="notice" style={{ background: "#fbeee0" }}>
+                  ⚠ Écart de {ariary.format(Math.abs(importCheck.total - importTotal))} Ar avec le total écrit dans le devis : il manque probablement des lignes (ou un prix est faux). Ajoute-les avec « ➕ Ajouter une ligne » ci-dessous, avant d'enregistrer.
+                </p>
+              )}
+              {importTotal && Math.abs(importCheck.total - importTotal) <= Math.max(1, importTotal * 0.001) && (
+                <p className="notice" style={{ background: "#e5f8eb" }}>✔ Le total calculé correspond au total du devis : rien ne manque.</p>
+              )}
+              <div style={{ maxHeight: "380px", overflow: "auto" }}>
+                <table style={{ width: "100%", fontSize: ".8rem", minWidth: "860px" }}>
+                  <thead><tr><th>Catégorie</th><th>Sous-catégorie</th><th>Désignation</th><th>Unité</th><th>Qté</th><th>Prix unitaire</th><th>Montant</th><th /></tr></thead>
                   <tbody>
                     {importLines.map((line, index) => (
-                      <tr key={index}>
-                        <td>{line.category}</td><td>{line.subcategory}</td><td>{line.designation}</td>
-                        <td>{line.quantity} {line.unit}</td>
-                        <td>{ariary.format(line.unit_price)}</td>
+                      <tr key={index} style={!(line.unit_price > 0) ? { background: "#fdecec" } : undefined}>
+                        <td><input value={line.category} onChange={(e) => updateImportLine(index, { category: e.target.value })} /></td>
+                        <td><input value={line.subcategory} onChange={(e) => updateImportLine(index, { subcategory: e.target.value })} /></td>
+                        <td><input value={line.designation} onChange={(e) => updateImportLine(index, { designation: e.target.value })} /></td>
+                        <td><input value={line.unit} style={{ maxWidth: "70px" }} onChange={(e) => updateImportLine(index, { unit: e.target.value })} /></td>
+                        <td><input type="number" min="0" step="any" value={line.quantity} style={{ maxWidth: "90px" }} onChange={(e) => updateImportLine(index, { quantity: Number(e.target.value) || 0 })} /></td>
+                        <td><input type="number" min="0" step="any" value={line.unit_price} style={{ maxWidth: "120px" }} onChange={(e) => updateImportLine(index, { unit_price: Number(e.target.value) || 0 })} /></td>
                         <td>{ariary.format(line.quantity * line.unit_price)}</td>
+                        <td><button type="button" className="ghostButton" onClick={() => removeImportLine(index)} title="Retirer cette ligne">✕</button></td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
+              <button type="button" className="ghostButton" style={{ marginTop: "8px" }} onClick={() => addImportLine()}>➕ Ajouter une ligne</button>
+
+              {importCheck.withoutPrice > 0 && (
+                <p className="notice" style={{ background: "#fdecec", marginTop: "10px" }}>⚠ {importCheck.withoutPrice} ligne(s) sans prix ou sans désignation (en rouge) : elles ne seront pas enregistrées tant qu'elles ne sont pas complétées.</p>
+              )}
+
+              {importCheck.tasksWithoutLine.length > 0 && (
+                <div className="notice" style={{ background: "#fbeee0", marginTop: "10px" }}>
+                  <strong>{importCheck.tasksWithoutLine.length} tâche(s) du planning n'ont aucune ligne dans ce devis</strong> (donc rien à facturer pour elles). Si le devis les contient, ajoute-les à la facture et renseigne leur prix :
+                  <span style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "6px" }}>
+                    {importCheck.tasksWithoutLine.map((task) => (
+                      <button key={task.id} type="button" className="ghostButton" onClick={() => addImportLine({ designation: task.title, task_id: task.id })}>➕ {task.title}</button>
+                    ))}
+                  </span>
+                </div>
+              )}
+
+              {importCheck.linesWithoutTask > 0 && (
+                <label style={{ display: "flex", flexDirection: "row", gap: "8px", alignItems: "center", width: "auto", marginTop: "10px" }}>
+                  <input type="checkbox" style={{ width: "auto", margin: 0 }} checked={createMissingTasks} onChange={(e) => setCreateMissingTasks(e.target.checked)} />
+                  <span>Ajouter au planning (à 0 %) les {importCheck.linesWithoutTask} ligne(s) du devis qui n'ont pas de tâche</span>
+                </label>
+              )}
+
               <div style={{ display: "flex", gap: "8px", marginTop: "10px", flexWrap: "wrap" }}>
-                <button type="button" className="button" disabled={importBusy} onClick={() => void saveImportedDevis()}>{importBusy ? "Enregistrement…" : "Enregistrer ces prix"}</button>
+                <button type="button" className="button" disabled={importBusy || importLines.length === 0} onClick={() => void saveImportedDevis()}>{importBusy ? "Enregistrement…" : pricing.hasDevis ? "Enregistrer (remplace l'ancien devis)" : "Enregistrer ces prix"}</button>
                 <button type="button" className="ghostButton" disabled={importBusy} onClick={() => setImportLines(null)}>Annuler</button>
               </div>
             </div>
@@ -512,7 +638,16 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
             {draft.expensesWarning && <p className="notice" style={{ background: "#fbeee0" }}>⚠ {draft.expensesWarning}</p>}
             {draft.unmatchedCount > 0 && (
               <p className="notice" style={{ background: "#fbeee0" }}>
-                ⚠ {draft.unmatchedCount} ligne(s) du devis n'ont trouvé aucune tâche correspondante dans le planning : elles restent à 0 Ar cette fois (repérables ci-dessous par "non reconnue").
+                ⚠ {draft.unmatchedCount} ligne(s) du devis ne sont reliées à aucune tâche du planning : elles restent à 0 Ar tant que ce lien manque (repérables ci-dessous par « non reconnue »).
+                Pour chacune, choisis la tâche du planning qui correspond, ou « Créer cette tâche dans le planning » si elle manque. Le lien est retenu pour les prochaines factures.
+                <span style={{ display: "flex", gap: "8px", marginTop: "8px", flexWrap: "wrap" }}>
+                  <button type="button" className="button" disabled={linkBusy} onClick={() => void saveTaskLinks(Object.entries(taskLinks).filter(([, value]) => value).map(([price_item_id, task_id]) => ({ price_item_id, task_id })))}>
+                    {linkBusy ? "Enregistrement…" : "Enregistrer les liens choisis"}
+                  </button>
+                  <button type="button" className="ghostButton" disabled={linkBusy} onClick={() => void saveTaskLinks(draft.lines.filter((line) => line.needsReview && line.priceItemId).map((line) => ({ price_item_id: line.priceItemId as string, task_id: "new" })))}>
+                    Créer une tâche pour toutes les lignes non reconnues
+                  </button>
+                </span>
               </p>
             )}
 
@@ -534,7 +669,20 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
                     {newCategory && <tr><td colSpan={8} style={{ background: "#e3ebe5", fontWeight: 800 }}>{line.category}</td></tr>}
                     {newSubcategory && <tr><td colSpan={8} style={{ background: "#f0f4f1", fontWeight: 700, paddingLeft: "22px" }}>{line.subcategory}</td></tr>}
                     <tr>
-                      <td>{line.designation}{line.needsReview && <span className="pill" style={{ marginLeft: "6px", background: "#fbeee0" }}>non reconnue</span>}</td>
+                      <td>
+                        {line.designation}{line.needsReview && <span className="pill" style={{ marginLeft: "6px", background: "#fbeee0" }}>non reconnue</span>}
+                        {line.needsReview && line.priceItemId && (
+                          <select
+                            value={taskLinks[line.priceItemId] ?? ""}
+                            onChange={(e) => setTaskLinks({ ...taskLinks, [line.priceItemId as string]: e.target.value })}
+                            style={{ display: "block", marginTop: "4px", maxWidth: "260px", fontSize: ".8rem" }}
+                          >
+                            <option value="">Relier à une tâche du planning…</option>
+                            {draft.tasks.map((task) => <option key={task.id} value={task.id}>{task.title} ({task.progress} %)</option>)}
+                            <option value="new">➕ Créer cette tâche dans le planning</option>
+                          </select>
+                        )}
+                      </td>
                       <td>{line.unit}</td>
                       <td>{line.contractQuantity === null ? "—" : line.contractQuantity}</td>
                       <td>{line.unitPrice === null ? "—" : `${ariary.format(line.unitPrice)} Ar`}</td>
@@ -550,11 +698,28 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
               </table>
             </div>
 
-            <div className="formGrid" style={{ marginTop: "12px" }}>
-              <div><span className="pill">Montant brut</span><p>{ariary.format(draft.grossAmount)} Ar</p></div>
-              <div><span className="pill">Retenue de garantie ({draft.retentionRate} %)</span><p>- {ariary.format(draft.retentionAmount)} Ar</p></div>
-              <div><span className="pill">Taxe de l'État ({draft.taxRate} %)</span><p>+ {ariary.format(draft.taxAmount)} Ar</p></div>
-              <div><span className="pill">Net à payer</span><p><strong>{ariary.format(draft.netAmount)} Ar</strong></p></div>
+            <div style={{ marginTop: "12px", display: "grid", gap: "10px" }}>
+              <div><span className="pill">Montant brut</span><p style={{ margin: "4px 0" }}>{ariary.format(draft.grossAmount)} Ar</p></div>
+              <p style={{ fontSize: ".85rem", color: "#666", margin: 0 }}>Options à mettre ou non sur la facture. Si elles sont mises, elles sont <strong>déduites</strong> du total (jamais ajoutées à payer).</p>
+              <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+                <label style={{ display: "flex", flexDirection: "row", gap: "8px", alignItems: "center", width: "auto" }}>
+                  <input type="checkbox" style={{ width: "auto", margin: 0 }} checked={useRetention} onChange={(e) => setUseRetention(e.target.checked)} /> <span>Retenue de garantie</span>
+                </label>
+                {useRetention && (<>
+                  <input type="number" min="0" step="0.1" value={retentionRateInput} onChange={(e) => setRetentionRateInput(e.target.value)} style={{ maxWidth: "80px" }} /> <span>%</span>
+                  <strong>- {ariary.format(totals?.retention ?? 0)} Ar</strong>
+                </>)}
+              </div>
+              <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+                <label style={{ display: "flex", flexDirection: "row", gap: "8px", alignItems: "center", width: "auto" }}>
+                  <input type="checkbox" style={{ width: "auto", margin: 0 }} checked={useTax} onChange={(e) => setUseTax(e.target.checked)} /> <span>Taxe de l'État</span>
+                </label>
+                {useTax && (<>
+                  <input type="number" min="0" step="0.1" value={taxRateInput} onChange={(e) => setTaxRateInput(e.target.value)} style={{ maxWidth: "80px" }} /> <span>%</span>
+                  <strong>- {ariary.format(totals?.tax ?? 0)} Ar</strong>
+                </>)}
+              </div>
+              <div><span className="pill">Net à payer</span><p style={{ margin: "4px 0" }}><strong>{ariary.format(totals?.net ?? 0)} Ar</strong></p></div>
             </div>
 
             <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>

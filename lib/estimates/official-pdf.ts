@@ -1,3 +1,5 @@
+import { amountInWordsFr } from "@/lib/number-to-words-fr";
+
 export type OfficialPdfRow =
   | { kind: "section"; title: string }
   | { kind: "item"; number: string; designation: string; unit: string; quantity: number; unitPrice: number; total: number }
@@ -22,14 +24,16 @@ export type OfficialPdfInput = {
   internalFinancialSummary?: Array<{ title: string; total: number }>;
 };
 
-const PAGE_WIDTH = 841.89;
-const PAGE_HEIGHT = 595.28;
+// Format A4 PORTRAIT, toujours (règle de l'application : tout PDF à imprimer
+// est en portrait).
+const PAGE_WIDTH = 595.28;
+const PAGE_HEIGHT = 841.89;
 const LEFT = 34;
 const RIGHT = 34;
 const TOP = 30;
 const BOTTOM = 30;
 const TABLE_WIDTH = PAGE_WIDTH - LEFT - RIGHT;
-const COLUMN_WIDTHS = [42, 420, 54, 70, 88, 99];
+const COLUMN_WIDTHS = [30, 218, 36, 56, 86, 101.28]; // somme = TABLE_WIDTH (527.28)
 
 type DrawCommand = { text: string; x: number; y: number; size: number; bold?: boolean };
 type LineCommand = { x1: number; y1: number; x2: number; y2: number; width?: number };
@@ -108,27 +112,34 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
   let y = 0;
   const addText = (text: string, x: number, baseline: number, size = 9, bold = false) => page.draw.push({ text, x, y: baseline, size, bold });
   const drawTableHeader = () => {
-    const height = 22;
+    const height = 26;
     page.fills.push({ x: LEFT, y: y - height + 5, width: TABLE_WIDTH, height, gray: 0.9 });
     const extractedLabels = input.bdqeLayout?.detail_table?.columns ?? [];
     const labels = extractedLabels.length === 6 ? extractedLabels : ["N°", "DÉSIGNATION", "UNITÉ", "QUANTITÉ", "PRIX UNITAIRE", "TOTAL"];
     let x = LEFT;
-    labels.forEach((label, index) => { addText(label, x + 4, y - 9, 7.2, true); x += COLUMN_WIDTHS[index]; });
+    labels.forEach((label, index) => { wrapText(label, COLUMN_WIDTHS[index] - 10, 7.6).slice(0, 2).forEach((part, lineIndex) => addText(part, x + 3, y - 9 - lineIndex * 8, 7, true)); x += COLUMN_WIDTHS[index]; });
     y -= height;
   };
   const newPage = () => {
     page = { draw: [], lines: [], fills: [] }; pages.push(page); y = PAGE_HEIGHT - TOP;
-    addText(input.companyName, LEFT, y, 15, true);
-    addText("DEVIS OFFICIEL - DAO", PAGE_WIDTH - RIGHT - 180, y, 13, true); y -= 18;
-    for (const detail of input.companyDetails.slice(0, 3)) { addText(detail, LEFT, y, 7.5); y -= 10; }
-    addText(`DAO : ${input.daoTitle}`, LEFT + 330, PAGE_HEIGHT - TOP - 20, 9, true);
-    if (input.daoReference) addText(`Référence : ${input.daoReference}`, LEFT + 330, PAGE_HEIGHT - TOP - 32, 8);
-    if (input.clientName) addText(`Client : ${input.clientName}`, LEFT + 520, PAGE_HEIGHT - TOP - 32, 8);
-    addText(`Date : ${input.estimateDate}`, LEFT + 520, PAGE_HEIGHT - TOP - 44, 8);
-    y = PAGE_HEIGHT - TOP - 58;
-    page.lines.push({ x1: LEFT, y1: y, x2: PAGE_WIDTH - RIGHT, y2: y, width: 1 }); y -= 22;
+    // En-tête portrait : la société à gauche, le devis et le DAO à droite.
+    const RIGHT_X = LEFT + 290;
+    const RIGHT_WIDTH = PAGE_WIDTH - RIGHT - RIGHT_X;
+    const top = y;
+    let leftY = top;
+    wrapText(input.companyName, 260, 15).slice(0, 2).forEach((part) => { addText(part, LEFT, leftY, 15, true); leftY -= 17; });
+    for (const detail of input.companyDetails.slice(0, 3)) {
+      wrapText(detail, 260, 7.5).slice(0, 2).forEach((part) => { addText(part, LEFT, leftY, 7.5); leftY -= 9.5; });
+    }
+    let rightY = top;
+    addText("DEVIS OFFICIEL - DAO", RIGHT_X, rightY, 13, true); rightY -= 17;
+    wrapText(`DAO : ${input.daoTitle}`, RIGHT_WIDTH, 9).slice(0, 3).forEach((part) => { addText(part, RIGHT_X, rightY, 9, true); rightY -= 11; });
+    const extra = [input.daoReference ? `Référence : ${input.daoReference}` : "", input.clientName ? `Client : ${input.clientName}` : "", `Date : ${input.estimateDate}`].filter(Boolean);
+    extra.forEach((text) => wrapText(text, RIGHT_WIDTH, 8).slice(0, 2).forEach((part) => { addText(part, RIGHT_X, rightY, 8); rightY -= 10.5; }));
+    y = Math.min(leftY, rightY) - 6;
+    page.lines.push({ x1: LEFT, y1: y, x2: PAGE_WIDTH - RIGHT, y2: y, width: 1 }); y -= 20;
     const detailTitle = cleanText(input.bdqeLayout?.detail_table?.title);
-    if (detailTitle) { addText(detailTitle.toLocaleUpperCase("fr-FR"), LEFT, y, 9, true); y -= 15; }
+    if (detailTitle) { wrapText(detailTitle.toLocaleUpperCase("fr-FR"), TABLE_WIDTH * 0.78, 9).slice(0, 2).forEach((part) => { addText(part, LEFT, y, 9, true); y -= 12; }); y -= 3; }
     drawTableHeader();
   };
   const ensureSpace = (height: number) => { if (y - height < BOTTOM + 18) newPage(); };
@@ -139,19 +150,23 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
     page.lines.push({ x1: x, y1: top, x2: x, y2: top - height, width: 0.55 });
     page.lines.push({ x1: x + width, y1: top, x2: x + width, y2: top - height, width: 0.55 });
     const size = 8.2;
-    const rendered = cleanText(value);
-    const estimatedWidth = rendered.length * size * 0.48;
+    let rendered = cleanText(value);
+    // Texte trop long pour la case : on le raccourcit plutôt que de le laisser déborder.
+    const charWidth = size * (rendered === rendered.toLocaleUpperCase("fr-FR") ? 0.64 : 0.5); // les majuscules sont plus larges
+    const maxChars = Math.max(4, Math.floor((width - 10) / charWidth));
+    if (rendered.length > maxChars) rendered = `${rendered.slice(0, maxChars - 3)}...`;
+    const estimatedWidth = rendered.length * charWidth;
     const textX = align === "center" ? x + Math.max(4, (width - estimatedWidth) / 2) : align === "right" ? x + Math.max(4, width - estimatedWidth - 4) : x + 5;
     addText(rendered, textX, top - Math.min(12, height - 5), size, bold);
   };
   const recapPage = (title: string, entries: Array<{ reference?: string; title: string; total: number }>, withSignature = false, showTotal = true, reference = "") => {
     page = { draw: [], lines: [], fills: [] }; pages.push(page); y = PAGE_HEIGHT - TOP;
     addText(input.companyName, LEFT, y, 14, true);
-    addText("BDQE - RÉCAPITULATION", PAGE_WIDTH - RIGHT - 190, y, 12, true);
+    addText("BDQE - RÉCAPITULATION", PAGE_WIDTH - RIGHT - 175, y, 12, true);
     y -= 38;
     const template = (input.bdqeLayout?.recap_tables ?? []).find((item) => cleanText(item.reference) === cleanText(reference) || cleanText(item.title).toLocaleLowerCase("fr-FR") === cleanText(title).replace(/^récapitulation\s+/i, "").toLocaleLowerCase("fr-FR"));
     const labels = template?.columns?.length === 3 ? template.columns : ["REF", "DÉSIGNATION", "MONTANT (Ar)"];
-    const refWidth = 58; const titleWidth = 490; const amountWidth = TABLE_WIDTH - refWidth - titleWidth;
+    const refWidth = 50; const amountWidth = 120; const titleWidth = TABLE_WIDTH - refWidth - amountWidth;
     const headingHeight = 24;
     drawCell(LEFT, y, TABLE_WIDTH, headingHeight, title.toLocaleUpperCase("fr-FR"), true, "center");
     y -= headingHeight;
@@ -178,26 +193,34 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
     } else y -= 16;
     if (withSignature) {
       addText("Arrêté le présent bordereau détail quantitatif et estimatif à la somme de :", LEFT, y, 9); y -= 14;
-      addText("................................................................................................................................", LEFT, y, 9); y -= 16;
+      // Somme en toutes lettres (total de la récapitulation) ; à défaut de
+      // montant, la ligne de points à remplir à la main.
+      const sumWords = entries.reduce((sum, entry) => sum + entry.total, 0) > 0 ? `${amountInWordsFr(entries.reduce((sum, entry) => sum + entry.total, 0))}.` : "";
+      if (sumWords) { wrapText(sumWords, TABLE_WIDTH * 0.88, 9).forEach((part) => { addText(part, LEFT, y, 9, true); y -= 12; }); y -= 4; }
+      else { addText("................................................................................................................................", LEFT, y, 9); y -= 16; }
       addText("Fait à, ........................................ le ........................................", LEFT, y, 9); y -= 28;
       addText("Le Soumissionnaire", LEFT, y, 10, true); y -= 44;
       const annotations = input.bdqeLayout?.annotations?.filter(Boolean) ?? [];
-      annotations.slice(0, 3).forEach((annotation) => { addText(annotation, LEFT, y, 8); y -= 11; });
+      annotations.slice(0, 3).flatMap((annotation) => wrapText(annotation, TABLE_WIDTH, 8)).forEach((part) => { addText(part, LEFT, y, 8); y -= 11; });
     }
   };
 
   newPage();
   for (const row of input.rows) {
     if (row.kind === "section") {
-      ensureSpace(30); const height = 26;
+      const sectionLines = wrapText(row.title.toLocaleUpperCase("fr-FR"), (TABLE_WIDTH - 16) * 0.78, 9.5).slice(0, 2);
+      const height = 26 + (sectionLines.length - 1) * 11;
+      ensureSpace(height + 4);
       page.fills.push({ x: LEFT, y: y - height + 5, width: TABLE_WIDTH, height, gray: 0.86 });
-      addText(row.title.toLocaleUpperCase("fr-FR"), LEFT + 6, y - 11, 9.5, true);
+      sectionLines.forEach((part, index) => addText(part, LEFT + 6, y - 11 - index * 11, 9.5, true));
       horizontalLine(y - height + 5, 0.8); y -= height; continue;
     }
     if (row.kind === "subtotal") {
-      ensureSpace(27); const height = 24;
+      const subtotalLines = wrapText(`SOUS-TOTAL ${row.title}`, (TABLE_WIDTH - COLUMN_WIDTHS[0] - COLUMN_WIDTHS[5] - 14) * 0.8, 8.2).slice(0, 2);
+      const height = 24 + (subtotalLines.length - 1) * 9;
+      ensureSpace(height + 3);
       page.fills.push({ x: LEFT, y: y - height + 5, width: TABLE_WIDTH, height, gray: 0.94 });
-      addText(`SOUS-TOTAL ${row.title}`, LEFT + COLUMN_WIDTHS[0] + 5, y - 10, 8.2, true);
+      subtotalLines.forEach((part, index) => addText(part, LEFT + COLUMN_WIDTHS[0] + 5, y - 10 - index * 9, 8.2, true));
       addText(money(row.total), LEFT + TABLE_WIDTH - COLUMN_WIDTHS[5] + 4, y - 10, 8.2, true);
       horizontalLine(y - height + 5, 0.6); y -= height; continue;
     }
@@ -205,7 +228,7 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
     const height = Math.max(25, designationLines.length * 10 + 12); ensureSpace(height);
     const values = [row.number, "", row.unit, quantity(row.quantity), money(row.unitPrice), money(row.total)];
     let x = LEFT;
-    values.forEach((value, index) => { if (index !== 1) addText(value, x + 4, y - 10, 7.6); x += COLUMN_WIDTHS[index]; });
+    values.forEach((value, index) => { if (index !== 1) addText(value, x + 3, y - 10, 7.2); x += COLUMN_WIDTHS[index]; });
     designationLines.forEach((line, index) => addText(line, LEFT + COLUMN_WIDTHS[0] + 5, y - 10 - index * 10, 8));
     horizontalLine(y - height + 5); y -= height;
   }

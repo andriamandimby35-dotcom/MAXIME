@@ -1,3 +1,5 @@
+import { amountInWordsFr } from "@/lib/number-to-words-fr";
+
 // Générateur du PDF "Situation de travaux" (facture d'avancement), avec la
 // même technique bas niveau que le PDF de devis (lib/estimates/official-pdf.ts)
 // mais un tableau plus simple, propre à cette situation. Ce fichier est
@@ -41,16 +43,20 @@ export type SituationPdfInput = {
   taxRate: number;
   taxAmount: number;
   netAmount: number;
+  /** Anciennes factures seulement : la taxe s'ajoutait au total au lieu d'être déduite. */
+  taxAdded?: boolean;
 };
 
-const PAGE_WIDTH = 841.89;
-const PAGE_HEIGHT = 595.28;
+// Format A4 PORTRAIT, toujours (règle de l'application : tout PDF à imprimer
+// est en portrait).
+const PAGE_WIDTH = 595.28;
+const PAGE_HEIGHT = 841.89;
 const LEFT = 30;
 const RIGHT = 30;
 const TOP = 30;
 const BOTTOM = 30;
-const TABLE_WIDTH = PAGE_WIDTH - LEFT - RIGHT; // 781.89
-const COLUMN_WIDTHS = [24, 184, 34, 52, 72, 62, 48, 84, 84, 137.89]; // somme = TABLE_WIDTH
+const TABLE_WIDTH = PAGE_WIDTH - LEFT - RIGHT; // 535.28
+const COLUMN_WIDTHS = [18, 132, 28, 36, 52, 36, 36, 62, 62, 73.28]; // somme = TABLE_WIDTH
 
 function cleanText(value: unknown) {
   return String(value ?? "").replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
@@ -125,41 +131,46 @@ export function generateProgressClaimPdf(input: SituationPdfInput) {
   let page: PageCommands = { draw: [], lines: [], fills: [] };
   let y = 0;
   const addText = (text: string, x: number, baseline: number, size = 9, bold = false) => page.draw.push({ text, x, y: baseline, size, bold });
-  const headerLabels = ["N°", "DÉSIGNATION", "UNITÉ", "QTÉ MARCHÉ", "PRIX UNITAIRE", "QTÉ RÉALISÉE", "AVANCEMENT", "MONTANT CUMULÉ", "DÉJÀ FACTURÉ", "À FACTURER"];
+  const headerLabels = ["N°", "DÉSIGNATION", "UNITÉ", "QTÉ MARCHÉ", "PRIX UNITAIRE", "QTÉ RÉALISÉE", "AVANC.", "MONTANT CUMULÉ", "DÉJÀ FACTURÉ", "À FACTURER"];
   const drawTableHeader = () => {
     const height = 24;
     page.fills.push({ x: LEFT, y: y - height + 5, width: TABLE_WIDTH, height, gray: 0.9 });
     let x = LEFT;
     headerLabels.forEach((label, index) => {
-      wrapText(label, COLUMN_WIDTHS[index] - 6, 6.4).forEach((line, lineIndex) => addText(line, x + 3, y - 10 - lineIndex * 8, 6.4, true));
+      wrapText(label, COLUMN_WIDTHS[index] - 12, 7.6).forEach((line, lineIndex) => addText(line, x + 3, y - 10 - lineIndex * 8, 6.4, true));
       x += COLUMN_WIDTHS[index];
     });
     y -= height;
   };
   const newPage = () => {
     page = { draw: [], lines: [], fills: [] }; pages.push(page); y = PAGE_HEIGHT - TOP;
-    addText(input.companyName, LEFT, y, 15, true);
-    addText(`FACTURE N° ${input.claimNumber}`, PAGE_WIDTH - RIGHT - 330, y, 12, true); y -= 18;
-    for (const detail of input.companyDetails.slice(0, 3)) { addText(detail, LEFT, y, 7.5); y -= 10; }
+    // En-tête portrait : la société à gauche, la facture et le chantier à droite
+    // (les textes longs passent à la ligne, jamais l'un sous l'autre).
+    const RIGHT_X = LEFT + 300;
+    const RIGHT_WIDTH = PAGE_WIDTH - RIGHT - RIGHT_X;
+    const top = y;
+    let leftY = top;
+    wrapText(input.companyName, 270, 15).slice(0, 2).forEach((part) => { addText(part, LEFT, leftY, 15, true); leftY -= 17; });
+    for (const detail of input.companyDetails.slice(0, 3)) {
+      wrapText(detail, 270, 7.5).slice(0, 2).forEach((part) => { addText(part, LEFT, leftY, 7.5); leftY -= 9.5; });
+    }
 
-    const leftDetails = [`Chantier : ${input.projectName}`];
-    if (input.clientName) leftDetails.push(`Client : ${input.clientName}`);
-    if (input.projectLocation) leftDetails.push(`Localisation : ${input.projectLocation}`);
-    if (input.daoReference) leftDetails.push(`Référence DAO : ${input.daoReference}`);
-    const rightDetails = [`Date d'émission : ${input.issueDate}`];
-    if (input.periodLabel) rightDetails.push(`Période : ${input.periodLabel}`);
-    // Les textes de gauche (nom du chantier, client...) sont coupés en
-    // plusieurs lignes pour ne jamais passer sous « Date d'émission ».
-    const leftRows: Array<{ text: string; bold: boolean; size: number }> = [];
-    leftDetails.forEach((text, index) => {
+    let rightY = top;
+    addText(`FACTURE N° ${input.claimNumber}`, RIGHT_X, rightY, 12, true); rightY -= 17;
+    const rightRows: Array<{ text: string; bold: boolean; size: number }> = [];
+    const detailTexts = [`Chantier : ${input.projectName}`];
+    if (input.clientName) detailTexts.push(`Client : ${input.clientName}`);
+    if (input.projectLocation) detailTexts.push(`Localisation : ${input.projectLocation}`);
+    if (input.daoReference) detailTexts.push(`Référence DAO : ${input.daoReference}`);
+    detailTexts.forEach((text, index) => {
       const size = index === 0 ? 9 : 8;
-      wrapText(text, 215, size).slice(0, index === 0 ? 3 : 2).forEach((part) => leftRows.push({ text: part, bold: index === 0, size }));
+      wrapText(text, RIGHT_WIDTH, size).slice(0, index === 0 ? 3 : 2).forEach((part) => rightRows.push({ text: part, bold: index === 0, size }));
     });
-    leftRows.forEach((row, index) => addText(row.text, LEFT + 330, PAGE_HEIGHT - TOP - 20 - index * 11, row.size, row.bold));
-    rightDetails.forEach((text, index) => addText(text, LEFT + 560, PAGE_HEIGHT - TOP - 20 - index * 12, 8));
+    rightRows.push({ text: `Date d'émission : ${input.issueDate}`, bold: false, size: 8 });
+    if (input.periodLabel) rightRows.push({ text: `Période : ${input.periodLabel}`, bold: false, size: 8 });
+    rightRows.forEach((row) => { addText(row.text, RIGHT_X, rightY, row.size, row.bold); rightY -= 11; });
 
-    const headerLines = Math.max(leftRows.length * 11 / 12, rightDetails.length);
-    y = PAGE_HEIGHT - TOP - 20 - (headerLines - 1) * 12 - 14;
+    y = Math.min(leftY, rightY) - 4;
     page.lines.push({ x1: LEFT, y1: y, x2: PAGE_WIDTH - RIGHT, y2: y, width: 1 }); y -= 16;
     drawTableHeader();
   };
@@ -180,10 +191,11 @@ export function generateProgressClaimPdf(input: SituationPdfInput) {
   let subcategoryAcc: Acc | null = null;
 
   const drawHeading = (title: string, level: 1 | 2) => {
-    const height = level === 1 ? 20 : 17;
+    const titleLines = wrapText(title, (TABLE_WIDTH - 30) * 0.8, level === 1 ? 8.5 : 7.8).slice(0, 2);
+    const height = (level === 1 ? 20 : 17) + (titleLines.length - 1) * 9;
     ensureSpace(height + 34);
     page.fills.push({ x: LEFT, y: y - height + 5, width: TABLE_WIDTH, height, gray: level === 1 ? 0.86 : 0.94 });
-    addText(title, LEFT + (level === 1 ? 6 : 16), y - 10, level === 1 ? 8.5 : 7.8, true);
+    titleLines.forEach((text, index) => addText(text, LEFT + (level === 1 ? 6 : 16), y - 10 - index * 9, level === 1 ? 8.5 : 7.8, true));
     horizontalLine(y - height + 5, level === 1 ? 0.6 : 0.4);
     y -= height;
   };
@@ -192,13 +204,13 @@ export function generateProgressClaimPdf(input: SituationPdfInput) {
     ensureSpace(height);
     page.fills.push({ x: LEFT, y: y - height + 5, width: TABLE_WIDTH, height, gray: level === 1 ? 0.88 : 0.95 });
     const text = `${label} ${acc.title}`;
-    wrapText(text, COLUMN_WIDTHS[1] + COLUMN_WIDTHS[2] + COLUMN_WIDTHS[3] + COLUMN_WIDTHS[4] + COLUMN_WIDTHS[5] - 8, 7.4).slice(0, 1)
-      .forEach((line) => addText(line, LEFT + COLUMN_WIDTHS[0] + 3, y - 10, 7.4, true));
+    wrapText(text, (COLUMN_WIDTHS[1] + COLUMN_WIDTHS[2] + COLUMN_WIDTHS[3] + COLUMN_WIDTHS[4] + COLUMN_WIDTHS[5] - 8) * 0.85, 7).slice(0, 1)
+      .forEach((line) => addText(line, LEFT + COLUMN_WIDTHS[0] + 3, y - 10, 7, true));
     const percent = acc.contract > 0 ? Math.max(0, Math.min(100, (acc.current / acc.contract) * 100)) : null;
-    addText(percent === null ? "—" : `${new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 1 }).format(percent)} %`, columnX(6) + 3, y - 10, 7.2, true);
-    addText(money(acc.current), columnX(7) + 3, y - 10, 7.2, true);
-    addText(money(acc.previous), columnX(8) + 3, y - 10, 7.2, true);
-    addText(money(acc.thisTime), columnX(9) + 3, y - 10, 7.2, true);
+    addText(percent === null ? "—" : `${new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 1 }).format(percent)} %`, columnX(6) + 2, y - 10, 6.8, true);
+    addText(money(acc.current), columnX(7) + 2, y - 10, 6.8, true);
+    addText(money(acc.previous), columnX(8) + 2, y - 10, 6.8, true);
+    addText(money(acc.thisTime), columnX(9) + 2, y - 10, 6.8, true);
     horizontalLine(y - height + 5, level === 1 ? 0.6 : 0.4);
     y -= height;
   };
@@ -244,7 +256,7 @@ export function generateProgressClaimPdf(input: SituationPdfInput) {
       addText(input.lines.some((l) => l.kind === "devis") ? "DÉPENSES DIVERSES" : "DÉTAIL DES TRAVAUX ET FOURNITURES", LEFT + 6, y - 10, 8.5, true);
       horizontalLine(y - height + 5, 0.6); y -= height;
     }
-    const designationLines = wrapText(line.designation, COLUMN_WIDTHS[1] - 6, 7.4);
+    const designationLines = wrapText(line.designation, COLUMN_WIDTHS[1] - 6, 7);
     const height = Math.max(22, designationLines.length * 9 + 10);
     ensureSpace(height);
     const values = [
@@ -253,8 +265,8 @@ export function generateProgressClaimPdf(input: SituationPdfInput) {
       qty(line.currentQuantity), progressLabel(line), money(line.currentAmount), money(line.previousAmount), money(line.amountThisTime),
     ];
     let x = LEFT;
-    values.forEach((value, index) => { if (index !== 1) addText(value, x + 3, y - 10, 7, false); x += COLUMN_WIDTHS[index]; });
-    designationLines.forEach((text, index) => addText(text, LEFT + COLUMN_WIDTHS[0] + 3, y - 10 - index * 9, 7.4));
+    values.forEach((value, index) => { if (index !== 1) addText(value, x + 2, y - 10, 6.6, false); x += COLUMN_WIDTHS[index]; });
+    designationLines.forEach((text, index) => addText(text, LEFT + COLUMN_WIDTHS[0] + 3, y - 10 - index * 9, 7));
     horizontalLine(y - height + 4, 0.4);
     y -= height;
 
@@ -273,31 +285,45 @@ export function generateProgressClaimPdf(input: SituationPdfInput) {
   const totalHeight = 22;
   page.fills.push({ x: LEFT, y: y - totalHeight + 5, width: TABLE_WIDTH, height: totalHeight, gray: 0.82 });
   addText("TOTAL À FACTURER SUR CETTE FACTURE", LEFT + COLUMN_WIDTHS[0] + 5, y - 12, 9, true);
-  addText(money(input.grossAmount), LEFT + TABLE_WIDTH - COLUMN_WIDTHS[9] + 4, y - 12, 9, true);
+  addText(money(input.grossAmount), LEFT + TABLE_WIDTH - COLUMN_WIDTHS[9] + 2, y - 12, 8.5, true);
   horizontalLine(y - totalHeight + 5, 1); y -= totalHeight + 16;
 
+  // Retenue de garantie et taxe de l'État : lignes présentes seulement si
+  // elles ont été mises sur la facture ; elles sont déduites du total (les
+  // anciennes factures, où la taxe s'ajoutait, gardent leur « + »).
   const summaryRows: Array<[string, string, boolean]> = [
     ["Montant brut de cette situation", money(input.grossAmount), false],
-    [`Retenue de garantie (${input.retentionRate.toFixed(1)} %)`, `- ${money(input.retentionAmount)}`, false],
+    ...(input.retentionRate > 0 || input.retentionAmount > 0 ? [[`Retenue de garantie (${input.retentionRate.toFixed(1)} %)`, `- ${money(input.retentionAmount)}`, false] as [string, string, boolean]] : []),
     ...(input.advanceRepayment > 0 ? [["Remboursement d'avance", `- ${money(input.advanceRepayment)}`, false] as [string, string, boolean]] : []),
     ...(input.otherDeductions > 0 ? [["Autres déductions", `- ${money(input.otherDeductions)}`, false] as [string, string, boolean]] : []),
-    [`Taxe de l'État (${input.taxRate.toFixed(1)} %)`, `+ ${money(input.taxAmount)}`, false],
+    ...(input.taxRate > 0 || input.taxAmount > 0 ? [[`Taxe de l'État (${input.taxRate.toFixed(1)} %)`, `${input.taxAdded ? "+" : "-"} ${money(input.taxAmount)}`, false] as [string, string, boolean]] : []),
     ["NET À PAYER SUR CETTE FACTURE", money(input.netAmount), true],
   ];
   ensureSpace(summaryRows.length * 20 + 20);
   const labelX = PAGE_WIDTH - RIGHT - 320;
   const valueX = PAGE_WIDTH - RIGHT - 130;
   summaryRows.forEach(([label, value, bold]) => {
+    if (bold) y -= 5;
     if (bold) page.fills.push({ x: labelX - 6, y: y - 16, width: 326, height: 22, gray: 0.85 });
     addText(label, labelX, y - (bold ? 11 : 8), bold ? 10 : 8.5, bold);
     addText(value, valueX, y - (bold ? 11 : 8), bold ? 10 : 8.5, bold);
     y -= bold ? 24 : 14;
   });
 
+  // Montant net en toutes lettres (arrêté de la facture).
+  {
+    const sentence = wrapText(`Arrêtée la présente facture à la somme de : ${amountInWordsFr(input.netAmount)}.`, TABLE_WIDTH * 0.88, 8.5);
+    ensureSpace(sentence.length * 11 + 14);
+    y -= 6;
+    sentence.forEach((part) => { addText(part, LEFT, y, 8.5, true); y -= 11; });
+    y -= 6;
+  }
+
   if (input.legalMentions && input.legalMentions.length > 0) {
-    ensureSpace(input.legalMentions.length * 11 + 16);
+    const mentionLines = input.legalMentions.flatMap((mention) => wrapText(mention, TABLE_WIDTH, 7));
+    ensureSpace(mentionLines.length * 10 + 16);
     horizontalLine(y, 0.3); y -= 12;
-    for (const mention of input.legalMentions) {
+    for (const mention of mentionLines) {
       addText(mention, LEFT, y, 7, false);
       y -= 10;
     }
