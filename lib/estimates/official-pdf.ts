@@ -4,6 +4,7 @@ export type OfficialPdfRow =
   | { kind: "section"; title: string; number?: string }
   // unitPrice / total à null : prix pas encore connu, la case reste vide.
   | { kind: "item"; number: string; designation: string; unit: string; quantity: number; unitPrice: number | null; total: number | null }
+  | { kind: "subsection"; title: string }
   | { kind: "subtotal"; title: string; total: number };
 
 export type OfficialPdfInput = {
@@ -274,6 +275,19 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
       // cadre de la ligne de section (un seul trait vertical après le N°)
       page.lines.push({ x1: LEFT, y1: top, x2: LEFT, y2: bottom, width: 0.5 }, { x1: PAGE_WIDTH - RIGHT, y1: top, x2: PAGE_WIDTH - RIGHT, y2: bottom, width: 0.5 });
       if (hasNumber) page.lines.push({ x1: columnX(1), y1: top, x2: columnX(1), y2: bottom, width: 0.5 });
+      page.lines.push({ x1: LEFT, y1: top, x2: PAGE_WIDTH - RIGHT, y2: top, width: 0.5 }, { x1: LEFT, y1: bottom, x2: PAGE_WIDTH - RIGHT, y2: bottom, width: 0.5 });
+      y -= height; continue;
+    }
+    if (row.kind === "subsection") {
+      // Sous-titre d'une rubrique (texte descriptif en gras, fond gris clair, sans numéro).
+      const textX = columnX(1) + 5;
+      const subLines = wrapText(row.title, (TABLE_WIDTH - (textX - LEFT) - 10) * 0.85, 8.2).slice(0, 4);
+      const height = 12 + subLines.length * 10;
+      ensureSpace(height + 4);
+      const top = y + 5; const bottom = y - height + 5;
+      page.fills.push({ x: LEFT, y: bottom, width: TABLE_WIDTH, height, gray: 0.94 });
+      subLines.forEach((part, index) => addText(part, textX, y - 9 - index * 10, 8.2, true));
+      page.lines.push({ x1: LEFT, y1: top, x2: LEFT, y2: bottom, width: 0.5 }, { x1: PAGE_WIDTH - RIGHT, y1: top, x2: PAGE_WIDTH - RIGHT, y2: bottom, width: 0.5 }, { x1: columnX(1), y1: top, x2: columnX(1), y2: bottom, width: 0.5 });
       page.lines.push({ x1: LEFT, y1: top, x2: PAGE_WIDTH - RIGHT, y2: top, width: 0.5 }, { x1: LEFT, y1: bottom, x2: PAGE_WIDTH - RIGHT, y2: bottom, width: 0.5 });
       y -= height; continue;
     }

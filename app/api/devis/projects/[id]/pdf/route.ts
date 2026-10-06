@@ -71,6 +71,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   let grandTotal = 0;
   let sectionCount = 0;
   let romanCounter = 0;
+  let currentSubsection = "";
   let itemInSection = 0;
   const closeSection = () => {
     if (currentSection === null) return;
@@ -81,8 +82,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   items.forEach((row) => {
     const category = String(row.category ?? "").trim();
     const subcategory = String(row.subcategory ?? "").trim();
-    const section = [category, subcategory].filter(Boolean).join(" — ") || "Travaux";
+    // La rubrique = la catégorie seule ; le sous-titre (texte descriptif) s'affiche à l'intérieur de la rubrique.
+    const section = category || "Travaux";
     if (section !== currentSection) {
+      currentSubsection = "";
       closeSection();
       currentSection = section;
       // « Installation et repli de chantier » en tête porte le n° 0, les autres rubriques I, II, III…
@@ -91,6 +94,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       sectionCount += 1;
       itemInSection = 0;
       pdfRows.push({ kind: "section", title: section, number: currentSectionNumber });
+    }
+    if (subcategory && subcategory !== currentSubsection) {
+      currentSubsection = subcategory;
+      pdfRows.push({ kind: "subsection", title: subcategory });
     }
     itemInSection += 1;
     const quantity = Number(row.quantity) || 1;
