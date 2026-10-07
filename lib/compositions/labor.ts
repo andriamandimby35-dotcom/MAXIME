@@ -1,12 +1,12 @@
 import { canonicalMaterialKey } from "@/lib/material-normalization";
 
-// Postes de main-d'œuvre / de chantier : leur coût est déjà dans les salaires
-// journaliers (ou dans les frais généraux), donc on ne cherche AUCUN prix de
-// matériaux pour eux. Ils comptent 0 dans le coût interne et ne sont pas
-// considérés comme « prix manquants ».
+// Postes de pure main-d'œuvre : leur coût est déjà dans les salaires
+// journaliers, donc on ne cherche AUCUN prix de matériaux pour eux. Ils comptent
+// 0 dans le coût interne et ne sont pas considérés comme « prix manquants ».
+// L'installation et le repli de chantier n'en font PAS partie : ils coûtent
+// (baraquement, clôture, branchements, transport des engins…) et leur prix se
+// cherche dans la bibliothèque puis sur internet, comme une fourniture.
 const LABOR_PATTERNS: RegExp[] = [
-  /\binstallation (de |du )?chantier\b/,
-  /\brepli\b/,
   /\bdepose\b/,
   /\bdemolition\b/,
   /\bevacuation (des |de |du )?(gravois|deblais|decombres|dechets|materiaux|terres|remblais)\b/,

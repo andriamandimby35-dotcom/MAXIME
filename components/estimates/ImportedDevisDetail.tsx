@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { formatAr } from "@/components/money";
 import { summarizeDevis } from "@/lib/devis/pricing";
 import { isLaborLine } from "@/lib/compositions/labor";
+import { displayUnit } from "@/lib/devis/units";
 import { openDevisPdf } from "@/components/estimates/openPdf";
 import { confirmDeletion } from "@/components/deletion/confirmDeletion";
 import { DEFAULT_INTERNAL_PARAMS, INTERNAL_COSTS_CATEGORY, TRANSPORT_DESIGNATION, TRANSPORT_UNIT, type InternalParams } from "@/lib/devis/internal-costs";
@@ -317,6 +318,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   const small: React.CSSProperties = { fontSize: ".78rem", color: "#666" };
   const margin = summary.marginPercent ?? project.marginPercent;
   let lastSection = "";
+  let lastSubsection = "";
   let grandTotal = 0;
 
   return (
@@ -482,9 +484,14 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
             <tbody>
               {visibleRows.length === 0 && <tr><td colSpan={6} className="border p-4 text-center text-gray-600">Aucune ligne.</td></tr>}
               {visibleRows.map((row, index) => {
-                const section = [String(row.category ?? "").trim(), String(row.subcategory ?? "").trim()].filter(Boolean).join(" — ");
-                const header = section && section !== lastSection ? section : null;
-                if (section) lastSection = section;
+                // Comme dans le PDF : un titre par catégorie (rubrique), la sous-catégorie en petit titre dessous.
+                const category = String(row.category ?? "").trim();
+                const subcategory = String(row.subcategory ?? "").trim();
+                const header = category && category !== lastSection ? category : null;
+                if (category) lastSection = category;
+                const subKey = `${category}|${subcategory}`;
+                const subheader = subcategory && subKey !== lastSubsection ? subcategory : null;
+                if (subcategory) lastSubsection = subKey;
                 const quantity = num(row.quantity) || 1;
                 const internal = num(row.unit_price);
                 const external = num(row.external_unit_price);
@@ -493,11 +500,11 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
                 const labor = internal <= 0 && isLaborLine(row.designation);
                 const missing = view === "internal" ? internal <= 0 && !labor : external <= 0;
                 return (
-                  <FragmentRows key={row.id} header={header} colSpan={6}>
+                  <FragmentRows key={row.id} header={header} subheader={subheader} colSpan={6}>
                     <tr style={missing ? { background: "#fff7ed" } : undefined}>
                       <td className="border p-2">{String(row.position ?? "").trim() || index + 1}</td>
                       <td className="border p-2">{row.designation}</td>
-                      <td className="border p-2">{row.unit}</td>
+                      <td className="border p-2">{displayUnit(row.unit)}</td>
                       <td className="border p-2" style={{ textAlign: "right" }}>{quantity.toLocaleString("fr-FR")}</td>
                       {view === "internal" ? <>
                         <td className="border p-2" style={{ textAlign: "right" }}>
@@ -582,10 +589,11 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   );
 }
 
-function FragmentRows({ header, colSpan, children }: { header: string | null; colSpan: number; children: React.ReactNode }) {
+function FragmentRows({ header, subheader, colSpan, children }: { header: string | null; subheader?: string | null; colSpan: number; children: React.ReactNode }) {
   return (
     <>
       {header && <tr><td colSpan={colSpan} style={{ padding: "10px", background: "#e5e7eb", border: "1px solid #9ca3af", fontWeight: 800, textTransform: "uppercase" }}>{header}</td></tr>}
+      {subheader && <tr><td colSpan={colSpan} style={{ padding: "6px 10px", background: "#f3f4f6", border: "1px solid #d1d5db", fontWeight: 700, fontStyle: "italic" }}>{subheader}</td></tr>}
       {children}
     </>
   );

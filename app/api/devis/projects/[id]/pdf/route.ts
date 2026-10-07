@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getCompanyProfileForPdf } from "@/lib/organization-profile";
 import { generateOfficialEstimatePdf, type OfficialPdfRow } from "@/lib/estimates/official-pdf";
 import { isLaborLine } from "@/lib/compositions/labor";
+import { displayUnit } from "@/lib/devis/units";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -122,7 +123,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     currentSubtotal += total ?? 0;
     grandTotal += total ?? 0;
     const fullText = String(row.description ?? "").trim() || String(row.designation ?? "").trim();
-    pdfRows.push({ kind: "item", number: String(row.ref ?? "").trim() || `${currentSectionNumber}.${itemInSection}`, designation: fullText, concerne: String(row.concerne ?? "").trim() || undefined, unit: String(row.unit ?? "").trim().replace(/^JOUR-PERSONNE$/i, "J-pers"), quantity, unitPrice, total });
+    pdfRows.push({ kind: "item", number: String(row.ref ?? "").trim() || `${currentSectionNumber}.${itemInSection}`, designation: fullText, concerne: String(row.concerne ?? "").trim() || undefined, unit: displayUnit(row.unit).replace(/^JOUR-PERSONNE$/i, "J-pers"), quantity, unitPrice, total });
   });
   closeSection();
 

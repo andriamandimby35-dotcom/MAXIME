@@ -101,7 +101,7 @@ export async function lookupLibraryPrices(supabase: SupabaseClient, organization
 // - les mots de l'un doivent tous se retrouver dans l'autre (quelques mots d'écart permis).
 const LOOSE_STOP = new Set(["de", "des", "du", "la", "le", "les", "l", "d", "et", "en", "a", "au", "aux", "sur", "pour", "avec", "un", "une", "fourniture", "fournitures", "pose", "mise", "place", "travaux", "y", "compris", "ens", "ensemble"]);
 const LOOSE_ACTIONS = ["reparation", "remplacement", "depose", "demolition", "curage", "reprise", "remise", "ajustage", "nettoyage", "traitement", "decapage", "rebouchage", "repose", "renovation", "rehabilitation", "refection"];
-const LOOSE_SYNONYMS: Record<string, string> = { ventail: "vantail", ventaux: "vantail", vantaux: "vantail", vantail: "vantail", ventails: "vantail", metallique: "metal", metalliques: "metal", metalliq: "metal", carrelage: "carreau", carrelages: "carreau" };
+const LOOSE_SYNONYMS: Record<string, string> = { ventail: "vantail", ventaux: "vantail", vantaux: "vantail", vantail: "vantail", ventails: "vantail", metallique: "metal", metalliques: "metal", metalliq: "metal", carrelage: "carreau", carrelages: "carreau", bahu: "bahut", bahuts: "bahut", exterieure: "exterieur", exterieures: "exterieur", interieure: "interieur", interieures: "interieur" };
 
 function looseSignature(text: string) {
   const words = text.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/['’]/g, " ").split(/[^a-z0-9]+/).filter(Boolean)
