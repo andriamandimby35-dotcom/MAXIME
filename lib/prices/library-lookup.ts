@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { canonicalMaterialKey, canonicalUnit, materialFamily } from "@/lib/material-normalization";
 import { cheapestOf, priceSearchableText, usefulTokens } from "@/lib/price-engine/search-price";
-import { btpTokens, unitGroup } from "@/lib/prices/synonyms";
+import { btpTokens, stripLineReference, unitGroup } from "@/lib/prices/synonyms";
 
 // Recherche GRATUITE de prix dans la bibliothèque (aucun appel à l'IA, aucun
 // internet) pour plusieurs lignes d'un coup : la bibliothèque de l'entreprise
@@ -45,6 +45,8 @@ export async function loadPriceLibrary(supabase: SupabaseClient, organizationId:
 }
 
 export async function lookupLibraryPrices(supabase: SupabaseClient, organizationId: string, items: LookupItem[], preloaded?: PriceLibraryRow[]): Promise<LookupHit[]> {
+  // Le numéro de ligne du DAO ou du devis (« 6,13 », « 9.01 »…) ne compte jamais dans la recherche.
+  items = items.map((item) => ({ ...item, designation: stripLineReference(item.designation) }));
   if (items.length === 0) return [];
   const library = preloaded ?? await loadPriceLibrary(supabase, organizationId);
 
@@ -134,7 +136,7 @@ export type LooseHit = { price: number; matched: string; score: number };
 /** Meilleur prix de la bibliothèque pour une ligne, par comparaison souple des mots. null = rien de sûr. */
 export function looseLibraryMatch(library: PriceLibraryRow[], item: { designation: string; unit: string }): LooseHit | null {
   if (!item.unit.trim() || !item.designation.trim()) return null;
-  const target = looseSignature(item.designation);
+  const target = looseSignature(stripLineReference(item.designation));
   if (target.content.size === 0) return null;
   let best: (LooseHit & { shared: number }) | null = null;
   for (const row of library) {

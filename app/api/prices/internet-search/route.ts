@@ -3,6 +3,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import { canonicalMaterialKey, canonicalUnit, materialFamily } from "@/lib/material-normalization";
 import { usefulTokens, priceSearchableText, cheapestOf } from "@/lib/price-engine/search-price";
 import { looseLibraryMatch } from "@/lib/prices/library-lookup";
+import { stripLineReference } from "@/lib/prices/synonyms";
 
 type SearchRequest = {
   action?: "search" | "save_manual_composite" | "resolve_component_prices";
@@ -162,7 +163,7 @@ export async function POST(request: Request) {
   if (!user) return NextResponse.json({ error: "Non autorisé." }, { status: 401 });
 
   const body = await request.json().catch(() => null) as SearchRequest | null;
-  const designation = body?.designation?.trim();
+  const designation = stripLineReference(body?.designation?.trim() ?? "") || undefined;
   const categorie = body?.categorie?.trim() || "Matériaux BTP";
   const unite = canonicalUnit(body?.unite?.trim() ?? "");
   const worksiteName = body?.worksiteName?.trim() || "Chantier non nommé";

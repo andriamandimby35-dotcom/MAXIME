@@ -7,6 +7,7 @@ import { createClient } from "@/lib/supabase/client";
 import OfficialPdfButton from "@/components/estimates/OfficialPdfButton";
 import { LibraryPicker } from "@/components/estimates/LibraryPicker";
 import { compositeInputsFor } from "@/lib/compositions/works";
+import { stripLineReference } from "@/lib/prices/synonyms";
 import { estimateMaterialWeights } from "@/lib/devis/internal-costs";
 import type { TransportWeights } from "@/lib/dao/transport-weights";
 
@@ -2741,6 +2742,34 @@ export default function EstimateBuilder({
 
   // « 1. Calculer les prix (gratuit) » : reprend, sans crédit IA, les prix déjà connus de la bibliothèque (nom exact, nom voisin
   // ou composition de matériaux) pour les lignes sans prix. Le choix du prix reste modifiable ligne par ligne.
+  // Une ligne « 6.02a Type_01 => … » n'a pas le nom de l'ouvrage : il est sur la ligne parente « 6.02 … ». On les réunit pour la recherche.
+  function designationWithParent(index: number) {
+    const designationKey = columnName(daoColumns, ["Désignation", "Designation"]);
+    const own = String(estimateLines[index]?.[designationKey] ?? "");
+    const child = own.match(/^\s*\(?(\d{1,3}\s?[.,]\s?\d{1,3})\s?[a-z](?![a-zà-ÿ])/i);
+    if (!child) return own;
+    const base = child[1].replace(/\s/g, "").replace(",", ".");
+    for (let back = index - 1; back >= Math.max(0, index - 40); back -= 1) {
+      const text = String(estimateLines[back]?.[designationKey] ?? "");
+      const ref = text.match(/^\s*\(?(\d{1,3}\s?[.,]\s?\d{1,3})(?![\d])\s?(?![a-z](?![a-zà-ÿ]))/i);
+      if (ref && ref[1].replace(/\s/g, "").replace(",", ".") === base) return `${stripLineReference(text)} ${stripLineReference(own)}`;
+    }
+    return own;
+  }
+
+  // Liste des lignes encore sans prix, à copier et coller dans le chat pour que l'assistant prépare le SQL de la bibliothèque.
+  async function copyMissingList() {
+    const unitKey = columnName(daoColumns, ["Unité", "Unite", "unite"]);
+    const rows = estimateLines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0)
+      .map(({ line, index }) => `${String(line[unitKey] ?? "").trim() || "?"} | ${designationWithParent(index).replace(/\s+/g, " ").trim()}`);
+    if (rows.length === 0) { setMessage("Aucune ligne sans prix."); return; }
+    const text = rows.join("\n");
+    try { await navigator.clipboard.writeText(text); setMessage(`${rows.length} ligne(s) sans prix copiée(s). Colle-les dans le chat : je prépare le SQL de la bibliothèque.`); }
+    catch { window.prompt("Copie cette liste (Ctrl+C) puis colle-la dans le chat :", text); }
+  }
+
   async function calculateFreePrices() {
     if (freeBusy) return;
     const designationKey = columnName(daoColumns, ["Désignation", "Designation"]);
@@ -2759,7 +2788,7 @@ export default function EstimateBuilder({
       const response = await fetch("/api/library/free-prices", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: targets.map(({ line, index }) => ({ id: String(index), designation: String(line[designationKey] ?? ""), unit: String(line[unitKey] ?? ""), quantity: numberFrom(line, QUANTITY_KEYS) || 1 })) }),
+        body: JSON.stringify({ items: targets.map(({ line, index }) => ({ id: String(index), designation: designationWithParent(index), unit: String(line[unitKey] ?? ""), quantity: numberFrom(line, QUANTITY_KEYS) || 1 })) }),
       });
       const result = await response.json().catch(() => ({})) as { error?: string; results?: Array<{ id: string; price: number; source: string }> };
       if (!response.ok) { setMessage(result.error ?? "Calcul impossible."); return; }
@@ -3020,6 +3049,9 @@ export default function EstimateBuilder({
               <button type="button" className="estimateSecondaryAction" onClick={() => void searchAllDaoPrices()} disabled={Boolean(priceSearchStatus?.running) || freeBusy}>
                 {priceSearchStatus?.running ? `Recherche en cours (${priceSearchStatus.current}/${priceSearchStatus.total})…` : "2. Rechercher les prix avec l’IA (crédits IA)"}
               </button>
+              {missingPriceCount > 0 && !priceSearchStatus?.running && (
+                <button type="button" className="estimateSecondaryAction" onClick={() => void copyMissingList()}>Copier la liste des lignes sans prix</button>
+              )}
               {missingPriceCount === 0 && !priceSearchStatus?.running && <span style={{ color: "#1f7a46", fontWeight: 700 }}>Tous les prix sont remplis</span>}
               {!addLineOpen && <button type="button" className="estimateSecondaryAction" onClick={() => setAddLineOpen(true)}>+ Ajouter une ligne</button>}
             </div>
@@ -3403,6 +3435,7 @@ export default function EstimateBuilder({
               <tr
                 onClick={() => setSelectedLine((current) => { setLibraryLine(null); return current === index ? null : index; })}
                 className="cursor-pointer"
+                style={numberFrom(item, UNIT_PRICE_KEYS) <= 0 ? { background: "#fff7ed" } : undefined}
               >
                 {daoColumns.map((column) => (
                   <td key={column.order} className="border p-2" data-label={column.name}>

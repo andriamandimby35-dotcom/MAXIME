@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { computeLineFromComposition } from "@/lib/compositions/prices";
 import { loadPriceLibrary, lookupLibraryPrices, looseLibraryMatch } from "@/lib/prices/library-lookup";
+import { stripLineReference } from "@/lib/prices/synonyms";
 
 // Prix GRATUITS (aucun crédit IA, aucun internet) pour plusieurs lignes d'un coup : bibliothèque (nom exact),
 // catalogue partagé, titre voisin, puis composition de matériaux. Même logique que le calcul gratuit des
@@ -9,7 +10,8 @@ export type FreePriceItem = { id: string; designation: string; unit: string; qua
 export type FreePriceHit = { id: string; price: number; source: string };
 
 export async function freePrices(supabase: SupabaseClient, organizationId: string, items: FreePriceItem[]): Promise<FreePriceHit[]> {
-  const clean = items.filter((item) => item.designation.trim() && item.unit.trim());
+  // Le numéro du poste (« 6,13 », « 9.01 ») est retiré : il ne fait pas partie du nom du matériau.
+  const clean = items.map((item) => ({ ...item, designation: stripLineReference(item.designation) })).filter((item) => item.designation.trim() && item.unit.trim());
   if (clean.length === 0) return [];
   const library = await loadPriceLibrary(supabase, organizationId);
   const known = await lookupLibraryPrices(supabase, organizationId, clean, library);

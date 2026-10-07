@@ -4,6 +4,7 @@ import { requireDevisAdmin } from "@/lib/devis/admin";
 import { isLaborLine } from "@/lib/compositions/labor";
 import { computeLineFromComposition, type ComputedPart } from "@/lib/compositions/prices";
 import { loadPriceLibrary, lookupLibraryPrices, looseLibraryMatch } from "@/lib/prices/library-lookup";
+import { designationWithParent } from "@/lib/prices/synonyms";
 
 // Calcul GRATUIT des prix internes manquants d'un devis (aucun crédit IA,
 // aucun internet). Pour chaque ligne sans prix interne :
@@ -40,6 +41,9 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     rows.push(...((page.data ?? []) as Array<Record<string, unknown>>));
     if (!page.data || page.data.length < 1000) break;
   }
+  // Texte de recherche d'une ligne : sa désignation, complétée du texte de la ligne parente pour les sous-lignes « 6.02a … ».
+  const allTexts = rows.map((row) => String(row.designation ?? ""));
+  const searchTextById = new Map(rows.map((row, position) => [String(row.id), designationWithParent(allTexts, position)]));
   const todo = rows.filter((row) => !(Number(row.unit_price) > 0));
   const laborLines = todo.filter((row) => isLaborLine(String(row.designation ?? ""))).length;
   const missing = todo.filter((row) => !isLaborLine(String(row.designation ?? "")));
@@ -47,7 +51,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
   const library = await loadPriceLibrary(supabase, auth.organizationId);
   const known = await lookupLibraryPrices(supabase, auth.organizationId, missing.map((row) => ({
     id: String(row.id),
-    designation: String(row.designation ?? ""),
+    designation: searchTextById.get(String(row.id)) ?? String(row.designation ?? ""),
     unit: String(row.unit ?? ""),
     quantity: Number(row.quantity) || 1,
   })), library);
@@ -69,10 +73,11 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
       details.push({ id: lineId, designation, unit, status: "bibliothèque", price: hit.price, title: `Prix déjà enregistré (${hit.source}) : ${hit.matched}` });
       continue;
     }
-    const line = computeLineFromComposition(library, designation, unit);
+    const searchText = searchTextById.get(lineId) ?? designation;
+    const line = computeLineFromComposition(library, searchText, unit);
     if (!line) {
       // Dernier recours gratuit : un prix de la bibliothèque rangé sous un titre voisin (mêmes mots, mêmes dimensions, même verbe).
-      const loose = looseLibraryMatch(library, { designation, unit });
+      const loose = looseLibraryMatch(library, { designation: searchText, unit });
       if (loose) {
         updates.push({ id: lineId, unit_price: loose.price });
         fromLibrary += 1;

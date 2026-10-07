@@ -1,4 +1,5 @@
 import { canonicalMaterialKey, canonicalUnit } from "@/lib/material-normalization";
+import { stripLineReference } from "@/lib/prices/synonyms";
 
 // Compositions standard des ouvrages courants : un ouvrage (enduit, béton,
 // maçonnerie…) est décomposé en MATÉRIAUX (ciment + sable + eau…), la
@@ -288,7 +289,8 @@ const RULES: Rule[] = [
 ];
 
 /** Composition standard de l'ouvrage, ou null si l'ouvrage n'est pas (encore) connu. */
-export function compositionFor(designation: string, unit: string): WorkComposition | null {
+export function compositionFor(rawDesignation: string, unit: string): WorkComposition | null {
+  const designation = stripLineReference(rawDesignation);
   const key = canonicalMaterialKey(designation);
   const targetUnit = canonicalUnit(unit);
   if (!key || !targetUnit) return null;

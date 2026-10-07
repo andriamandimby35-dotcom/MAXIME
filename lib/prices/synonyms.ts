@@ -41,6 +41,7 @@ export const SYNONYM_GROUPS: string[][] = [
   ["faitiere", "faitage"],
   ["echantignole", "echantignolle", "echantignoles", "echantignolles"],
   ["lierne", "liernes"],
+  ["filete", "filetee", "filetees", "filetes"],
   ["volige", "voliges", "voligeage"],
   ["lattis", "lattes", "latte"],
   ["panne", "pannes"],
@@ -59,6 +60,7 @@ export const SYNONYM_GROUPS: string[][] = [
   ["bureau maitre", "table du maitre", "tables du maitre", "bureau du maitre", "table maitre", "bureau enseignant", "table enseignant"],
   ["chaise maitre", "chaise du maitre", "chaises du maitre", "chaise enseignant", "chaise d enseignant", "chaise du professeur"],
   ["tuyau", "canalisation", "conduite"],
+  ["eaux usees", "eau usee", "e u", "eu"],
   ["robinet puisage", "robinet de puisage", "robinet de jardin", "robinet de lavage"],
 ];
 
@@ -108,7 +110,7 @@ function normaliseNumbers(text: string): string {
     // « sauf volige » : la restriction n'est pas le matériau de la fiche.
     .replace(/\bsauf\s+[^(),;]*/g, " ")
     // Dimensions en mètres écrites « 1,10*2,10 » ou « 1,40x1,40x2,50m » (toutes avec virgule) : en centimètres (110x210).
-    .replace(/\d+[.,]\d+(?:\s*[*x×]\s*\d+[.,]\d+){1,2}\s*m?\b/g, (match) => ` ${match.replace(/\s*m$/, "").split(/\s*[*x×]\s*/).map((part) => Math.round(Number(part.replace(",", ".")) * 100)).join("x")} `)
+    .replace(/\d+[.,]\d+\s*m?(?:\s*[*x×]\s*\d+[.,]\d+\s*m?){1,2}\b/g, (match) => ` ${match.split(/\s*[*x×]\s*/).map((part) => Math.round(Number(part.replace(/\s*m$/, "").replace(",", ".")) * 100)).join("x")} `)
     // Épaisseurs de tôle « 50/100 », « 50/100è » : un seul bloc.
     .replace(/\b(\d+)\s*\/\s*(\d+)(?:e|eme|ieme)?\b/g, " $1sur$2 ")
     // Codes de types (Type_FP1a, Type ECH2, Type_01) : le numéro de type ne change pas le matériau.
@@ -150,4 +152,18 @@ export function wordVariants(word: string): string[] {
     if (normalised.some((entry) => entry === base || stem(entry) === stem(base))) normalised.filter((entry) => !entry.includes(" ")).forEach((entry) => out.add(entry));
   }
   return [...out].filter((entry) => entry.length >= 3);
+}
+
+/**
+ * Un DAO écrit le numéro du poste dans la désignation (« 6,13 Gouttière en zinc », « 9.01 Badigeonnage… », « 6.02a Type_01… »,
+ * « 1.1 -Tables bancs »). Ce numéro n'est pas une dimension : on le retire avant toute comparaison avec la bibliothèque.
+ */
+export function stripLineReference(text: string): string {
+  const original = String(text ?? "");
+  // « 2,5 mm² câble » commence par une mesure, pas par un numéro de ligne : on n'y touche pas.
+  if (/^\s*\d{1,3}(?:\s?[.,]\s?\d{1,3})+\s*(?:mm|cm|dm|m|ml|kg|t|l|%|x|\*|sur|ar)\b/i.test(original)) return original.trim();
+  const cleaned = original
+    .replace(/^\s*\(?\d{1,3}(?:\s?[.,]\s?\d{1,3}){1,3}(?:[a-z](?![a-zà-ÿ]))?\)?\s*[-–—:.)]*\s*/i, "")
+    .replace(/^\d\s+(?=[A-Za-zÀ-ÿ])/, "");
+  return cleaned.trim() || String(text ?? "").trim();
 }
