@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { requireDevisAdmin } from "@/lib/devis/admin";
 import { extractDevisFromPdf } from "@/lib/projects/extract-devis-pdf";
-import { externalPricesFromInternal } from "@/lib/devis/pricing";
+import { externalPricesFromInternal, externalPricingFromTarget } from "@/lib/devis/pricing";
 import { resolveItemTasks, type PlanningTask } from "@/lib/billing/task-matching";
 
 // Ré-analyse d'un devis DÉJÀ importé (le PDF n'est pas gardé : on le choisit à nouveau).
@@ -71,7 +71,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
   const project = await ownProject(supabase, id, auth.organizationId);
   if (!project) return NextResponse.json({ error: "Chantier introuvable." }, { status: 404 });
 
-  const body = await request.json().catch(() => ({})) as { lines?: InLine[]; kind?: string; keep_internal_prices?: boolean; margin_percent?: number | string | null; tmp_percent?: number | string | null };
+  const body = await request.json().catch(() => ({})) as { lines?: InLine[]; kind?: string; keep_internal_prices?: boolean; margin_percent?: number | string | null; target_client_total?: number | string | null; tmp_percent?: number | string | null };
   const lines = (body.lines ?? []).filter((line) => String(line.designation ?? "").trim());
   if (lines.length === 0) return NextResponse.json({ error: "Aucune ligne à enregistrer." }, { status: 400 });
   const kind = body.kind === "internal" ? "internal" : "external";
@@ -102,11 +102,23 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
   const quantities = lines.map((line) => (Number(line.quantity) > 0 ? Number(line.quantity) : 1));
   const prices = lines.map((line) => (Number(line.unit_price) > 0 ? Number(line.unit_price) : 0));
   let externalFromInternal: number[] | null = null;
+  let appliedMargin: number | null = null;
   if (kind === "internal" && prices.some((price) => price > 0)) {
-    const raw = String(body.margin_percent ?? project.expected_margin_percent ?? "").replace(/\s/g, "").replace(",", ".");
-    const margin = raw === "" ? NaN : Number(raw);
-    if (!Number.isFinite(margin) || margin <= -100) return NextResponse.json({ error: "Indique la marge à appliquer (en %) pour fabriquer le devis externe." }, { status: 400 });
-    externalFromInternal = externalPricesFromInternal(lines.map((_, index) => ({ quantity: quantities[index], unit_price: prices[index] })), margin);
+    const internalItems = lines.map((_, index) => ({ quantity: quantities[index], unit_price: prices[index] }));
+    const targetTtc = Number(String(body.target_client_total ?? "").replace(/\s/g, "").replace(",", "."));
+    if (Number.isFinite(targetTtc) && targetTtc > 0) {
+      // Mode « montant total attendu » (comme le devis du DAO) : la marge est calculée.
+      const fromTarget = externalPricingFromTarget(internalItems, targetTtc);
+      if (!fromTarget) return NextResponse.json({ error: "Le montant total attendu est invalide." }, { status: 400 });
+      externalFromInternal = fromTarget.prices;
+      appliedMargin = fromTarget.marginPercent;
+    } else {
+      const raw = String(body.margin_percent ?? project.expected_margin_percent ?? "").replace(/\s/g, "").replace(",", ".");
+      const margin = raw === "" ? NaN : Number(raw);
+      if (!Number.isFinite(margin) || margin <= -100) return NextResponse.json({ error: "Indique la marge à appliquer (en %) ou le montant total attendu pour fabriquer le devis externe." }, { status: 400 });
+      externalFromInternal = externalPricesFromInternal(internalItems, margin);
+      appliedMargin = margin;
+    }
   }
 
   // Planning : on garde le lien déjà connu, sinon la tâche la plus ressemblante, sinon une nouvelle tâche.
@@ -170,9 +182,8 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
   if (oldIds.length > 0) await supabase.from("project_price_items").delete().in("id", oldIds);
 
   let warning: string | undefined;
-  if (kind === "internal" && externalFromInternal) {
-    const raw = String(body.margin_percent ?? project.expected_margin_percent ?? "").replace(",", ".");
-    await supabase.from("projects").update({ expected_margin_percent: Number(raw) }).eq("id", id);
+  if (kind === "internal" && externalFromInternal && appliedMargin !== null) {
+    await supabase.from("projects").update({ expected_margin_percent: appliedMargin }).eq("id", id);
   }
   const tmpRaw = Number(String(body.tmp_percent ?? "").replace(",", "."));
   if (Number.isFinite(tmpRaw) && tmpRaw > 0 && tmpRaw < 100) {

@@ -1,4 +1,4 @@
-import { computeExternalUnitPrices } from "@/lib/estimates/external-pricing";
+import { computeExternalUnitPrices, targetBeforeTax } from "@/lib/estimates/external-pricing";
 import { isLaborLine } from "@/lib/compositions/labor";
 
 // Un devis importé vit dans le bordereau du chantier (project_price_items) :
@@ -62,4 +62,21 @@ export function externalPricesFromInternal(items: Array<{ quantity?: number | st
     marginPercent,
     null,
   );
+}
+
+/**
+ * Mode « montant total attendu » (comme le devis du DAO) : on donne le total TTC voulu (taxe de l'État 8 % comprise), la marge à appliquer
+ * est calculée, et les prix externes sont ajustés pour que le total HT tombe au plus juste sur ce montant.
+ * null si aucun prix interne ou montant invalide.
+ */
+export function externalPricingFromTarget(items: Array<{ quantity?: number | string | null; unit_price?: number | string | null }>, targetClientTotalTtc: number): { marginPercent: number; prices: number[]; targetHt: number } | null {
+  const target = Number(targetClientTotalTtc);
+  if (!Number.isFinite(target) || target <= 0) return null;
+  const base = items.reduce((sum, item) => sum + (num(item.quantity) || 1) * num(item.unit_price), 0);
+  if (base <= 0) return null;
+  const targetHt = targetBeforeTax(target);
+  const marginPercent = Math.round((targetHt / base - 1) * 10000) / 100;
+  if (marginPercent <= -100) return null;
+  const prices = computeExternalUnitPrices(items.map((item) => ({ quantity: num(item.quantity) || 1, baseUnitPrice: num(item.unit_price) })), marginPercent, targetHt);
+  return { marginPercent, prices, targetHt };
 }

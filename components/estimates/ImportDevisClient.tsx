@@ -17,6 +17,7 @@ export function ImportDevisClient({ kind }: { kind: "internal" | "external" }) {
   const [name, setName] = useState("");
   const [location, setLocation] = useState("");
   const [margin, setMargin] = useState("");
+  const [pricingMode, setPricingMode] = useState<"percentage" | "target_total">("percentage");
   const [created, setCreated] = useState<{ projectId: string; count: number; needsInternalPrices: number; addedTasks: number; warning?: string } | null>(null);
 
   const isInternal = kind === "internal";
@@ -43,12 +44,12 @@ export function ImportDevisClient({ kind }: { kind: "internal" | "external" }) {
   async function create() {
     if (!extraction) return;
     if (!name.trim()) { setMessage("Donne un nom au chantier."); return; }
-    if (isInternal && stats.priced > 0 && !margin.trim()) { setMessage("Indique la marge à appliquer pour fabriquer le devis externe."); return; }
+    if (isInternal && stats.priced > 0 && !margin.trim()) { setMessage(pricingMode === "target_total" ? "Indique le montant total attendu pour fabriquer le devis externe." : "Indique la marge à appliquer pour fabriquer le devis externe."); return; }
     setBusy(true); setMessage("");
     const response = await fetch("/api/devis/import/create", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ kind, name, location, works: extraction.works, work_steps: extraction.work_steps ?? [], lines: extraction.lines, tmp_percent: extraction.tmp_percent ?? null, margin_percent: margin }),
+      body: JSON.stringify({ kind, name, location, works: extraction.works, work_steps: extraction.work_steps ?? [], lines: extraction.lines, tmp_percent: extraction.tmp_percent ?? null, margin_percent: pricingMode === "percentage" ? margin : null, target_client_total: pricingMode === "target_total" ? margin : null }),
     });
     const result = await response.json().catch(() => ({}));
     setBusy(false);
@@ -109,9 +110,18 @@ export function ImportDevisClient({ kind }: { kind: "internal" | "external" }) {
               <input value={location} onChange={(event) => setLocation(event.target.value)} />
             </label>
             {isInternal && stats.priced > 0 && (
-              <label style={{ display: "grid", gap: "4px", flex: "0 1 160px" }}>Marge à appliquer (%)
-                <input type="number" step="0.1" value={margin} onChange={(event) => setMargin(event.target.value)} />
-              </label>
+              <>
+                <label style={{ display: "grid", gap: "4px", flex: "1 1 220px" }}>Calcul du devis externe
+                  <select value={pricingMode} onChange={(event) => { setPricingMode(event.target.value as "percentage" | "target_total"); setMargin(""); }}>
+                    <option value="percentage">Je donne la marge (%)</option>
+                    <option value="target_total">Je donne le montant total attendu</option>
+                  </select>
+                </label>
+                <label style={{ display: "grid", gap: "4px", flex: "1 1 200px" }}>{pricingMode === "percentage" ? "Marge à appliquer (%)" : "Montant total attendu (Ar TTC)"}
+                  <input type="number" min="0" step={pricingMode === "percentage" ? "0.1" : "1"} value={margin} onChange={(event) => setMargin(event.target.value)} />
+                  <small style={{ color: "#666" }}>{pricingMode === "percentage" ? "% appliqué à tous les postes externes" : "Taxe de l'État de 8 % comprise : la marge est calculée pour tomber sur ce montant"}</small>
+                </label>
+              </>
             )}
           </div>
 

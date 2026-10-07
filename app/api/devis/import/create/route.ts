@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireDevisAdmin } from "@/lib/devis/admin";
-import { externalPricesFromInternal } from "@/lib/devis/pricing";
+import { externalPricesFromInternal, externalPricingFromTarget } from "@/lib/devis/pricing";
 import { resolveItemTasks, type PlanningTask } from "@/lib/billing/task-matching";
 import { checklistForTitle, cleanWorkSteps, disambiguateTitles } from "@/lib/devis/work-steps";
 
@@ -22,7 +22,7 @@ export async function POST(request: Request) {
   if ("error" in auth) return auth.error;
 
   const body = await request.json().catch(() => ({})) as {
-    kind?: string; name?: string; location?: string; works?: string[]; work_steps?: unknown; lines?: InLine[]; margin_percent?: number | string | null; tmp_percent?: number | string | null;
+    kind?: string; name?: string; location?: string; works?: string[]; work_steps?: unknown; lines?: InLine[]; margin_percent?: number | string | null; target_client_total?: number | string | null; tmp_percent?: number | string | null;
   };
   const kind = body.kind === "internal" ? "internal" : "external";
   const name = String(body.name ?? "").trim();
@@ -32,7 +32,10 @@ export async function POST(request: Request) {
 
   const hasPrices = lines.some((line) => Number(line.unit_price) > 0);
   let margin: number | null = null;
-  if (kind === "internal" && hasPrices) {
+  // Devis interne : soit une marge en %, soit le montant total TTC attendu (comme le devis du DAO).
+  const targetTtc = Number(String(body.target_client_total ?? "").replace(/\s/g, "").replace(",", "."));
+  const useTarget = kind === "internal" && hasPrices && Number.isFinite(targetTtc) && targetTtc > 0;
+  if (kind === "internal" && hasPrices && !useTarget) {
     const raw = String(body.margin_percent ?? "").replace(/\s/g, "").replace(",", ".");
     const parsed = raw === "" ? NaN : Number(raw);
     if (!Number.isFinite(parsed) || parsed <= -100) return NextResponse.json({ error: "Indique la marge à appliquer (en %) pour fabriquer le devis externe." }, { status: 400 });
@@ -92,8 +95,12 @@ export async function POST(request: Request) {
   // 3. Bordereau de prix (créé_at croissant : garde l'ordre du devis).
   const quantities = lines.map((line) => (Number(line.quantity) > 0 ? Number(line.quantity) : 1));
   const prices = lines.map((line) => (Number(line.unit_price) > 0 ? Number(line.unit_price) : 0));
-  const externalFromInternal = kind === "internal" && margin !== null
-    ? externalPricesFromInternal(lines.map((_, index) => ({ quantity: quantities[index], unit_price: prices[index] })), margin)
+  const internalItems = lines.map((_, index) => ({ quantity: quantities[index], unit_price: prices[index] }));
+  const fromTarget = useTarget ? externalPricingFromTarget(internalItems, targetTtc) : null;
+  if (useTarget && !fromTarget) return NextResponse.json({ error: "Le montant total attendu est invalide (il doit être positif et supérieur à la taxe de l'État)." }, { status: 400 });
+  if (fromTarget) margin = fromTarget.marginPercent;
+  const externalFromInternal = fromTarget ? fromTarget.prices
+    : kind === "internal" && margin !== null ? externalPricesFromInternal(internalItems, margin)
     : null;
   const baseTime = Date.now();
   const rows = lines.map((line, index) => {

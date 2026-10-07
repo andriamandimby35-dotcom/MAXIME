@@ -52,6 +52,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   const [message, setMessage] = useState("");
   const [progress, setProgress] = useState<{ current: number; total: number; label: string } | null>(null);
   const [marginInput, setMarginInput] = useState("");
+  const [marginMode, setMarginMode] = useState<"percentage" | "target_total">("percentage");
   const [libraryBusy, setLibraryBusy] = useState(false);
   const [calc, setCalc] = useState<CalcResult | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -133,16 +134,17 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   const [reResult, setReResult] = useState<{ lines: ReLine[]; devis_total: number | null; tmp_percent: number | null; warnings: string[] } | null>(null);
   const [reKind, setReKind] = useState<"external" | "internal">("external");
   const [reMargin, setReMargin] = useState("");
+  const [reMode, setReMode] = useState<"percentage" | "target_total">("percentage");
   const [reKeep, setReKeep] = useState(true);
   const reSum = useMemo(() => (reResult?.lines ?? []).reduce((sum, line) => sum + (line.unit_price > 0 ? line.quantity * line.unit_price : 0), 0), [reResult]);
   const visibleRows = view === "external" ? rows.filter((row) => !row.is_internal) : rows;
   const canGiveMargin = summary.missingExternal > 0 && summary.lines - summary.missingInternal > 0;
 
-  async function applyMargin(value?: string) {
+  async function applyMargin(value?: string, mode: "percentage" | "target_total" = "percentage") {
     const response = await fetch(`/api/devis/projects/${project.id}/margin`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ margin_percent: value ?? null }),
+      body: JSON.stringify(mode === "target_total" ? { target_client_total: value ?? null } : { margin_percent: value ?? null }),
     });
     const result = await response.json().catch(() => ({})) as { error?: string; marginPercent?: number | null };
     if (!response.ok) { setMessage(result.error ?? "Marge non enregistrée."); return false; }
@@ -373,8 +375,8 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   }
 
   async function giveMargin() {
-    if (!marginInput.trim()) { setMessage("Indique la marge à appliquer (en %)."); return; }
-    if (await applyMargin(marginInput)) router.refresh();
+    if (!marginInput.trim()) { setMessage(marginMode === "target_total" ? "Indique le montant total attendu (Ar TTC)." : "Indique la marge à appliquer (en %)."); return; }
+    if (await applyMargin(marginInput, marginMode)) router.refresh();
   }
 
   // Ré-analyse du PDF : lecture par l'IA (aperçu), puis remplacement des lignes après relecture.
@@ -392,13 +394,13 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   }
   async function reanalyzeApply() {
     if (!reResult) return;
-    if (reKind === "internal" && reSum > 0 && !reMargin.trim() && project.marginPercent === null) { setMessage("Indique la marge à appliquer pour fabriquer le devis externe."); return; }
+    if (reKind === "internal" && reSum > 0 && !reMargin.trim() && (reMode === "target_total" || project.marginPercent === null)) { setMessage(reMode === "target_total" ? "Indique le montant total attendu pour fabriquer le devis externe." : "Indique la marge à appliquer pour fabriquer le devis externe."); return; }
     if (!window.confirm("Les lignes actuelles du devis vont être remplacées par cette lecture. Le chantier, le planning, les dépenses, les salaires et le transport sont gardés. Continuer ?")) return;
     setReBusy(true); setMessage("");
     try {
       const response = await fetch(`/api/devis/projects/${project.id}/reanalyze`, {
         method: "PUT", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ lines: reResult.lines, kind: reKind, keep_internal_prices: reKeep, margin_percent: reMargin || null, tmp_percent: reResult.tmp_percent }),
+        body: JSON.stringify({ lines: reResult.lines, kind: reKind, keep_internal_prices: reKeep, margin_percent: reMode === "percentage" ? reMargin || null : null, target_client_total: reMode === "target_total" ? reMargin || null : null, tmp_percent: reResult.tmp_percent }),
       });
       const result = await response.json().catch(() => ({})) as { error?: string; count?: number; addedTasks?: number; keptPrices?: number; oldPriced?: number; warning?: string };
       if (!response.ok) { setMessage(result.error ?? "Remplacement impossible."); return; }
@@ -472,9 +474,13 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
             {progress && <button type="button" className="estimateSecondaryAction" onClick={() => { stopRef.current = true; }}>Arrêter</button>}
             {summary.missingInternal === 0 && <span style={{ color: "#1f7a46", fontWeight: 700 }}>Prix internes complets</span>}
             {canGiveMargin && !progress && (
-              <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                <input type="number" step="0.1" placeholder="Marge %" style={{ width: 96 }} value={marginInput} onChange={(event) => setMarginInput(event.target.value)} />
-                <button type="button" className="estimateSecondaryAction" onClick={() => void giveMargin()}>Appliquer la marge aux prix externes manquants</button>
+              <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <select value={marginMode} onChange={(event) => { setMarginMode(event.target.value as "percentage" | "target_total"); setMarginInput(""); }} aria-label="Calcul du devis externe">
+                  <option value="percentage">Je donne la marge (%)</option>
+                  <option value="target_total">Je donne le montant total attendu</option>
+                </select>
+                <input type="number" step={marginMode === "percentage" ? "0.1" : "1"} min={marginMode === "percentage" ? undefined : "0"} placeholder={marginMode === "percentage" ? "Marge %" : "Total TTC (Ar)"} style={{ width: 130 }} value={marginInput} onChange={(event) => setMarginInput(event.target.value)} />
+                <button type="button" className="estimateSecondaryAction" onClick={() => void giveMargin()}>{marginMode === "percentage" ? "Appliquer la marge aux prix externes manquants" : "Appliquer le montant total attendu"}</button>
               </span>
             )}
           </div>
@@ -734,8 +740,14 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
                     <option value="internal">mes coûts (internes)</option>
                   </select>
                 </label>
-                {reKind === "internal" && <label style={{ display: "grid", gap: 4 }}>Marge à appliquer (%)
-                  <input type="number" step="0.1" value={reMargin} onChange={(event) => setReMargin(event.target.value)} style={{ width: 120 }} />
+                {reKind === "internal" && <label style={{ display: "grid", gap: 4 }}>Calcul du devis externe
+                  <select value={reMode} onChange={(event) => { setReMode(event.target.value as "percentage" | "target_total"); setReMargin(""); }}>
+                    <option value="percentage">Je donne la marge (%)</option>
+                    <option value="target_total">Je donne le montant total attendu</option>
+                  </select>
+                </label>}
+                {reKind === "internal" && <label style={{ display: "grid", gap: 4 }}>{reMode === "percentage" ? "Marge à appliquer (%)" : "Montant total attendu (Ar TTC)"}
+                  <input type="number" min={reMode === "percentage" ? undefined : "0"} step={reMode === "percentage" ? "0.1" : "1"} value={reMargin} onChange={(event) => setReMargin(event.target.value)} style={{ width: 150 }} />
                 </label>}
                 <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
                   <input type="checkbox" checked={reKeep} onChange={(event) => setReKeep(event.target.checked)} /> Garder les prix internes déjà trouvés (même désignation)
