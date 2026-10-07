@@ -572,6 +572,8 @@ export default function EstimateBuilder({
   const [selectedLine, setSelectedLine] = useState<number | null>(null);
   // Ligne dont la carte « Bibliothèque » est ouverte (choix manuel d'un prix, sans rien changer à la bibliothèque).
   const [libraryLine, setLibraryLine] = useState<number | null>(null);
+  const [addLineOpen, setAddLineOpen] = useState(false);
+  const [freeBusy, setFreeBusy] = useState(false);
   const [editingLine, setEditingLine] = useState<number | null>(null);
   const [estimateId, setEstimateId] = useState<string | null>(null);
   const [profitMarginPercent, setProfitMarginPercent] = useState(0);
@@ -2497,6 +2499,55 @@ export default function EstimateBuilder({
     await syncProjectAfterChange("Ligne ajoutée");
   }
 
+  // Lignes du devis sans prix (hors main-d'œuvre) : elles attendent le calcul gratuit, la recherche IA ou un prix saisi.
+  const missingPriceCount = estimateLines.filter((line) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0 && !isInternalLaborLine(line)).length;
+
+  // « 1. Calculer les prix (gratuit) » : reprend, sans crédit IA, les prix déjà connus de la bibliothèque (nom exact, nom voisin
+  // ou composition de matériaux) pour les lignes sans prix. Le choix du prix reste modifiable ligne par ligne.
+  async function calculateFreePrices() {
+    if (freeBusy) return;
+    const designationKey = columnName(daoColumns, ["Désignation", "Designation"]);
+    const unitKey = columnName(daoColumns, ["Unité", "Unite", "unite"]);
+    const quantityKey = columnName(daoColumns, QUANTITY_KEYS);
+    const unitPriceKey = columnName(daoColumns, UNIT_PRICE_KEYS);
+    const totalKey = columnName(daoColumns, TOTAL_KEYS);
+    const targets = estimateLines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0 && !isInternalLaborLine(line));
+    if (targets.length === 0) { setMessage("Tous les prix sont déjà remplis."); return; }
+    setFreeBusy(true);
+    const previousCursor = document.body.style.cursor;
+    document.body.style.cursor = "wait";
+    try {
+      const response = await fetch("/api/library/free-prices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: targets.map(({ line, index }) => ({ id: String(index), designation: String(line[designationKey] ?? ""), unit: String(line[unitKey] ?? ""), quantity: numberFrom(line, QUANTITY_KEYS) || 1 })) }),
+      });
+      const result = await response.json().catch(() => ({})) as { error?: string; results?: Array<{ id: string; price: number; source: string }> };
+      if (!response.ok) { setMessage(result.error ?? "Calcul impossible."); return; }
+      const hits = new Map((result.results ?? []).map((hit) => [Number(hit.id), hit]));
+      if (hits.size === 0) { setMessage(`Aucun des ${targets.length} prix manquants n'est dans la bibliothèque. Essaie « Rechercher les prix avec l'IA », ou clique sur une ligne puis « Bibliothèque ».`); return; }
+      const nextLines = estimateLines.map((line, index) => {
+        const hit = hits.get(index);
+        if (!hit) return line;
+        const quantity = numberFrom(line, QUANTITY_KEYS);
+        return { ...line, [unitPriceKey]: hit.price, [totalKey]: quantity * hit.price, __priceStatus: "manual_enterprise", __priceProvenance: hit.source };
+      });
+      setEstimateLines(nextLines);
+      if (estimateId) {
+        const supabase = createClient();
+        await Promise.all([...hits.keys()].map(async (index) => {
+          const lineId = nextLines[index]?.[LINE_ID_KEY];
+          if (lineId) await supabase.from("estimate_lines").update({ data: linePayload(nextLines[index]) }).eq("id", lineId);
+        }));
+      }
+      await persistEstimateTotal(nextLines);
+      setMessage(`${hits.size} prix remplis depuis la bibliothèque (gratuit).${targets.length > hits.size ? ` Il reste ${targets.length - hits.size} ligne(s) à remplir : recherche IA, ou clique sur la ligne puis « Bibliothèque ».` : " Tous les prix sont remplis."}`);
+      await syncProjectAfterChange("Prix remplis");
+    } finally { document.body.style.cursor = previousCursor; setFreeBusy(false); }
+  }
+
   // Après un ajout, une modification ou une suppression de ligne : si le chantier de ce devis existe, il suit le devis
   // (lignes + planning), puis la dernière facture non payée reprend les nouveaux prix. Les dépenses se recalculent seules.
   async function syncProjectAfterChange(text: string) {
@@ -2630,27 +2681,17 @@ export default function EstimateBuilder({
         )}
       </section> : null}
 
-      {message && !priceSearchStatus && <p role="status" className="rounded border p-3">{message}</p>}
+      {showHistory && message && !priceSearchStatus && <p role="status" className="rounded border p-3">{message}</p>}
 
       {!showHistory && <>
       <button type="button" onClick={() => router.push("/estimates")} className="estimateBackButton" style={{ marginBottom: 12 }}>← Retour aux devis</button>
-      <div className="estimateWorkspace">
-        <aside className="estimateWorkspaceSidebar">
-          <section className="estimateControlPanel">
-            <p className="estimatePanelEyebrow">DAO associé</p>
-            <h2>{sourceTenderTitle || "Nouveau devis"}</h2>
-            <p className="estimatePanelDescription">
-              Créez le devis une fois les paramètres internes et les lignes renseignés.
-            </p>
-            <button
-              type="button"
-              onClick={createEstimate}
-              disabled={!template || creating}
-              className="estimatePrimaryAction"
-            >
-              {creating ? "Actualisation…" : estimateId ? "Actualiser les devis" : "Créer le devis"}
-            </button>
-          </section>
+      <div style={{ margin: "12px 0" }}>
+        <p className="estimatePanelEyebrow">Devis du DAO</p>
+        <h1 className="text-2xl font-bold">{sourceTenderTitle || "Nouveau devis"}</h1>
+        <p style={{ fontSize: ".78rem", color: "#666" }}>{estimateId ? `${estimateLines.filter((line) => daoRowType(line) === "item" && line.__excludedByChoice !== true).length} lignes` : "Brouillon : le devis sera créé avec le bouton ci-dessous"}</p>
+      </div>
+      {message && !priceSearchStatus && <p role="status" className="rounded border p-3" style={{ marginBottom: 12 }}>{message}</p>}
+      <div className="estimateStack">
 
           {estimateId ? (
             <section className="estimateVersionsPanel">
@@ -2668,9 +2709,12 @@ export default function EstimateBuilder({
                 <div><span>Taxe de l&apos;État (8 %)</span><strong>{financialSummary.stateTax.toLocaleString("fr-FR")} Ar</strong></div>
                 <div className="estimateClientTotal"><span>Total à payer par le client</span><strong>{financialSummary.clientTotal.toLocaleString("fr-FR")} Ar</strong></div>
               </div>
-              <div className="estimatePdfCards">
+              <div className="estimatePdfCards" style={{ marginTop: 12, gridTemplateColumns: "1fr" }}>
                 <div className="estimatePdfCard"><strong>Devis interne</strong><span>Coûts réels et informations internes</span><OfficialPdfButton estimateId={estimateId} mode="internal" /></div>
                 <div className="estimatePdfCard"><strong>Devis externe</strong><span>Version officielle à soumettre</span><OfficialPdfButton estimateId={estimateId} mode="external" /></div>
+              </div>
+              <div style={{ marginTop: 12 }}>
+                <button type="button" onClick={createEstimate} disabled={!template || creating} className="estimatePrimaryAction">{creating ? "Actualisation…" : "Actualiser les devis"}</button>
               </div>
             </section>
           ) : (
@@ -2678,29 +2722,12 @@ export default function EstimateBuilder({
               <p className="estimatePanelEyebrow">Documents PDF</p>
               <h3>Deux versions seront préparées</h3>
               <p className="estimatePanelDescription">Le PDF interne et le PDF externe seront générés et enregistrés après la création du devis.</p>
+              <div style={{ marginTop: 12 }}>
+                <button type="button" onClick={createEstimate} disabled={!template || creating} className="estimatePrimaryAction">{creating ? "Création…" : "Créer le devis"}</button>
+              </div>
             </section>
           )}
 
-          <section className="estimateVersionsPanel estimatePriceSearchPanel">
-            <p className="estimatePanelEyebrow">Prix du DAO</p>
-            <h3>Recherche globale des prix</h3>
-            <p className="estimatePanelDescription">
-              Recherche automatiquement les prix de tous les postes du DAO et met à jour les deux PDF du devis.
-            </p>
-            <button
-              type="button"
-              onClick={() => void searchAllDaoPrices()}
-              disabled={Boolean(priceSearchStatus?.running)}
-              className="estimatePrimaryAction"
-            >
-              {priceSearchStatus?.running
-                ? `Recherche en cours (${priceSearchStatus.current}/${priceSearchStatus.total})…`
-                : "Rechercher tous les prix avec l’IA"}
-            </button>
-            {!estimateId ? (
-              <p className="estimatePanelDescription mt-3">Les prix trouvés restent dans ce brouillon puis sont enregistrés au moment de créer le devis.</p>
-            ) : null}
-          </section>
 
           <section className="estimateVersionsPanel estimatePricingPanel">
             <p className="estimatePanelEyebrow">Devis externe</p>
@@ -2737,9 +2764,88 @@ export default function EstimateBuilder({
             </button>
             {!estimateId ? <p className="estimatePanelDescription mt-3">Le réglage sera enregistré lors de la création du devis.</p> : null}
           </section>
-        </aside>
 
-        <div className="estimateWorkspaceMain">
+          <section className="estimateVersionsPanel estimatePriceSearchPanel">
+            <p className="estimatePanelEyebrow">Prix du devis</p>
+            <h3>Compléter les prix manquants</h3>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+              {missingPriceCount > 0 && !priceSearchStatus?.running && (
+                <button type="button" className="estimatePrimaryAction" disabled={freeBusy} onClick={() => void calculateFreePrices()}>{freeBusy ? "Calcul en cours…" : "1. Calculer les prix (gratuit)"}</button>
+              )}
+              <button type="button" className="estimateSecondaryAction" onClick={() => void searchAllDaoPrices()} disabled={Boolean(priceSearchStatus?.running) || freeBusy}>
+                {priceSearchStatus?.running ? `Recherche en cours (${priceSearchStatus.current}/${priceSearchStatus.total})…` : "2. Rechercher les prix avec l’IA (crédits IA)"}
+              </button>
+              {missingPriceCount === 0 && !priceSearchStatus?.running && <span style={{ color: "#1f7a46", fontWeight: 700 }}>Tous les prix sont remplis</span>}
+              {!addLineOpen && <button type="button" className="estimateSecondaryAction" onClick={() => setAddLineOpen(true)}>+ Ajouter une ligne</button>}
+            </div>
+            {missingPriceCount > 0 && <p style={{ margin: "8px 0 0", fontSize: ".78rem", color: "#666" }}>{missingPriceCount} ligne(s) sans prix. Le calcul gratuit reprend les prix de la bibliothèque et des compositions, sans crédit IA. Pour une ligne précise, clique dessus puis « Bibliothèque ».</p>}
+            {!estimateId ? <p className="estimatePanelDescription mt-3">Les prix trouvés restent dans ce brouillon puis sont enregistrés au moment de créer le devis.</p> : null}
+            {addLineOpen && (
+              <div style={{ marginTop: 12 }}>
+              <section className="estimateLineEntryPanel">
+        <div className="estimateLineEntryHeading">
+          <div>
+            <p className="estimatePanelEyebrow">À compléter</p>
+            <h2>Lignes du devis</h2>
+          </div>
+          <span>Les lignes internes restent exclues du PDF de soumission.</span>
+        </div>
+        <div className="estimateLineScopeFields">
+          <label>
+            <span style={{ display: "block", fontWeight: 700, marginBottom: 4 }}>Type de nouvelle ligne</span>
+            <select
+              value={newLineScope}
+              onChange={(event) => setNewLineScope(event.target.value as "dao" | "internal")}
+              style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }}
+            >
+              <option value="dao">Ligne du DAO</option>
+              <option value="internal">Ligne du devis interne</option>
+            </select>
+          </label>
+          {newLineScope === "dao" && (
+            <label>
+              <span style={{ display: "block", fontWeight: 700, marginBottom: 4 }}>Catégorie du DAO</span>
+              <select
+                value={newLineCategory}
+                onChange={(event) => setNewLineCategory(event.target.value)}
+                style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }}
+              >
+                <option value="">Choisir une catégorie…</option>
+                {daoCategoryChoices.map((category) => (
+                  <option key={category} value={category}>{category}</option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+        <p style={{ fontSize: 13, color: "#4b5563" }}>
+          Une ligne interne est automatiquement exclue du PDF officiel de soumission.
+        </p>
+        {daoColumns
+          .filter((column) => !["N°", "NÂ°", "Total", "total"].includes(column.name))
+          .map((column) => (
+            <input
+              key={column.order}
+              type="text"
+              inputMode={QUANTITY_KEYS.includes(column.name as never) || UNIT_PRICE_KEYS.includes(column.name as never) ? "decimal" : undefined}
+              className="w-full rounded border p-2"
+              placeholder={column.name}
+              value={String(currentLine[column.name] ?? "")}
+              onChange={(event) =>
+                setCurrentLine((current) => ({ ...current, [column.name]: event.target.value }))
+              }
+            />
+          ))}
+
+        <button type="button" onClick={addLine} className="estimateSecondaryAction">
+          + Ajouter une ligne
+        </button>
+      </section>
+                <button type="button" className="estimateSecondaryAction" style={{ marginTop: 8 }} onClick={() => setAddLineOpen(false)}>Fermer</button>
+              </div>
+            )}
+          </section>
+
       {(sourceTenderId || estimateId) && (
         <section className="estimateWorksitePanel">
           <h2 className="font-bold">Paramètres internes du chantier</h2>
@@ -2826,67 +2932,8 @@ export default function EstimateBuilder({
           </p>
         </section>
       )}
-      <section className="estimateLineEntryPanel">
-        <div className="estimateLineEntryHeading">
-          <div>
-            <p className="estimatePanelEyebrow">À compléter</p>
-            <h2>Lignes du devis</h2>
-          </div>
-          <span>Les lignes internes restent exclues du PDF de soumission.</span>
-        </div>
-        <div className="estimateLineScopeFields">
-          <label>
-            <span style={{ display: "block", fontWeight: 700, marginBottom: 4 }}>Type de nouvelle ligne</span>
-            <select
-              value={newLineScope}
-              onChange={(event) => setNewLineScope(event.target.value as "dao" | "internal")}
-              style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }}
-            >
-              <option value="dao">Ligne du DAO</option>
-              <option value="internal">Ligne du devis interne</option>
-            </select>
-          </label>
-          {newLineScope === "dao" && (
-            <label>
-              <span style={{ display: "block", fontWeight: 700, marginBottom: 4 }}>Catégorie du DAO</span>
-              <select
-                value={newLineCategory}
-                onChange={(event) => setNewLineCategory(event.target.value)}
-                style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }}
-              >
-                <option value="">Choisir une catégorie…</option>
-                {daoCategoryChoices.map((category) => (
-                  <option key={category} value={category}>{category}</option>
-                ))}
-              </select>
-            </label>
-          )}
-        </div>
-        <p style={{ fontSize: 13, color: "#4b5563" }}>
-          Une ligne interne est automatiquement exclue du PDF officiel de soumission.
-        </p>
-        {daoColumns
-          .filter((column) => !["N°", "NÂ°", "Total", "total"].includes(column.name))
-          .map((column) => (
-            <input
-              key={column.order}
-              type="text"
-              inputMode={QUANTITY_KEYS.includes(column.name as never) || UNIT_PRICE_KEYS.includes(column.name as never) ? "decimal" : undefined}
-              className="w-full rounded border p-2"
-              placeholder={column.name}
-              value={String(currentLine[column.name] ?? "")}
-              onChange={(event) =>
-                setCurrentLine((current) => ({ ...current, [column.name]: event.target.value }))
-              }
-            />
-          ))}
-
-        <button type="button" onClick={addLine} className="estimateSecondaryAction">
-          + Ajouter une ligne
-        </button>
-      </section>
-        </div>
       </div>
+
 
       <div className="estimateDetailPanel">
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "space-between" }}>
@@ -2932,7 +2979,7 @@ export default function EstimateBuilder({
             </div>
           </section>
         ))}
-        <table className="mb-8 mt-3 w-full border">
+        <table className="mb-8 mt-3 w-full border mobileCards">
           <thead>
             <tr>
               {daoColumns.map((column) => (
@@ -2995,7 +3042,7 @@ export default function EstimateBuilder({
                 className="cursor-pointer"
               >
                 {daoColumns.map((column) => (
-                  <td key={column.order} className="border p-2">
+                  <td key={column.order} className="border p-2" data-label={column.name}>
                     {editingLine === index &&
                     !TOTAL_KEYS.includes(column.name as never) &&
                     !POSITION_KEYS.includes(column.name as never) ? (
@@ -3056,10 +3103,10 @@ export default function EstimateBuilder({
                   </td>
                 ))}
                 {externalMarginPreview && <>
-                  <td className="border p-2">{item.__internalOnly === true ? "—" : `${externalPreviewUnitPrice(item).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} Ar`}</td>
-                  <td className="border p-2">{item.__internalOnly === true ? "—" : `${externalPreviewLineTotal(item).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} Ar`}</td>
+                  <td className="border p-2" data-label="PU externe">{item.__internalOnly === true ? "—" : `${externalPreviewUnitPrice(item).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} Ar`}</td>
+                  <td className="border p-2" data-label="Montant externe HT">{item.__internalOnly === true ? "—" : `${externalPreviewLineTotal(item).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} Ar`}</td>
                 </>}
-                <td className="border p-2">
+                <td className="border p-2" data-label="Actions">
                   {selectedLine === index && (
                     <div className="buttonRow" style={{ marginBottom: 0 }}>
                       <button

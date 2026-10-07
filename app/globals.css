@@ -1108,3 +1108,13 @@ html[data-busy="1"], html[data-busy="1"] *, html[data-busy="1"] *:disabled, html
   .lineActionsWrap li { flex-direction: column; align-items: stretch !important; }
   .lineActionsWrap li button { width: 100%; }
 }
+
+/* Page d'un devis DAO : une seule colonne, comme la page d'un devis ajouté par PDF. */
+.estimateStack { display:grid; gap:16px; margin-top:12px; min-width:0; }
+.estimateStack > * { min-width:0; }
+.estimateStack .estimateLineEntryPanel { margin:0; }
+@media (max-width: 640px) {
+  /* Détail du devis DAO sur téléphone : cases vides masquées, champs de modification à toute la largeur. */
+  .mobileCards td:empty { display: none; }
+  .mobileCards td[data-label="Désignation"] input, .mobileCards td[data-label="Désignation"] select, .mobileCards td[data-label="Désignation"] textarea { width: 100% !important; box-sizing: border-box; }
+}
