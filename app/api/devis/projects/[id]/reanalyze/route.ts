@@ -21,7 +21,29 @@ async function ownProject(supabase: Supabase, id: string, organizationId: string
   return data as { id: string; expected_margin_percent?: number | string | null } | null;
 }
 
-const keyOf = (designation: string | null | undefined, unit: string | null | undefined) => `${String(designation ?? "").trim().toLowerCase().replace(/\s+/g, " ")}|${String(unit ?? "").trim().toLowerCase()}`;
+// Reconnaissance d'une ligne déjà présente : même unité, mêmes dimensions (410x196…), mêmes mots importants.
+// Le verbe d'action (réparation, dépose, remplacement…) doit être le même des deux côtés : un prix de
+// portail NEUF ne doit jamais être repris pour une « réparation de portail ».
+const STOP = new Set(["de", "des", "du", "la", "le", "les", "et", "en", "d", "l", "a", "au", "aux", "pour", "sur", "avec", "un", "une", "fourniture", "fournitures", "pose", "travaux", "y", "compris"]);
+const ACTIONS = ["reparation", "remplacement", "depose", "demolition", "curage", "reprise", "remise", "ajustage", "nettoyage", "traitement", "decapage", "rebouchage", "repose", "renovation", "rehabilitation"];
+const normText = (value: string | null | undefined) => String(value ?? "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+const normUnit = (value: string | null | undefined) => { const unit = normText(value).replace(/\s/g, ""); return /^(fft|ft|ff|forfait|f)$/.test(unit) ? "ft" : unit; };
+function signature(designation: string | null | undefined) {
+  const words = normText(designation).split(" ").filter(Boolean);
+  const actions = new Set(words.filter((word) => ACTIONS.some((action) => word.startsWith(action.slice(0, 6)))));
+  const numbers = new Set(words.filter((word) => /\d/.test(word)));
+  const content = new Set(words.filter((word) => !STOP.has(word) && !actions.has(word) && !/\d/.test(word)));
+  return { actions, numbers, content };
+}
+const sameSet = (left: Set<string>, right: Set<string>) => left.size === right.size && [...left].every((word) => right.has(word));
+function similarity(newItem: { designation?: string | null; unit?: string | null }, oldItem: OldItem) {
+  if (normUnit(newItem.unit) !== normUnit(oldItem.unit)) return 0;
+  const a = signature(newItem.designation); const b = signature(oldItem.designation);
+  if (!sameSet(a.actions, b.actions) || !sameSet(a.numbers, b.numbers)) return 0;
+  const shared = [...a.content].filter((word) => b.content.has(word)).length;
+  const union = new Set([...a.content, ...b.content]).size;
+  return union === 0 ? 0 : shared / union;
+}
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -61,13 +83,20 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     const result = await supabase.from("project_price_items").select(columns).eq("project_id", id).eq("is_internal", false);
     if (!result.error) { old = (result.data ?? []) as unknown as OldItem[]; break; }
   }
-  const oldByKey = new Map<string, OldItem[]>();
-  for (const item of old) {
-    const list = oldByKey.get(keyOf(item.designation, item.unit)) ?? [];
-    list.push(item);
-    oldByKey.set(keyOf(item.designation, item.unit), list);
+  // Chaque ancienne ligne n'est reprise qu'une seule fois : les meilleures ressemblances d'abord.
+  const pairs: Array<{ line: number; item: number; score: number }> = [];
+  lines.forEach((line, lineIndex) => old.forEach((item, itemIndex) => {
+    const score = similarity(line, item);
+    if (score >= 0.7) pairs.push({ line: lineIndex, item: itemIndex, score });
+  }));
+  pairs.sort((x, y) => y.score - x.score);
+  const previous: Array<OldItem | null> = lines.map(() => null);
+  const usedOld = new Set<number>();
+  for (const pair of pairs) {
+    if (previous[pair.line] || usedOld.has(pair.item)) continue;
+    previous[pair.line] = old[pair.item];
+    usedOld.add(pair.item);
   }
-  const previous = lines.map((line) => oldByKey.get(keyOf(line.designation, line.unit))?.shift() ?? null);
 
   // Marge (devis interne avec prix : les prix externes en sont tirés).
   const quantities = lines.map((line) => (Number(line.quantity) > 0 ? Number(line.quantity) : 1));
@@ -151,5 +180,6 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     if (tmpError) warning = "Le taux TMP n'a pas pu être retenu (fichier SQL « 20261013_devis_texte_complet.sql » pas encore exécuté).";
   }
 
-  return NextResponse.json({ ok: true, count: rows.length, addedTasks, keptPrices, removed: oldIds.length, warning });
+  const oldPriced = old.filter((item) => Number(item.unit_price) > 0).length;
+  return NextResponse.json({ ok: true, count: rows.length, addedTasks, keptPrices, oldPriced, removed: oldIds.length, warning });
 }

@@ -290,9 +290,9 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
         method: "PUT", headers: { "content-type": "application/json" },
         body: JSON.stringify({ lines: reResult.lines, kind: reKind, keep_internal_prices: reKeep, margin_percent: reMargin || null, tmp_percent: reResult.tmp_percent }),
       });
-      const result = await response.json().catch(() => ({})) as { error?: string; count?: number; addedTasks?: number; keptPrices?: number; warning?: string };
+      const result = await response.json().catch(() => ({})) as { error?: string; count?: number; addedTasks?: number; keptPrices?: number; oldPriced?: number; warning?: string };
       if (!response.ok) { setMessage(result.error ?? "Remplacement impossible."); return; }
-      setMessage(`Devis remplacé : ${result.count} lignes${result.keptPrices ? `, ${result.keptPrices} prix internes repris` : ""}${result.addedTasks ? `, ${result.addedTasks} tâche(s) ajoutée(s) au planning` : ""}.${result.warning ? " " + result.warning : ""} Pense à relancer le calcul des prix internes pour les lignes sans prix.`);
+      setMessage(`Devis remplacé : ${result.count} lignes${result.oldPriced ? `, ${result.keptPrices ?? 0} prix internes repris sur ${result.oldPriced}` : ""}${result.addedTasks ? `, ${result.addedTasks} tâche(s) ajoutée(s) au planning` : ""}.${result.warning ? " " + result.warning : ""} Pense à relancer le calcul des prix internes pour les lignes sans prix.`);
       setReResult(null); setReFile(null);
       router.refresh();
     } finally { setReBusy(false); }
