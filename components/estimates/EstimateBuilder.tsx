@@ -7,7 +7,7 @@ import { createClient } from "@/lib/supabase/client";
 import OfficialPdfButton from "@/components/estimates/OfficialPdfButton";
 import { LibraryPicker } from "@/components/estimates/LibraryPicker";
 import { compositeInputsFor } from "@/lib/compositions/works";
-import { stripLineReference } from "@/lib/prices/synonyms";
+import { designationWithParent } from "@/lib/prices/synonyms";
 import { estimateMaterialWeights } from "@/lib/devis/internal-costs";
 import type { TransportWeights } from "@/lib/dao/transport-weights";
 
@@ -2742,19 +2742,13 @@ export default function EstimateBuilder({
 
   // « 1. Calculer les prix (gratuit) » : reprend, sans crédit IA, les prix déjà connus de la bibliothèque (nom exact, nom voisin
   // ou composition de matériaux) pour les lignes sans prix. Le choix du prix reste modifiable ligne par ligne.
-  // Une ligne « 6.02a Type_01 => … » n'a pas le nom de l'ouvrage : il est sur la ligne parente « 6.02 … ». On les réunit pour la recherche.
-  function designationWithParent(index: number) {
+  // Raison pour laquelle une ligne n'a pas trouvé de prix au dernier calcul gratuit (sert à « Copier la liste »).
+  const freeMissesRef = useRef<Map<number, string>>(new Map());
+
+  // Sous-ligne « 6.02a … » : le nom de l'ouvrage est sur la ligne parente « 6.02 … » (même règle que pour le devis PDF).
+  function designationWithParentLine(index: number) {
     const designationKey = columnName(daoColumns, ["Désignation", "Designation"]);
-    const own = String(estimateLines[index]?.[designationKey] ?? "");
-    const child = own.match(/^\s*\(?(\d{1,3}\s?[.,]\s?\d{1,3})\s?[a-z](?![a-zà-ÿ])/i);
-    if (!child) return own;
-    const base = child[1].replace(/\s/g, "").replace(",", ".");
-    for (let back = index - 1; back >= Math.max(0, index - 40); back -= 1) {
-      const text = String(estimateLines[back]?.[designationKey] ?? "");
-      const ref = text.match(/^\s*\(?(\d{1,3}\s?[.,]\s?\d{1,3})(?![\d])\s?(?![a-z](?![a-zà-ÿ]))/i);
-      if (ref && ref[1].replace(/\s/g, "").replace(",", ".") === base) return `${stripLineReference(text)} ${stripLineReference(own)}`;
-    }
-    return own;
+    return designationWithParent(estimateLines.map((line) => String(line[designationKey] ?? "")), index);
   }
 
   // Liste des lignes encore sans prix, à copier et coller dans le chat pour que l'assistant prépare le SQL de la bibliothèque.
@@ -2763,7 +2757,7 @@ export default function EstimateBuilder({
     const rows = estimateLines
       .map((line, index) => ({ line, index }))
       .filter(({ line }) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0)
-      .map(({ line, index }) => `${String(line[unitKey] ?? "").trim() || "?"} | ${designationWithParent(index).replace(/\s+/g, " ").trim()}`);
+      .map(({ line, index }) => `${String(line[unitKey] ?? "").trim() || "?"} | ${designationWithParentLine(index).replace(/\s+/g, " ").trim()}${freeMissesRef.current.get(index) ? ` | POURQUOI : ${freeMissesRef.current.get(index)}` : ""}`);
     if (rows.length === 0) { setMessage("Aucune ligne sans prix."); return; }
     const text = rows.join("\n");
     try { await navigator.clipboard.writeText(text); setMessage(`${rows.length} ligne(s) sans prix copiée(s). Colle-les dans le chat : je prépare le SQL de la bibliothèque.`); }
@@ -2788,10 +2782,11 @@ export default function EstimateBuilder({
       const response = await fetch("/api/library/free-prices", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: targets.map(({ line, index }) => ({ id: String(index), designation: designationWithParent(index), unit: String(line[unitKey] ?? ""), quantity: numberFrom(line, QUANTITY_KEYS) || 1 })) }),
+        body: JSON.stringify({ items: targets.map(({ line, index }) => ({ id: String(index), designation: designationWithParentLine(index), unit: String(line[unitKey] ?? ""), quantity: numberFrom(line, QUANTITY_KEYS) || 1 })) }),
       });
-      const result = await response.json().catch(() => ({})) as { error?: string; results?: Array<{ id: string; price: number; source: string }> };
+      const result = await response.json().catch(() => ({})) as { error?: string; results?: Array<{ id: string; price: number; source: string; approximate?: boolean }>; misses?: Array<{ id: string; reason: string }> };
       if (!response.ok) { setMessage(result.error ?? "Calcul impossible."); return; }
+      freeMissesRef.current = new Map((result.misses ?? []).map((miss) => [Number(miss.id), miss.reason]));
       const hits = new Map((result.results ?? []).map((hit) => [Number(hit.id), hit]));
       if (hits.size === 0) { setMessage(`Aucun des ${targets.length} prix manquants n'est dans la bibliothèque. Essaie « Rechercher les prix avec l'IA », ou clique sur une ligne puis « Bibliothèque ».`); return; }
       const nextLines = estimateLines.map((line, index) => {
@@ -2809,7 +2804,8 @@ export default function EstimateBuilder({
         }));
       }
       await persistEstimateTotal(nextLines);
-      setMessage(`${hits.size} prix remplis depuis la bibliothèque (gratuit).${targets.length > hits.size ? ` Il reste ${targets.length - hits.size} ligne(s) à remplir : recherche IA, ou clique sur la ligne puis « Bibliothèque ».` : " Tous les prix sont remplis."}`);
+      const approxCount = (result.results ?? []).filter((hit) => hit.approximate).length;
+      setMessage(`${hits.size} prix remplis depuis la bibliothèque (gratuit).${approxCount > 0 ? ` ${approxCount} sont des prix de fiches voisines, marqués « À vérifier ».` : ""}${targets.length > hits.size ? ` Il reste ${targets.length - hits.size} ligne(s) absentes de la bibliothèque : clique sur « Copier la liste des lignes sans prix » et envoie-la moi, ou utilise la recherche IA.` : " Tous les prix sont remplis."}`);
       await syncProjectAfterChange("Prix remplis");
     } finally { document.body.style.cursor = previousCursor; setFreeBusy(false); }
   }

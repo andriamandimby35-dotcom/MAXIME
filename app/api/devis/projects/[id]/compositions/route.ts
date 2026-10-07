@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { requireDevisAdmin } from "@/lib/devis/admin";
 import { isLaborLine } from "@/lib/compositions/labor";
 import { computeLineFromComposition, type ComputedPart } from "@/lib/compositions/prices";
-import { loadPriceLibrary, lookupLibraryPrices, looseLibraryMatch } from "@/lib/prices/library-lookup";
+import { approxLibraryMatch, loadPriceLibrary, lookupLibraryPrices, looseLibraryMatch, whyNoMatch } from "@/lib/prices/library-lookup";
 import { designationWithParent } from "@/lib/prices/synonyms";
 
 // Calcul GRATUIT des prix internes manquants d'un devis (aucun crédit IA,
@@ -84,7 +84,15 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
         details.push({ id: lineId, designation, unit, status: "bibliothèque", price: loose.price, title: `Prix déjà enregistré (titre voisin) : ${loose.matched}` });
         continue;
       }
-      details.push({ id: lineId, designation, unit, status: "sans composition", price: null });
+      // 3e niveau : fiche voisine la plus proche, prix rempli mais « à vérifier ».
+      const near = approxLibraryMatch(library, { designation: searchText, unit });
+      if (near) {
+        updates.push({ id: lineId, unit_price: near.price });
+        fromLibrary += 1;
+        details.push({ id: lineId, designation, unit, status: "bibliothèque", price: near.price, title: `À vérifier — prix de la fiche voisine : ${near.matched}` });
+        continue;
+      }
+      details.push({ id: lineId, designation, unit, status: "sans composition", price: null, title: whyNoMatch(library, { designation: searchText, unit }) });
       continue;
     }
     if (line.price !== null && line.price > 0) {

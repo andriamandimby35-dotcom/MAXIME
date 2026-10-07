@@ -11,5 +11,6 @@ export async function POST(request: Request) {
   if (!member?.organization_id) return NextResponse.json({ error: "Organisation introuvable." }, { status: 403 });
   const body = await request.json().catch(() => ({})) as { items?: FreePriceItem[] };
   const items = (body.items ?? []).slice(0, 2000).map((item) => ({ id: String(item.id), designation: String(item.designation ?? ""), unit: String(item.unit ?? ""), quantity: Number(item.quantity) || 1 }));
-  return NextResponse.json({ results: await freePrices(supabase, member.organization_id as string, items) });
+  const { hits, misses } = await freePrices(supabase, member.organization_id as string, items);
+  return NextResponse.json({ results: hits, misses });
 }
