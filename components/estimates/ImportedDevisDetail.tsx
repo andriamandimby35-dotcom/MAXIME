@@ -646,7 +646,6 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <input type="file" accept="application/pdf" disabled={reBusy} onChange={(event) => { setReFile(event.target.files?.[0] ?? null); setReResult(null); }} />
             <button type="button" className="tenderButton tenderButtonPrimary" disabled={reBusy || !reFile} onClick={() => void reanalyzeRead()}>{reBusy ? "Lecture en cours…" : "Relire le PDF (utilise l'IA)"}</button>
-            <button type="button" className="estimateSecondaryAction" disabled={syncBusy || reBusy} onClick={() => void refreshChain()}>{syncBusy ? "Actualisation…" : "Actualiser le chantier"}</button>
           </div>
           {reBusy && <p style={small}>Lecture en cours : cela peut prendre une minute.</p>}
           {reResult && (

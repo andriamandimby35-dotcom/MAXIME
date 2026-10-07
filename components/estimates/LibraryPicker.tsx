@@ -45,7 +45,7 @@ export function LibraryPicker({ projectId, searchUrl, designation, unit, onPick,
   }, [busy]);
 
   return (
-    <div className="card" style={{ padding: 12, margin: "6px 0", border: "1px solid #d1d5db", borderRadius: 10, background: "#fff" }}>
+    <div className="card" style={{ position: "sticky", left: 8, maxWidth: "calc(100vw - 48px)", boxSizing: "border-box", padding: 12, margin: "6px 0", border: "1px solid #d1d5db", borderRadius: 10, background: "#fff" }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
         <div>
           <strong>Choisir dans la bibliothèque</strong>

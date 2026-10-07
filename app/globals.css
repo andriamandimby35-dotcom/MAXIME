@@ -1096,3 +1096,15 @@ html[data-busy="1"], html[data-busy="1"] *, html[data-busy="1"] *:disabled, html
   .mobileCards tr:has(> td[colspan]) { background: #e5e7eb; }
   .mobileCards input { width: 120px !important; }
 }
+
+/* Téléphone en portrait : actions d'une ligne du devis (Modifier, Détail du prix, Bibliothèque, Supprimer), carte de recherche
+   dans la bibliothèque et formulaire d'ajout. Rien ne change sur ordinateur. */
+@media (max-width: 640px) {
+  .mobileCards tr:has(> td[colspan] .lineActionsWrap) { background: #fff; padding: 0; margin: 0 0 8px; }
+  .mobileCards td[colspan]:has(.lineActionsWrap) { font-weight: 400; padding: 0 !important; }
+  .lineActionsWrap { text-align: left; font-weight: 400; max-width: 100%; box-sizing: border-box; }
+  .lineActionsWrap input, .lineActionsWrap textarea, .lineActionsWrap select, .mobileCards .lineActionsWrap input { width: 100% !important; box-sizing: border-box; }
+  .lineActionsWrap button { flex: 1 1 auto; }
+  .lineActionsWrap li { flex-direction: column; align-items: stretch !important; }
+  .lineActionsWrap li button { width: 100%; }
+}

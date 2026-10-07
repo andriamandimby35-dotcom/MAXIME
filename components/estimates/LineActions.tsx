@@ -66,7 +66,7 @@ export function LineActions({ projectId, line, view, isAdmin, canPickLibrary, on
 
   const stop = (event: React.SyntheticEvent) => event.stopPropagation();
   return (
-    <div onClick={stop} style={{ padding: 10, background: "#f9fafb", borderTop: "1px dashed #d1d5db" }}>
+    <div className="lineActionsWrap" onClick={stop} style={{ padding: 10, background: "#f9fafb", borderTop: "1px dashed #d1d5db" }}>
       <div className="buttonRow" style={{ marginBottom: 0, display: "flex", gap: 8, flexWrap: "wrap" }}>
         {isAdmin && <button type="button" className="ghostButton" onClick={() => { setError(""); setMode(mode === "edit" ? null : "edit"); }}>{mode === "edit" ? "Fermer la modification" : "Modifier"}</button>}
         {view === "internal" && <button type="button" className="ghostButton" onClick={() => (mode === "detail" ? setMode(null) : void openDetail())}>Détail du prix</button>}
