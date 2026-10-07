@@ -8,6 +8,7 @@ import OfficialPdfButton from "@/components/estimates/OfficialPdfButton";
 import { LibraryPicker } from "@/components/estimates/LibraryPicker";
 import { compositeInputsFor } from "@/lib/compositions/works";
 import { estimateMaterialWeights } from "@/lib/devis/internal-costs";
+import type { TransportWeights } from "@/lib/dao/transport-weights";
 
 type DaoColumn = {
   name: string;
@@ -580,6 +581,11 @@ export default function EstimateBuilder({
   const transportRestoredRef = useRef(false);
   // Lignes internes sans prix : cachées par défaut (rien à afficher tant qu'il n'y a pas de donnée).
   const [showEmptyInternal, setShowEmptyInternal] = useState(false);
+  // Poids lus dans le PDF du DAO (gratuit, une seule fois) : un tableau par type de mur (briques / parpaings).
+  const [daoWeights, setDaoWeights] = useState<TransportWeights | null>(null);
+  const [weightsBusy, setWeightsBusy] = useState(false);
+  const [weightsBasis, setWeightsBasis] = useState<"outside" | "total">("outside");
+  const weightsAskedRef = useRef(false);
   const [freeBusy, setFreeBusy] = useState(false);
   const [editingLine, setEditingLine] = useState<number | null>(null);
   const [estimateId, setEstimateId] = useState<string | null>(null);
@@ -819,6 +825,7 @@ export default function EstimateBuilder({
             pricing_rules?: Array<{ title?: string; formula?: string; applicable_to?: string; source_reference?: string }>;
             environmental_restrictions?: Array<{ material?: string; restriction?: string; suggested_equivalent?: string; source_reference?: string }>;
             transport_weight_table?: { rows?: string[][]; total_weight?: string; source_reference?: string };
+            transport_weights?: TransportWeights;
             worksite_location?: string;
             worksite_location_source?: string;
           };
@@ -836,6 +843,7 @@ export default function EstimateBuilder({
             analysis?.schema_version === "dao-visual-structured-v3" ||
             Array.isArray(analysis?.work_items) ||
             Array.isArray(analysis?.lots);
+          if (analysis?.transport_weights && Array.isArray(analysis.transport_weights.tables)) setDaoWeights(analysis.transport_weights);
           const detectedExecutionDays = extractExecutionDays(analysis);
           const defaultInternalExecutionDays = detectedExecutionDays > 0 ? Math.ceil(detectedExecutionDays * 2 / 3) : 0;
           setDaoExecutionDays(detectedExecutionDays);
@@ -1348,7 +1356,14 @@ export default function EstimateBuilder({
   }, [estimateLines, daoColumns]);
   const estimatedTonnes = Math.round(materialWeights.reduce((sum, row) => sum + row.tonnes, 0) * 100) / 100;
   const daoTransportInfo = daoTransportRef.current;
-  const transportTonnes = transportWeightInput > 0 ? transportWeightInput : daoTransportInfo.totalKg > 0 ? daoTransportInfo.totalKg / 1000 : estimatedTonnes;
+  // Tableau de poids du DAO qui correspond au mur choisi (briques / parpaings) ; à défaut le seul tableau lu.
+  const weightTable = daoWeights?.tables?.length
+    ? (daoWeights.tables.find((table) => table.variant === masonryChoice) ?? (daoWeights.tables.length === 1 ? daoWeights.tables[0] : null))
+    : null;
+  const needsMasonryChoice = Boolean(daoWeights && daoWeights.tables.length > 1 && !weightTable);
+  const tableKg = weightTable ? (weightsBasis === "outside" && weightTable.outsideKg > 0 ? weightTable.outsideKg : weightTable.totalKg) : 0;
+  const transportTonnes = transportWeightInput > 0 ? transportWeightInput : tableKg > 0 ? tableKg / 1000 : daoTransportInfo.totalKg > 0 ? daoTransportInfo.totalKg / 1000 : estimatedTonnes;
+  const tenderIdForWeights = String(sourceTenderId || estimateLines.find((line) => line.__sourceTenderId)?.__sourceTenderId || "");
   const transportKm = transportDistanceInput > 0 ? transportDistanceInput : daoTransportInfo.distanceKm;
   const transportLineIndex = estimateLines.findIndex((line) => line.__internalOnly === true && daoRowType(line) === "item" && normalizedLabel(String(line[daoColumnName(daoColumns, ["Désignation", "Designation"])] ?? "")).includes("transportapprovisionnement"));
 
@@ -1363,6 +1378,25 @@ export default function EstimateBuilder({
     if (tonnes > 0) setTransportWeightInput(tonnes);
   }, [estimateLines, transportLineIndex]);
 
+  async function readDaoWeights(force = false) {
+    if (!tenderIdForWeights || weightsBusy) return;
+    setWeightsBusy(true);
+    try {
+      const response = await fetch(`/api/tenders/${tenderIdForWeights}/transport-weights`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force }) });
+      const result = await response.json().catch(() => ({})) as { weights?: TransportWeights; error?: string };
+      if (!response.ok || !result.weights) { setMessage(result.error ?? "Lecture des poids du DAO impossible."); return; }
+      setDaoWeights(result.weights);
+      setMessage(result.weights.tables.length > 0 ? `Poids lus dans le DAO (${result.weights.source}).` : "Le DAO ne contient pas de tableau « liste et poids des matériaux à transporter » lisible : indique le poids à la main ou garde l'estimation.");
+    } finally { setWeightsBusy(false); }
+  }
+  // Lecture automatique, une seule fois par ouverture : après la première lecture, le résultat est gardé dans l'analyse du DAO.
+  useEffect(() => {
+    if (weightsAskedRef.current || daoWeights || !tenderIdForWeights || transportLineIndex < 0) return;
+    weightsAskedRef.current = true;
+    void readDaoWeights(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenderIdForWeights, transportLineIndex, daoWeights]);
+
   async function applyTransport() {
     if (transportLineIndex < 0) { setMessage("Ce devis n'a pas de ligne « Transport, approvisionnement et livraison rendus chantier » : ajoute-la avec « + Ajouter une ligne » (unité T.KM, interne)."); return; }
     if (!(transportTonnes > 0)) { setMessage("Poids inconnu : indique le poids total en tonnes (donné par le DAO ou le dossier de soumission)."); return; }
@@ -1370,7 +1404,7 @@ export default function EstimateBuilder({
     const quantityKey = columnName(daoColumns, QUANTITY_KEYS);
     const totalKey = columnName(daoColumns, TOTAL_KEYS);
     const quantity = Math.round(transportTonnes * transportKm * 100) / 100;
-    const source = transportWeightInput > 0 ? "poids indiqué" : daoTransportInfo.totalKg > 0 ? `poids repris du DAO${daoTransportInfo.source ? ` (${daoTransportInfo.source})` : ""}` : "poids estimé d'après les matériaux du devis";
+    const source = transportWeightInput > 0 ? "poids indiqué" : tableKg > 0 ? `poids lu dans le DAO (${weightTable?.title ?? ""}, ${weightsBasis === "outside" && (weightTable?.outsideKg ?? 0) > 0 ? "matériaux de plus de 10 km" : "total"})` : daoTransportInfo.totalKg > 0 ? `poids repris du DAO${daoTransportInfo.source ? ` (${daoTransportInfo.source})` : ""}` : "poids estimé d'après les matériaux du devis";
     const nextLines = estimateLines.map((line, index) => {
       if (index !== transportLineIndex) return line;
       const changed = {
@@ -3008,11 +3042,31 @@ export default function EstimateBuilder({
         <section className="estimateTransportCard" style={{ padding: 14, border: "1px solid #9ca3af", borderRadius: 8, background: "#f9fafb", maxWidth: "100%" }}>
           <h3 className="text-lg font-bold">Transport des matériaux</h3>
           <p className="mt-1 text-sm text-gray-700">
-            {daoTransportInfo.totalKg > 0
-              ? `Poids donné par le DAO : ${(daoTransportInfo.totalKg / 1000).toLocaleString("fr-FR")} t${daoTransportInfo.source ? ` (${daoTransportInfo.source})` : ""}.`
-              : `Le DAO ne donne pas de poids : estimation d'après les matériaux du devis = ${estimatedTonnes.toLocaleString("fr-FR")} t.`}
+            {weightTable
+              ? `Poids lu dans le DAO (${weightTable.title.replace(/^.*?\)?\s*LISTE ET POIDS/i, "Liste et poids").slice(0, 120)}) : ${(weightTable.totalKg / 1000).toLocaleString("fr-FR")} t au total, dont ${(weightTable.outsideKg / 1000).toLocaleString("fr-FR")} t fournis hors de la localité (plus de 10 km) et ${(weightTable.localKg / 1000).toLocaleString("fr-FR")} t déjà dans la localité (10 km ou moins).`
+              : needsMasonryChoice
+                ? "Le DAO donne deux listes de poids (murs en briques ou en parpaings) : choisis la maçonnerie dans la carte « Choix à faire dans ce devis » et le bon poids sera repris."
+                : daoTransportInfo.totalKg > 0
+                  ? `Poids donné par le DAO : ${(daoTransportInfo.totalKg / 1000).toLocaleString("fr-FR")} t${daoTransportInfo.source ? ` (${daoTransportInfo.source})` : ""}.`
+                  : weightsBusy ? "Lecture des poids dans le DAO…" : `Aucun poids lu dans le DAO : estimation d'après les matériaux du devis = ${estimatedTonnes.toLocaleString("fr-FR")} t.`}
             {daoTransportInfo.distanceKm > 0 ? ` Distance lue dans le DAO : ${daoTransportInfo.distanceKm.toLocaleString("fr-FR")} km.` : ""}
           </p>
+          {weightTable && weightTable.outsideKg > 0 && (
+            <label className="mt-2 block text-sm">
+              <span style={{ fontWeight: 700 }}>Poids à transporter sur la distance fournisseur : </span>
+              <select value={weightsBasis} onChange={(event) => setWeightsBasis(event.target.value === "total" ? "total" : "outside")} style={{ padding: 6, border: "1px solid #9ca3af", borderRadius: 6, maxWidth: "100%" }}>
+                <option value="outside">Matériaux de plus de 10 km seulement ({(weightTable.outsideKg / 1000).toLocaleString("fr-FR")} t)</option>
+                <option value="total">Tous les matériaux ({(weightTable.totalKg / 1000).toLocaleString("fr-FR")} t)</option>
+              </select>
+            </label>
+          )}
+          {tenderIdForWeights && (
+            <p className="mt-2">
+              <button type="button" className="estimateSecondaryAction" style={{ width: "auto", cursor: weightsBusy ? "wait" : "pointer" }} disabled={weightsBusy} onClick={() => void readDaoWeights(Boolean(daoWeights))}>
+                {weightsBusy ? "Lecture du DAO…" : daoWeights ? "Relire les poids dans le DAO (gratuit)" : "Lire les poids dans le DAO (gratuit)"}
+              </button>
+            </p>
+          )}
           <div className="estimateWorksiteFields" style={{ marginTop: 8 }}>
             <label>
               <span style={{ display: "block", fontWeight: 700 }}>Distance fournisseur → chantier (km)</span>
@@ -3033,6 +3087,26 @@ export default function EstimateBuilder({
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 8 }}>
             <button type="button" className="estimatePrimaryAction" style={{ width: "auto" }} onClick={() => void applyTransport()}>Calculer le transport du devis</button>
           </div>
+          {weightTable && weightTable.rows.length > 0 && (
+            <details style={{ marginTop: 10 }}>
+              <summary style={{ cursor: "pointer", fontWeight: 700 }}>Liste des poids du DAO ({weightTable.rows.length} lignes)</summary>
+              <table className="mb-2 mt-2 w-full border mobileCards">
+                <thead><tr><th className="border p-2">Matériau</th><th className="border p-2">Quantité</th><th className="border p-2">Poids (kg)</th><th className="border p-2">Hors localité (&gt;10 km)</th><th className="border p-2">Dans la localité (≤10 km)</th></tr></thead>
+                <tbody>
+                  {weightTable.rows.map((row, rowIndex) => (
+                    <tr key={rowIndex}>
+                      <td className="border p-2" data-label="Matériau">{row.material}</td>
+                      <td className="border p-2" data-label="Quantité">{row.quantity !== null ? row.quantity.toLocaleString("fr-FR") : ""} {row.unit}</td>
+                      <td className="border p-2" data-label="Poids (kg)">{row.totalKg ? row.totalKg.toLocaleString("fr-FR") : ""}</td>
+                      <td className="border p-2" data-label="Hors localité (>10 km)">{row.outsideKg ? row.outsideKg.toLocaleString("fr-FR") : ""}</td>
+                      <td className="border p-2" data-label="Dans la localité (≤10 km)">{row.localKg ? row.localKg.toLocaleString("fr-FR") : ""}</td>
+                    </tr>
+                  ))}
+                  <tr><td className="border p-2" data-label="Total"><strong>TOTAL DAO</strong></td><td className="border p-2" /><td className="border p-2" data-label="Poids (kg)"><strong>{weightTable.totalKg.toLocaleString("fr-FR")}</strong></td><td className="border p-2" data-label="Hors localité (>10 km)"><strong>{weightTable.outsideKg.toLocaleString("fr-FR")}</strong></td><td className="border p-2" data-label="Dans la localité (≤10 km)"><strong>{weightTable.localKg.toLocaleString("fr-FR")}</strong></td></tr>
+                </tbody>
+              </table>
+            </details>
+          )}
           {materialWeights.length > 0 && (
             <details style={{ marginTop: 10 }}>
               <summary style={{ cursor: "pointer", fontWeight: 700 }}>Poids des matériaux estimés (liste pour le dossier de soumission)</summary>

@@ -111,6 +111,16 @@ function looseSignature(text: string) {
   const content = new Set(words.filter((word) => !actions.has(word) && !/\d/.test(word)));
   return { actions, digits, content };
 }
+// Objets : « Portes métalliques » ne prend jamais le prix d'une « Armoire métallique à 2 portes », ni « Chaises du maître »
+// celui d'un « Bureau du maître avec chaise » : si la fiche cite un objet que la ligne ne cite pas, ce n'est pas la même chose.
+const OBJECT_WORDS = new Set(["armoire", "bureau", "table", "chaise", "banc", "tabouret", "etagere", "lit", "porte", "fenetre", "portail", "grille", "placard", "tuyau", "robinet", "gouttiere", "descente", "faitiere", "solin", "lavabo", "wc", "evier", "dalle", "citerne", "puisard", "cunette", "escalier", "main", "garde", "poteau", "poutre", "panne", "lierne", "echantignole", "cornier", "ferme", "chevron", "liteau", "volige", "lattis", "plafond", "cloison", "barre", "couvercle", "tole", "carreau", "brique", "parpaing", "moellon", "puits", "rigole", "cantine", "armature", "mecanisee"]);
+const objectWordsDiffer = (target: Set<string>, library: Set<string>) => {
+  // Le « mot principal » (le premier) de l'un ne doit jamais manquer chez l'autre quand c'est un objet.
+  const headOf = (words: Set<string>) => [...words][0];
+  const libraryHead = headOf(library);
+  const targetHead = headOf(target);
+  return (OBJECT_WORDS.has(libraryHead) && !target.has(libraryHead)) || (OBJECT_WORDS.has(targetHead) && !library.has(targetHead));
+};
 const sameLooseSet = (left: Set<string>, right: Set<string>) => left.size === right.size && [...left].every((word) => right.has(word));
 // Une fiche de main-d'œuvre n'est jamais reprise pour une fourniture (et inversement).
 const isLabourText = (text: string) => /main[\s'’-]*d[\s'’-]*(?:oe|œ)uvre|\bsalaire\b|\bjour[\s-]*personne\b/i.test(text.normalize("NFD").replace(/[̀-ͯ]/g, ""));
@@ -143,6 +153,7 @@ export function looseLibraryMatch(library: PriceLibraryRow[], item: { designatio
     if (!digitsOk) continue;
     const shared = [...target.content].filter((word) => other.content.has(word)).length;
     if (shared === 0) continue;
+    if (objectWordsDiffer(target.content, other.content)) continue;
     const smaller = Math.min(target.content.size, other.content.size);
     const union = new Set([...target.content, ...other.content]).size;
     const nearSame = shared >= 4 && shared / union >= 0.7; // textes presque identiques, un ou deux mots différents (« antirouille » / « protection »)

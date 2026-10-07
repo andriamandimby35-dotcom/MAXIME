@@ -238,7 +238,7 @@ const RULES: Rule[] = [
     },
   },
   {
-    id: "remblai", title: "Remblai", units: ["m3"], keywords: ["remblai"], exclude: ["demolition", "depose", "evacuation"],
+    id: "remblai", title: "Remblai", units: ["m3"], keywords: ["remblai"], exclude: ["demolition", "depose", "evacuation", "deblai", "provenance"],
     build: (key) => {
       const sand = key.includes("sable");
       const topsoil = key.includes("tout venant");

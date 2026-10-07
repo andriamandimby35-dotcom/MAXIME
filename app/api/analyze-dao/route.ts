@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
+import { readTransportWeightsFromPdf, type TransportWeights } from "@/lib/dao/transport-weights";
 
 // Un DAO peut contenir de nombreuses pages et des tableaux visuels détaillés.
 // La route ne doit pas être interrompue pendant cette lecture complète.
@@ -524,9 +525,15 @@ export async function POST(request: Request) {
     }
     structured = parsedOutput as typeof structured;
 
+    // Poids des matériaux à transporter lus directement dans le texte du PDF (gratuit, sans IA) : les DAO donnent souvent
+    // deux tableaux (murs en briques / en parpaings) avec trois totaux, ce que le tableau unique de l'IA ne peut pas porter.
+    let transportWeights: TransportWeights | null = null;
+    try { transportWeights = await readTransportWeightsFromPdf(new Uint8Array(pdfBuffer)); } catch { transportWeights = null; }
+
     const analysis = {
       schema_version: "dao-visual-structured-v11",
       ...structured,
+      ...(transportWeights ? { transport_weights: transportWeights } : {}),
       resume: structured.summary,
       lots: structured.work_items.map((item) => ({
         row_type: item.row_type,

@@ -26,6 +26,40 @@ export const SYNONYM_GROUPS: string[][] = [
   ["chainage", "raidisseur"],
   ["porte", "bloc porte"],
   ["fenetre", "chassis", "croisee"],
+  // Peintures : le DAO dit « glycérophtalique », la fiche « à l'huile » ; « vinylique / plastique / acrylique » = peinture à l'eau.
+  ["huile", "glycerophtalique", "glycerophtalic", "glycero", "alkyde"],
+  ["peinture eau", "peinture vinylique", "peinture acrylique", "peinture plastique", "peinture a l eau", "peinture a eau", "peinture emulsion", "peinture latex"],
+  ["badigeon", "badigeonnage", "badigeonner", "lait de chaux"],
+  ["antirouille", "anti rouille", "anticorrosion", "anti corrosion", "minium"],
+  ["ardoisine", "ardoise", "tableau noir"],
+  ["soubassement", "plinthe haute"],
+  // Couverture et zinguerie.
+  ["tole", "tpg", "tole plane", "tole plane galvanisee", "tole galvanise"],
+  ["prelaque", "pre laque", "pre laquee", "prelaquee", "laquee"],
+  ["gouttiere tole", "gouttiere zinc", "gouttiere en zinc", "gouttiere galvanisee"],
+  ["descente", "descente eaux pluviales", "descente d eaux pluviales", "descente des eaux pluviales", "descente d eau pluviale", "descente ep", "descente d eau", "tuyau de descente"],
+  ["faitiere", "faitage"],
+  ["echantignole", "echantignolle", "echantignoles", "echantignolles"],
+  ["lierne", "liernes"],
+  ["volige", "voliges", "voligeage"],
+  ["lattis", "lattes", "latte"],
+  ["panne", "pannes"],
+  ["cornier", "corniere"],
+  // Terrassement.
+  ["fouille", "fouille en excavation", "excavation", "deblai", "fouilles"],
+  ["defrichage", "debroussaillage", "nettoyage du site", "nettoyage du terrain", "decapage du terrain"],
+  ["maconnerie", "mac"],
+  ["interieur", "int"],
+  ["exterieur", "ext"],
+  ["prefabrique", "prefa", "prefabrication"],
+  ["sanplat", "sanplaten", "sanplas"],
+  ["evacuation", "evacuation des terres", "chargement et transport", "mise en decharge"],
+  // Mobilier scolaire.
+  ["table banc", "tables bancs", "table bancs", "tables banc", "table et banc", "pupitre", "table scolaire"],
+  ["bureau maitre", "table du maitre", "tables du maitre", "bureau du maitre", "table maitre", "bureau enseignant", "table enseignant"],
+  ["chaise maitre", "chaise du maitre", "chaises du maitre", "chaise enseignant", "chaise d enseignant", "chaise du professeur"],
+  ["tuyau", "canalisation", "conduite"],
+  ["robinet puisage", "robinet de puisage", "robinet de jardin", "robinet de lavage"],
 ];
 
 // 2) Mots « de remplissage » qui ne changent pas le matériau (verbes de mise en œuvre, unités écrites dans le texte…).
@@ -37,6 +71,8 @@ export const FILLER_WORDS = new Set([
   "soigne", "soignee", "conforme", "necessaire", "necessaires", "complet", "complete", "par", "ou", "ainsi", "que",
   "cm", "mm", "ml", "m2", "m3", "kg", "ep", "epaisseur", "hauteur", "largeur", "diametre", "dimension", "dimensions", "section",
   "nb", "nombre", "unite", "piece", "pieces", "ff", "fft", "forfait", "lot",
+  "deux", "trois", "couche", "couches", "croisee", "croisees", "superieur", "superieure", "couleur", "ton", "teinte",
+  "dimension", "dimensions", "dim", "chacune", "surface", "long", "longueur", "comprenant", "compris", "parties", "partie", "chaque", "extremite", "extremites",
 ]);
 
 // 3) Unités qui veulent dire la même chose (le DAO écrit « Fft », la bibliothèque « FFT » ou « Ens »…).
@@ -60,12 +96,26 @@ export function unitGroup(unit: string): string {
 // Réécrit les écritures techniques : dosages, diamètres, dimensions.
 function normaliseNumbers(text: string): string {
   return text
+    // Hauteur ou longueur seulement indiquée entre parenthèses (« h=0,75 », « long=4,5m ») : pas une dimension de la fiche.
+    .replace(/\(?\s*\b(?:h|haut|hauteur|long|longueur(?:\s+totale)?|l)\s*=\s*\d+(?:[.,]\d+)?\s*m?\s*\)?/g, " ")
+    // « 2,0 mm » = « 2 mm ».
+    .replace(/(\d+)[,.]0+\s*(mm|cm|m)\b/g, "$1 $2")
     .replace(/ø\s*(\d+)/g, " $1mm ")
     .replace(/\bha\s?(\d+)\b/g, " acier $1mm ")
     .replace(/\bd\s?(\d{1,2})\b/g, " $1mm ")
     .replace(/\bq\s?(\d{3})\b/g, " $1kg ")
     .replace(/(\d+)\s*kg\s*\/?\s*m\s?[3³]?/g, " $1kg ")
-    .replace(/(\d+)\s*(?:x|×)\s*(\d+)/g, " $1x$2 ")
+    // « sauf volige » : la restriction n'est pas le matériau de la fiche.
+    .replace(/\bsauf\s+[^(),;]*/g, " ")
+    // Dimensions en mètres écrites « 1,10*2,10 » ou « 1,40x1,40x2,50m » (toutes avec virgule) : en centimètres (110x210).
+    .replace(/\d+[.,]\d+(?:\s*[*x×]\s*\d+[.,]\d+){1,2}\s*m?\b/g, (match) => ` ${match.replace(/\s*m$/, "").split(/\s*[*x×]\s*/).map((part) => Math.round(Number(part.replace(",", ".")) * 100)).join("x")} `)
+    // Épaisseurs de tôle « 50/100 », « 50/100è » : un seul bloc.
+    .replace(/\b(\d+)\s*\/\s*(\d+)(?:e|eme|ieme)?\b/g, " $1sur$2 ")
+    // Codes de types (Type_FP1a, Type ECH2, Type_01) : le numéro de type ne change pas le matériau.
+    .replace(/\btype\s*_?\s*(fp|ech)\s*\d+[a-z]?\b/g, " $1 ")
+    .replace(/\btype\s*_?\s*\d+\b/g, " ")
+    .replace(/\b(fp|ech)\s?\d+[a-z]?\b/g, " $1 ")
+    .replace(/(\d+)\s*(?:x|×|\*)\s*(\d+)/g, " $1x$2 ")
     .replace(/(\d+)\s*cm\b/g, " $1 ")
     .replace(/(\d+)\s*millimetres?\b|(\d+)\s*mm\b/g, (_m, a, b) => ` ${a ?? b}mm `)
     .replace(/\bb\.?\s?a\.?\b(?!\s*\d)/g, " beton arme ");
