@@ -53,13 +53,15 @@ export default function DevisPdfCard({ projectId, mode, isAdmin }: { projectId: 
     setWorking("save"); setMessage("Mise à jour du chantier…");
     try {
       const response = await fetch(`/api/devis/projects/${projectId}/sync`, { method: "POST" });
-      const result = await response.json().catch(() => ({})) as { error?: string; linked?: number; createdTasks?: number; total?: number };
+      const result = await response.json().catch(() => ({})) as { error?: string; linked?: number; createdTasks?: number; total?: number; taskLinkMissing?: boolean };
       if (!response.ok) throw new Error(result.error || "Enregistrement impossible.");
       // La dernière facture non payée reprend les nouveaux prix (sans effet si aucune).
       await fetch(`/api/billing/projects/${projectId}/refresh-claim`, { method: "POST" }).catch(() => null);
       setSaved(true);
       const added = result.createdTasks ? ` · ${result.createdTasks} tâche(s) ajoutée(s) au planning` : "";
-      setMessage(`Chantier mis à jour (${result.total ?? 0} lignes reliées au planning${added}). La facturation est prête.`);
+      setMessage(result.taskLinkMissing
+        ? `Chantier mis à jour (${result.total ?? 0} lignes, rapprochées du planning par leur texte${added}). La facturation est prête.`
+        : `Chantier mis à jour (${result.total ?? 0} lignes reliées au planning${added}). La facturation est prête.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Enregistrement impossible.");
     } finally { setWorking(null); }

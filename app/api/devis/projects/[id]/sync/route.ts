@@ -16,19 +16,27 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
   const { data: project } = await supabase.from("projects").select("id").eq("id", id).eq("organization_id", auth.organizationId).maybeSingle();
   if (!project) return NextResponse.json({ error: "Chantier introuvable." }, { status: 404 });
 
+  // Colonne « task_id » (lien ligne → tâche) ajoutée par un fichier SQL : si elle manque encore,
+  // on continue sans elle (la facturation rapproche alors les lignes par leur texte).
+  let hasTaskLink = true;
   const items: Array<{ id: string; designation: string | null; category: string | null; subcategory: string | null; task_id: string | null }> = [];
   for (let from = 0; ; from += 1000) {
-    const page = await supabase.from("project_price_items").select("id,designation,category,subcategory,task_id")
+    let page = await supabase.from("project_price_items").select("id,designation,category,subcategory,task_id")
       .eq("project_id", id).eq("is_internal", false).order("created_at", { ascending: true }).range(from, from + 999);
+    if (page.error && /task_id/.test(page.error.message)) {
+      hasTaskLink = false;
+      page = await supabase.from("project_price_items").select("id,designation,category,subcategory")
+        .eq("project_id", id).eq("is_internal", false).order("created_at", { ascending: true }).range(from, from + 999) as unknown as typeof page;
+    }
     if (page.error) return NextResponse.json({ error: page.error.message }, { status: 400 });
-    items.push(...((page.data ?? []) as typeof items));
+    items.push(...((page.data ?? []) as unknown as typeof items).map((item) => ({ ...item, task_id: item.task_id ?? null })));
     if (!page.data || page.data.length < 1000) break;
   }
   const { data: tasksData } = await supabase.from("project_tasks").select("id,title,progress_percent,dao_sequence").eq("project_id", id);
   const tasks = (tasksData ?? []) as unknown as Array<PlanningTask & { dao_sequence?: number | null }>;
   const taskIds = new Set(tasks.map((task) => String(task.id)));
 
-  const unlinked = items.filter((item) => !item.task_id || !taskIds.has(String(item.task_id)));
+  const unlinked = hasTaskLink ? items.filter((item) => !item.task_id || !taskIds.has(String(item.task_id))) : items;
   const matches = resolveItemTasks(unlinked.map((item) => ({ designation: String(item.designation ?? ""), subcategory: item.subcategory, category: item.category })), tasks);
   const taskFor: Array<string | null> = matches.map((match) => match?.id ?? null);
 
@@ -52,7 +60,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     byTask.set(taskId, [...(byTask.get(taskId) ?? []), item.id]);
   });
   let linked = 0;
-  for (const [taskId, ids] of byTask) {
+  for (const [taskId, ids] of hasTaskLink ? byTask : new Map<string, string[]>()) {
     const { error } = await supabase.from("project_price_items").update({ task_id: taskId }).in("id", ids).eq("project_id", id);
     if (error) {
       if (/task_id/.test(error.message)) break; // colonne absente : rien à relier
@@ -61,5 +69,5 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     linked += ids.length;
   }
 
-  return NextResponse.json({ ok: true, total: items.length, linked, createdTasks, alreadyLinked: items.length - unlinked.length });
+  return NextResponse.json({ ok: true, total: items.length, linked, createdTasks, alreadyLinked: hasTaskLink ? items.length - unlinked.length : 0, taskLinkMissing: !hasTaskLink });
 }
