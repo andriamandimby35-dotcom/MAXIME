@@ -12,6 +12,8 @@ export type ImportedPdfRow =
   | { kind: "subtotal"; title: string; total: number };
 
 export type ImportedPdfInput = {
+  /** En-tête de société, répété sur chaque page (comme les PDF du DAO). */
+  header?: { companyName: string; companyDetails: string[]; documentLabel: string; titleLabel: string; date: string };
   title: string; // 2e ligne du titre (nom du chantier)
   subtitle?: string; // ex. « DEVIS INTERNE » (petite ligne en plus, seulement pour le devis interne)
   columns: [string, string, string, string, string, string];
@@ -189,6 +191,25 @@ export function generateImportedDevisPdf(input: ImportedPdfInput) {
     page = { text: [], lines: [], fills: [] };
     pages.push(page);
     y = PAGE_HEIGHT - TOP;
+    if (input.header) {
+      // En-tête sur chaque page : la société à gauche, le type de devis, le chantier et la date à droite.
+      const h = input.header;
+      const rightX = LEFT + 290;
+      const rightWidth = PAGE_WIDTH - RIGHT - rightX;
+      let leftY = y;
+      for (const part of wrap(repairMojibake(h.companyName), 260, 15, true).slice(0, 2)) { addText(part, LEFT, leftY - 12, 15, true); leftY -= 17; }
+      for (const detail of h.companyDetails.filter(Boolean).slice(0, 3)) {
+        for (const part of wrap(repairMojibake(detail), 260, 7.5).slice(0, 2)) { addText(part, LEFT, leftY - 8, 7.5); leftY -= 9.5; }
+      }
+      let rightY = y;
+      for (const part of wrap(h.documentLabel, rightWidth - 12, 13, true).slice(0, 2)) { addText(part, rightX, rightY - 12, 13, true); rightY -= 16; }
+      rightY -= 1;
+      for (const part of wrap(`${h.titleLabel} : ${repairMojibake(input.title)}`, rightWidth, 9, true).slice(0, 3)) { addText(part, rightX, rightY - 9, 9, true); rightY -= 11; }
+      addText(`Date : ${h.date}`, rightX, rightY - 8, 8); rightY -= 10.5;
+      y = Math.min(leftY, rightY) - 6;
+      hline(y, LEFT, PAGE_WIDTH - RIGHT, 1);
+      y -= 16;
+    }
     if (first) {
       const t1 = "BORDEREAU DES DETAILS QUANTITATIFS ET ESTIMATIFS";
       addText(t1, (PAGE_WIDTH - textWidth(t1, 9, true)) / 2, y - 8, 9, true);

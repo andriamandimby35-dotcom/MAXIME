@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { generateImportedDevisPdf, type ImportedPdfRow } from "@/lib/devis/imported-devis-pdf";
+import { getCompanyProfileForPdf } from "@/lib/organization-profile";
 import { isLaborLine } from "@/lib/compositions/labor";
 
 export const dynamic = "force-dynamic";
@@ -125,9 +126,18 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   });
   closeSection();
 
-  // Même présentation que le PDF d'origine : pas d'en-tête de société, titre centré, tableau fin.
+  // En-tête de société sur chaque page (comme le PDF du DAO), puis le bordereau présenté comme le PDF d'origine.
+  const organization = Array.isArray(member.organizations) ? member.organizations[0] : member.organizations;
+  const profile = await getCompanyProfileForPdf(supabase, member.organization_id, organization?.name);
   const tmpLabel = tmpPercent.toLocaleString("fr-FR");
   const pdf = generateImportedDevisPdf({
+    header: {
+      companyName: profile.companyName,
+      companyDetails: [profile.ownerName, `${profile.address} — ${profile.phone}`, `NIF ${profile.nif} — STAT ${profile.stat}`],
+      documentLabel: mode === "internal" ? "DEVIS INTERNE" : "DEVIS EXTERNE",
+      titleLabel: "Chantier",
+      date: new Intl.DateTimeFormat("fr-FR").format(new Date()),
+    },
     title: project.name,
     subtitle: mode === "internal" ? "DEVIS INTERNE (coûts, ne pas remettre au client)" : undefined,
     columns: mode === "internal"
