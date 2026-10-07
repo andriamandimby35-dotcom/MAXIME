@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { requireDevisAdmin } from "@/lib/devis/admin";
 import { lookupLibraryPrices, loadPriceLibrary } from "@/lib/prices/library-lookup";
 import {
-  cleanParams, estimateMaterialTonnes, DEFAULT_INTERNAL_PARAMS, INTERNAL_COSTS_CATEGORY, LABOR_ROLES, LABOR_UNIT,
+  cleanParams, estimateMaterialWeights, DEFAULT_INTERNAL_PARAMS, INTERNAL_COSTS_CATEGORY, LABOR_ROLES, LABOR_UNIT,
   TRANSPORT_DESIGNATION, TRANSPORT_POSITION, TRANSPORT_UNIT, type InternalParams,
 } from "@/lib/devis/internal-costs";
 
@@ -43,8 +43,10 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   if ("error" in auth) return auth.error;
   const project = await ownProject(supabase, id, auth.organizationId);
   if (!project) return NextResponse.json({ error: "Chantier introuvable." }, { status: 404 });
-  const tonnes = estimateMaterialTonnes(await loadItems(supabase, id));
-  return NextResponse.json({ location: project.location ?? "", params: cleanParams(project.internal_params), tonnes });
+  const weights = estimateMaterialWeights(await loadItems(supabase, id));
+  const estimated = Math.round(weights.reduce((sum, row) => sum + row.tonnes, 0) * 100) / 100;
+  const stated = cleanParams(project.internal_params).weightTonnes;
+  return NextResponse.json({ location: project.location ?? "", params: cleanParams(project.internal_params), tonnes: stated > 0 ? stated : estimated, estimatedTonnes: estimated, weights });
 }
 
 type Body = { location?: string; params?: Partial<InternalParams>; prices?: Record<string, number | string | null> };
@@ -86,7 +88,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     return Number.isFinite(value) && value > 0 ? value : null;
   };
 
-  const tonnes = estimateMaterialTonnes(await loadItems(supabase, id));
+  // Poids : celui donné par le DAO / le dossier de soumission s'il est indiqué, sinon l'estimation d'après les matériaux du devis.
+  const weights = estimateMaterialWeights(await loadItems(supabase, id));
+  const estimatedTonnes = Math.round(weights.reduce((sum, row) => sum + row.tonnes, 0) * 100) / 100;
+  const tonnes = nextParams.weightTonnes > 0 ? nextParams.weightTonnes : estimatedTonnes;
   const wanted: Array<{ designation: string; unit: string; quantity: number; position: string }> = [];
   for (const role of LABOR_ROLES) {
     const quantity = Math.round(nextParams.days * nextParams[role.key] * 100) / 100;
@@ -139,5 +144,5 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const staleIds = [...current.entries()].filter(([designation]) => !keep.has(designation)).map(([, row]) => row.id);
   if (staleIds.length > 0) await supabase.from("project_price_items").delete().in("id", staleIds);
 
-  return NextResponse.json({ ok: true, tonnes, needs, params: nextParams, location, warning: warnings.join(" ") || undefined });
+  return NextResponse.json({ ok: true, tonnes, estimatedTonnes, weights, needs, params: nextParams, location, warning: warnings.join(" ") || undefined });
 }

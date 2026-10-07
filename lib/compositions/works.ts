@@ -142,7 +142,7 @@ const RULES: Rule[] = [
   { id: "crepi", title: "Crépi au mortier de ciment", units: ["m2"], keywords: ["crepi"], exclude: ["peinture"], build: mortarSurface("crépi", 1.5) },
   { id: "chape", title: "Chape au mortier de ciment", units: ["m2"], keywords: ["chape", "chappe", "ragreage"], build: mortarSurface("chape", 4) },
   {
-    id: "parpaing", title: "Maçonnerie de parpaings", units: ["m2"], keywords: ["parpaing", "agglo", "bloc creux"],
+    id: "parpaing", title: "Maçonnerie de parpaings", units: ["m2"], keywords: ["parpaing", "agglo", "bloc creux", "bloc de beton", "blocs de beton", "bloc en beton", "blocs en beton", "bloc beton"],
     build: (_key, designation) => {
       const picked = pickThickness(parseThicknessCm(designation) ?? bareThickness(designation, "parpaing|agglo|bloc", "10|15|20"), [10, 15, 20], 15);
       const thickness = picked.value;
@@ -174,6 +174,83 @@ const RULES: Rule[] = [
           { designation: "Ciment pour mortier", search: "Ciment", unit: "kg", quantity: round(250 * volume), note: "Mortier des joints.", match: CEMENT },
           { designation: "Sable pour mortier", search: "Sable", unit: "m3", quantity: round(volume), note: "Mortier des joints.", match: SAND },
           { designation: "Eau", search: "Eau", unit: "L", quantity: round(250 * volume * 0.5, 2), note: "Environ 0,5 L d'eau par kg de ciment.", optional: true, match: WATER },
+        ],
+      };
+    },
+  },
+  {
+    id: "moellon", title: "Maçonnerie de moellons", units: ["m3"], keywords: ["moellon"], exclude: ["main d", "depose", "demolition"],
+    build: () => ({
+      dosage: 250, thicknessCm: null,
+      notes: ["Environ 1,2 m³ de moellons par m³ de maçonnerie (pertes comprises) et 0,3 m³ de mortier dosé à 250 kg/m³ (le plus bas)."],
+      components: [
+        { designation: "Moellons de pierre", search: "Moellons de pierre", unit: "m3", quantity: 1.2, note: "Pertes et vides compris.", match: { all: ["moellon"], exclude: ["main", "pose"] } },
+        { designation: "Ciment pour mortier", search: "Ciment", unit: "kg", quantity: 75, note: "0,3 m³ de mortier par m³ de maçonnerie.", match: CEMENT },
+        { designation: "Sable pour mortier", search: "Sable", unit: "m3", quantity: 0.3, note: "0,3 m³ de mortier par m³ de maçonnerie.", match: SAND },
+        { designation: "Eau", search: "Eau", unit: "L", quantity: 38, note: "Environ 0,5 L d'eau par kg de ciment.", optional: true, match: WATER },
+      ],
+    }),
+  },
+  {
+    id: "carrelage", title: "Carrelage ou faïence collé", units: ["m2"], keywords: ["carrelage", "carreau", "faience", "gres cerame", "granito"],
+    exclude: ["depose", "demolition", "plinthe", "peinture", "reparation", "remplacement", "nez de marche"],
+    build: (key, designation) => {
+      const size = ascii(designation).match(/\b(\d{2})\s*[x×]\s*(\d{2})\b/);
+      const sized = size ? [`${size[1]}`, `${size[2]}`] : [];
+      const wall = /faience|murale?|mur\b/.test(key);
+      const outside = /exterieur/.test(key);
+      return {
+        dosage: null, thicknessCm: null,
+        notes: ["Carreaux posés à la colle : 1,05 m² de carreaux par m² (pertes), 5 kg de colle et 0,4 kg de joint par m². La chape ou le support est un autre poste du devis."],
+        components: [
+          { designation: wall ? "Faïence murale" : "Carreau de sol", search: wall ? "Faïence murale" : "Carrelage sol", unit: "m2", quantity: 1.05, note: "Pertes de coupe comprises.", match: wall ? { all: ["faience", ...sized.slice(0, 1)], exclude: [] } : { all: [...sized.slice(0, 1)], any: ["carreau", "carrelage", "granito"], exclude: ["colle", "plinthe", "joint", "croisillon", "primaire", "nez", "faience", "enduit"] } },
+          { designation: "Colle à carrelage (sac de 25 kg)", search: "Colle à carrelage", unit: "u", quantity: 0.2, note: "Environ 5 kg de colle par m².", match: { all: ["colle", "carrelage"], exclude: outside ? ["pvc"] : ["pvc", "flexible", "exterieure"] } },
+          { designation: "Joint de carrelage (sac de 5 kg)", search: "Joint de carrelage", unit: "u", quantity: 0.08, note: "Environ 0,4 kg de joint par m².", optional: true, match: { all: ["joint", "carrelage"], exclude: [] } },
+        ],
+      };
+    },
+  },
+  {
+    id: "coffrage", title: "Coffrage en bois", units: ["m2"], keywords: ["coffrage"], exclude: ["huile", "beton arme", "demolition", "depose"],
+    build: () => ({
+      dosage: null, thicknessCm: null,
+      notes: ["Bois réutilisé environ 3 fois : 0,4 planche, 0,5 tasseau, 0,1 kg de pointes et 0,1 L d'huile de décoffrage par m² de coffrage."],
+      components: [
+        { designation: "Planche de coffrage 25x200 (4 m)", search: "Planche de coffrage", unit: "u", quantity: 0.4, note: "Planche de 1 m² de surface, réutilisée environ 3 fois.", match: { all: ["planche", "coffrage"], exclude: [] } },
+        { designation: "Tasseau 30x40 (4 m)", search: "Tasseau", unit: "u", quantity: 0.5, note: "Raidisseurs.", match: { all: ["tasseau"], exclude: [] } },
+        { designation: "Pointes (au kg)", search: "Pointes", unit: "kg", quantity: 0.1, note: "Clouage du coffrage.", optional: true, match: { all: ["pointe"], exclude: [] } },
+        { designation: "Huile de décoffrage", search: "Huile de décoffrage", unit: "L", quantity: 0.1, note: "Environ 0,1 L par m².", optional: true, match: { all: ["huile", "coffrage"], exclude: [] } },
+      ],
+    }),
+  },
+  {
+    id: "acier", title: "Armatures en acier", units: ["kg"], keywords: ["armature", "ferraillage", "acier", "fer a beton", "fer ha", "fers ha", "ha 8", "ha8", "ha 10", "ha10", "ha12", "ha 12"],
+    exclude: ["inox", "plat ", "cornière", "corniere", "tole", "charpente", "demolition", "depose", "grille", "porte", "fenetre", "portail"],
+    build: (_key, designation) => {
+      const diameter = ascii(designation).match(/\bha\s?(\d{1,2})\b/)?.[1] ?? ascii(designation).match(/(?:ø|\bd|\bdiam\w*)\s?(\d{1,2})\b/)?.[1] ?? null;
+      return {
+        dosage: null, thicknessCm: null,
+        notes: ["Acier à béton : 1,05 kg par kg posé (chutes et recouvrements). Le fil de ligature est compté à part s'il est facturé."],
+        components: [
+          { designation: diameter ? `Acier HA${diameter} (au kg)` : "Acier à béton HA (au kg)", search: diameter ? `Acier HA${diameter}` : "Acier HA", unit: "kg", quantity: 1.05, note: "Chutes et recouvrements compris.", match: { all: ["acier", ...(diameter ? [`ha${diameter}`] : [])], exclude: ["inox"] } },
+        ],
+      };
+    },
+  },
+  {
+    id: "remblai", title: "Remblai", units: ["m3"], keywords: ["remblai"], exclude: ["demolition", "depose", "evacuation"],
+    build: (key) => {
+      const sand = key.includes("sable");
+      const topsoil = key.includes("tout venant");
+      return {
+        dosage: null, thicknessCm: null,
+        notes: ["1,2 m³ de matériau livré par m³ de remblai compacté (foisonnement)."],
+        components: [
+          sand
+            ? { designation: "Sable de remblai", search: "Sable de remblai", unit: "m3", quantity: 1.2, note: "Foisonnement compris.", match: { all: ["sable", "remblai"], exclude: [] } }
+            : topsoil
+              ? { designation: "Tout-venant", search: "Tout-venant", unit: "m3", quantity: 1.2, note: "Foisonnement compris.", match: { all: ["tout", "venant"], exclude: [] } }
+              : { designation: "Latérite pour remblai", search: "Latérite pour remblai", unit: "m3", quantity: 1.2, note: "Foisonnement compris.", match: { all: ["laterite"], exclude: [] } },
         ],
       };
     },

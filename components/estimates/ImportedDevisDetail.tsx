@@ -79,19 +79,33 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
     const total = costRows.reduce((sum, row) => sum + num(row.unit_price) * (num(row.quantity) || 1), 0);
     return { total, missing: costRows.filter((row) => !(num(row.unit_price) > 0)).length };
   }, [costRows]);
+  // Empreinte du contenu du devis : l'aperçu PDF n'est refait que si elle change.
+  const pdfVersion = useMemo(() => rows.map((row) => [row.id, row.designation, row.unit, row.quantity, row.unit_price, row.external_unit_price, row.is_internal ? 1 : 0].join("|")).join(";") + `#${project.marginPercent ?? ""}`, [rows, project.marginPercent]);
   const [location, setLocation] = useState(project.location ?? "");
   const [params, setParams] = useState<InternalParams>({ ...DEFAULT_INTERNAL_PARAMS, ...(project.internalParams ?? {}) });
   const [tonnes, setTonnes] = useState<number | null>(null);
+  const [weightList, setWeightList] = useState<Array<{ designation: string; unit: string; quantity: number; tonnes: number }>>([]);
   const [costsBusy, setCostsBusy] = useState(false);
+  // Poids estimé des matériaux dès l'ouverture (même règle que le calcul du transport).
+  useEffect(() => {
+    let active = true;
+    fetch(`/api/devis/projects/${project.id}/other-costs`).then((response) => response.json()).then((result: { tonnes?: number; weights?: Array<{ designation: string; unit: string; quantity: number; tonnes: number }> }) => {
+      if (!active) return;
+      if (typeof result.tonnes === "number") setTonnes(result.tonnes);
+      if (Array.isArray(result.weights)) setWeightList(result.weights);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [project.id, rows.length]);
   const setParam = (key: keyof InternalParams, value: string) => setParams((current) => ({ ...current, [key]: Math.max(0, Number(value.replace(",", ".")) || 0) }));
 
   async function saveInternalCosts(prices?: Record<string, number | string | null>) {
     setCostsBusy(true);
     try {
       const response = await fetch(`/api/devis/projects/${project.id}/other-costs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ location, params, prices }) });
-      const result = await response.json().catch(() => ({})) as { error?: string; tonnes?: number; needs?: string[]; warning?: string };
+      const result = await response.json().catch(() => ({})) as { error?: string; tonnes?: number; needs?: string[]; warning?: string; weights?: Array<{ designation: string; unit: string; quantity: number; tonnes: number }> };
       if (!response.ok) { setMessage(result.error ?? "Coûts internes non enregistrés."); return; }
       if (typeof result.tonnes === "number") setTonnes(result.tonnes);
+      if (Array.isArray(result.weights)) setWeightList(result.weights);
       const needs = result.needs ?? [];
       const notes: string[] = [];
       if (needs.includes("days")) notes.push("indique la durée interne prévue (jours) pour calculer les salaires");
@@ -266,7 +280,15 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   // 1. planning : chaque ligne reste reliée à une tâche (nouvelle ligne = tâche ajoutée à 0 %) ;
   // 2. facturation : la dernière facture non payée reprend les lignes et les prix du devis ;
   // 3. dépenses : le budget par catégorie et le classement sont recalculés à chaque ouverture, rien à faire.
-  async function afterChange(text: string) {
+  // Plusieurs modifications de suite = une seule mise à jour du chantier (3 secondes calmes) : moins d'écritures Supabase.
+  const afterChangeTimerRef = useRef<number | null>(null);
+  function afterChange(text: string) {
+    if (afterChangeTimerRef.current !== null) window.clearTimeout(afterChangeTimerRef.current);
+    afterChangeTimerRef.current = window.setTimeout(() => { afterChangeTimerRef.current = null; void runAfterChange(text); }, 3000);
+    return Promise.resolve();
+  }
+  async function runAfterChange(text: string) {
+    if (afterChangeTimerRef.current !== null) { window.clearTimeout(afterChangeTimerRef.current); afterChangeTimerRef.current = null; }
     setSyncBusy(true);
     try {
       const sync = await fetch(`/api/devis/projects/${project.id}/sync`, { method: "POST" }).then((response) => response.json().catch(() => ({}))).catch(() => ({})) as { createdTasks?: number; error?: string };
@@ -282,7 +304,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   // (marge, planning, dépenses, facture non payée), sans rien relire par l'IA.
   async function refreshChain() {
     await applyMargin();
-    await afterChange("Chantier actualisé");
+    await runAfterChange("Chantier actualisé");
     router.refresh();
   }
 
@@ -415,8 +437,8 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
           À compléter : {summary.missingInternal > 0 ? `${summary.missingInternal} prix interne(s)` : ""}{summary.missingInternal > 0 && summary.missingExternal > 0 ? " et " : ""}{summary.missingExternal > 0 ? `${summary.missingExternal} prix externe(s)` : ""}.
         </p>}
         <div className="estimatePdfCards" style={{ marginTop: 12, gridTemplateColumns: "1fr" }}>
-          <div className="estimatePdfCard"><strong>Devis interne</strong><span>Coûts réels et résumé marge / bénéfice</span><DevisPdfCard projectId={project.id} mode="internal" isAdmin={isAdmin} /></div>
-          <div className="estimatePdfCard"><strong>Devis externe</strong><span>Version importée, prix du client</span><DevisPdfCard projectId={project.id} mode="external" isAdmin={isAdmin} /></div>
+          <div className="estimatePdfCard"><strong>Devis interne</strong><span>Coûts réels et résumé marge / bénéfice</span><DevisPdfCard version={pdfVersion} projectId={project.id} mode="internal" isAdmin={isAdmin} /></div>
+          <div className="estimatePdfCard"><strong>Devis externe</strong><span>Version importée, prix du client</span><DevisPdfCard version={pdfVersion} projectId={project.id} mode="external" isAdmin={isAdmin} /></div>
         </div>
       </section>
 
@@ -528,8 +550,27 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
               <span style={{ display: "block", fontWeight: 700 }}>Distance fournisseur → chantier (km)</span>
               <input type="number" min="0" value={params.distanceKm || ""} onChange={(event) => setParam("distanceKm", event.target.value)} placeholder="Exemple : 120" style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }} />
             </label>
+            <label>
+              <span style={{ display: "block", fontWeight: 700 }}>Poids total à transporter (tonnes) — si le DAO ou le dossier le donne</span>
+              <input type="number" min="0" step="0.01" value={params.weightTonnes || ""} onChange={(event) => setParam("weightTonnes", event.target.value)} placeholder="Vide = estimation automatique" style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }} />
+            </label>
           </div>
-          <p style={{ marginTop: 8, fontSize: 13 }}>Les journées-personnes comprennent la nourriture. Les effectifs et la durée restent modifiables. Le transport = poids des matériaux lourds (ciment, sable, gravillon, parpaings, briques){tonnes !== null ? ` : ${tonnes.toLocaleString("fr-FR")} t estimées` : ""} × distance.</p>
+          <p style={{ marginTop: 8, fontSize: 13 }}>Les journées-personnes comprennent la nourriture. Les effectifs et la durée restent modifiables. Le transport = poids des matériaux × distance fournisseur → chantier{tonnes !== null ? ` : ${tonnes.toLocaleString("fr-FR")} t ${params.weightTonnes > 0 ? "(poids indiqué)" : "(estimées d'après les matériaux du devis)"}` : ""}{params.distanceKm > 0 && tonnes ? ` × ${params.distanceKm.toLocaleString("fr-FR")} km = ${(Math.round(tonnes * params.distanceKm * 100) / 100).toLocaleString("fr-FR")} T.KM` : ""}.</p>
+          {weightList.length > 0 && (
+            <details style={{ marginTop: 8 }}>
+              <summary style={{ cursor: "pointer", fontWeight: 700 }}>Poids des matériaux à transporter (liste pour le dossier de soumission)</summary>
+              <div className="overflow-x-auto">
+                <table className="w-full border mobileCards" style={{ marginTop: 6 }}>
+                  <thead><tr><th className="border p-2">Matériau</th><th className="border p-2">Quantité</th><th className="border p-2">Poids (tonnes)</th></tr></thead>
+                  <tbody>
+                    {weightList.map((row) => (<tr key={row.designation + row.unit}><td className="border p-2" data-label="Matériau">{row.designation}</td><td className="border p-2" data-label="Quantité">{row.quantity.toLocaleString("fr-FR")} {row.unit}</td><td className="border p-2" data-label="Poids (tonnes)">{row.tonnes.toLocaleString("fr-FR")}</td></tr>))}
+                    <tr><td className="border p-2" data-label="Total"><strong>Total estimé</strong></td><td className="border p-2" /><td className="border p-2" data-label="Poids (tonnes)"><strong>{(Math.round(weightList.reduce((sum, row) => sum + row.tonnes, 0) * 100) / 100).toLocaleString("fr-FR")}</strong></td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p style={{ fontSize: 12, marginTop: 4 }}>Estimation d'après les compositions (ciment, sable, gravillon, parpaings, briques, moellons, remblai, acier, carreaux…). Les autres matériaux ne sont pas comptés : si le DAO ou le dossier donne un poids, écris-le dans la case « Poids total à transporter ».</p>
+            </details>
+          )}
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
             <button type="button" className="estimatePrimaryAction" disabled={costsBusy} onClick={() => void saveInternalCosts()}>{costsBusy ? "Calcul en cours…" : "Enregistrer et calculer les salaires et le transport"}</button>
             <button type="button" className="estimateSecondaryAction" disabled={costsBusy} onClick={() => void searchTransportPrice()}>Chercher le prix du transport sur internet (crédits IA)</button>

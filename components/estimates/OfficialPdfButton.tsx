@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 
 export default function OfficialPdfButton({ estimateId, mode = "external" }: { estimateId: string; mode?: "external" | "internal" }) {
@@ -18,6 +18,12 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
     return headers;
   }
 
+  // Le PDF d'aperçu est fabriqué UNE fois, gardé en mémoire dans le navigateur (aucun fichier temporaire dans Supabase),
+  // puis réouvert sans rien refaire tant que « Actualiser l'aperçu PDF » n'est pas cliqué.
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const previewUrlRef = useRef<string | null>(null);
+  useEffect(() => () => { if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current); }, []);
+
   function openPreviewWindow() {
     const preview = window.open("about:blank", "_blank");
     if (!preview) {
@@ -29,14 +35,18 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
     return preview;
   }
 
-  function showPdf(preview: Window, pdfBase64: string) {
+  function blobUrlFrom(pdfBase64: string) {
     const bytes = Uint8Array.from(atob(pdfBase64), (character) => character.charCodeAt(0));
-    const objectUrl = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+    return URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+  }
+
+  function showPdf(preview: Window, pdfBase64: string) {
+    const objectUrl = blobUrlFrom(pdfBase64);
     preview.location.replace(objectUrl);
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60 * 60 * 1000);
   }
 
-  async function requestPdf(save: boolean, preview: Window) {
+  async function requestPdf(save: boolean) {
     const headers = await authenticatedHeaders();
     headers["X-PDF-Client-Fetch"] = "1";
     const response = await fetch(`/api/estimates/${estimateId}/official-pdf`, {
@@ -46,7 +56,7 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok || !result.pdfBase64) throw new Error(result.error || "Le PDF n’a pas pu être préparé.");
-    showPdf(preview, result.pdfBase64);
+    return result.pdfBase64 as string;
   }
 
   async function previewPdf() {
@@ -54,15 +64,11 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
     setWorking("preview");
     setMessage("Création de l’aperçu PDF…");
     try {
-      const response = await fetch(`/api/estimates/${estimateId}/official-pdf`, {
-        method: "POST",
-        headers: await authenticatedHeaders(),
-        body: JSON.stringify({ save: false, mode }),
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok || !result.previewUrl) {
-        throw new Error(result.error || "Prévisualisation impossible.");
-      }
+      const pdfBase64 = await requestPdf(false);
+      const url = blobUrlFrom(pdfBase64);
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = url;
+      setPreviewUrl(url);
       setPreviewReady(true);
       setMessage("Aperçu prêt. Cliquez sur « Ouvrir l’aperçu PDF » pour l’afficher dans le lecteur PDF du navigateur.");
     } catch (error) {
@@ -73,25 +79,15 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
     }
   }
 
-  async function openPreviewPdf() {
-    if (!previewReady) {
+  function openPreviewPdf() {
+    if (!previewReady || !previewUrl) {
       setMessage("Préparez d’abord l’aperçu PDF.");
       return;
     }
-    const preview = openPreviewWindow();
-    if (!preview) return;
-    setWorking("preview");
-    try {
-      await requestPdf(false, preview);
-      setMessage("Aperçu ouvert dans le lecteur PDF du navigateur.");
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : "Ouverture du PDF impossible.";
-      preview.document.title = "PDF indisponible";
-      preview.document.body.innerHTML = `<p style="font-family:system-ui;padding:24px">${detail.replace(/[<>&]/g, "")}</p>`;
-      setMessage(detail);
-    } finally {
-      setWorking(null);
-    }
+    // Aucune nouvelle fabrication : on rouvre le PDF déjà créé.
+    const opened = window.open(previewUrl, "_blank");
+    if (!opened) setMessage("Le navigateur a bloqué la fenêtre PDF. Autorisez les fenêtres surgissantes puis réessayez.");
+    else setMessage("Aperçu ouvert dans le lecteur PDF du navigateur.");
   }
 
   async function savePdf() {
@@ -108,7 +104,14 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
     try {
       const preview = openPreviewWindow();
       if (!preview) return;
-      await requestPdf(true, preview);
+      try {
+        showPdf(preview, await requestPdf(true));
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "Ouverture du PDF impossible.";
+        preview.document.title = "PDF indisponible";
+        preview.document.body.innerHTML = `<p style="font-family:system-ui;padding:24px">${detail.replace(/[<>&]/g, "")}</p>`;
+        throw error;
+      }
       setPreviewReady(false);
       setMessage("PDF enregistré. Il remplace l’ancienne version de ce type de devis.");
     } catch (error) {
@@ -137,7 +140,7 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
       </button>
       <button
         type="button"
-        onClick={() => void openPreviewPdf()}
+        onClick={openPreviewPdf}
         disabled={!previewReady || Boolean(working)}
         style={{
           border: "1px solid #0f766e", borderRadius: 6, padding: "9px 14px",

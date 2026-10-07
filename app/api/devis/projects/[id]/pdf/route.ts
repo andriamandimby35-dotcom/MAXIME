@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { generateImportedDevisPdf, type ImportedPdfRow } from "@/lib/devis/imported-devis-pdf";
 import { getCompanyProfileForPdf } from "@/lib/organization-profile";
 import { isLaborLine } from "@/lib/compositions/labor";
+import { devisNumber } from "@/lib/devis/devis-number";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -36,6 +37,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
   const { data: project } = await supabase.from("projects").select("id,name").eq("id", id).eq("organization_id", member.organization_id).maybeSingle();
   if (!project) return NextResponse.json({ error: "Devis introuvable dans votre organisation." }, { status: 404 });
+
+  // Numéro du devis (comme le numéro de facture) : remplace la mention « devis externe » dans l'en-tête.
+  let projectCode: string | null = null;
+  {
+    const codeResult = await supabase.from("projects").select("project_code").eq("id", id).maybeSingle();
+    if (!codeResult.error) projectCode = (codeResult.data as { project_code?: string | null } | null)?.project_code ?? null;
+  }
+  const number = devisNumber(projectCode, id);
 
   // Taux « TMP » lu sur le devis d'origine (colonne ajoutée par le SQL 20261013 : absente = pas de TMP).
   let tmpPercent = 0;
@@ -134,7 +143,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     header: {
       companyName: profile.companyName,
       companyDetails: [profile.ownerName, `${profile.address} — ${profile.phone}`, `NIF ${profile.nif} — STAT ${profile.stat}`],
-      documentLabel: mode === "internal" ? "DEVIS INTERNE" : "DEVIS EXTERNE",
+      documentLabel: mode === "internal" ? `DEVIS INTERNE N° ${number}` : `DEVIS N° ${number}`,
       titleLabel: "Chantier",
       date: new Intl.DateTimeFormat("fr-FR").format(new Date()),
     },

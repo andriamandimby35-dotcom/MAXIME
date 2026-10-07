@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getCompanyProfileForPdf } from "@/lib/organization-profile";
 import { generateOfficialEstimatePdf, type OfficialPdfRow } from "@/lib/estimates/official-pdf";
+import { devisNumber } from "@/lib/devis/devis-number";
 import { createOrSyncProjectFromEstimate } from "@/lib/projects/create-project-from-estimate";
 import { createServerClient } from "@/lib/supabase/server";
 import { computeExternalUnitPrices, targetBeforeTax } from "@/lib/estimates/external-pricing";
@@ -211,14 +212,18 @@ async function generateOfficialPdfResponse(
 
   const organization = Array.isArray(member.organizations) ? member.organizations[0] : member.organizations;
   const profile = await getCompanyProfileForPdf(supabase, member.organization_id, organization?.name);
+  // Numéro du devis (comme le numéro de facture), à la place de la mention « devis officiel / externe ».
+  const numberProject = await supabase.from("projects").select("project_code").eq("organization_id", member.organization_id).eq("source_estimate_id", estimateId).maybeSingle();
+  const number = devisNumber(numberProject.error ? null : (numberProject.data as { project_code?: string | null } | null)?.project_code, estimateId);
   const pdf = generateOfficialEstimatePdf({
+    documentLabel: mode === "internal" ? `DEVIS INTERNE N° ${number}` : `DEVIS N° ${number}`,
     companyName: profile.companyName,
     companyDetails: [
       profile.ownerName,
       `${profile.address} — ${profile.phone}`,
       `NIF ${profile.nif} — STAT ${profile.stat}`,
     ],
-    daoTitle: `${mode === "internal" ? "DEVIS INTERNE — " : ""}${tender?.title || "DAO"}`,
+    daoTitle: `${tender?.title || "DAO"}`,
     daoReference: tender?.reference || "",
     clientName: tender?.client_name || estimate.client_name || "",
     estimateDate: new Intl.DateTimeFormat("fr-FR").format(new Date()),

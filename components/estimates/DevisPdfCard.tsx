@@ -7,12 +7,15 @@ import { useEffect, useRef, useState } from "react";
 // « Prévisualiser » → l'aperçu s'affiche DANS la carte (pas de nouvelle fenêtre) →
 // « Confirmer et enregistrer » met à jour le chantier (planning) puis la facturation.
 // Le PDF est refait à la demande et n'est jamais stocké (aucun stockage Supabase).
-export default function DevisPdfCard({ projectId, mode, isAdmin }: { projectId: string; mode: "external" | "internal"; isAdmin: boolean }) {
+export default function DevisPdfCard({ projectId, mode, isAdmin, version }: { projectId: string; mode: "external" | "internal"; isAdmin: boolean; version?: string }) {
   const [working, setWorking] = useState<"preview" | "save" | null>(null);
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [saved, setSaved] = useState(false);
   const urlRef = useRef<string | null>(null);
+  // Contenu du devis au moment où l'aperçu a été fabriqué : le PDF n'est refait que si le devis a changé depuis.
+  const builtVersionRef = useRef<string | null>(null);
+  const stale = Boolean(objectUrl) && version !== undefined && builtVersionRef.current !== version;
   // Sur téléphone, un PDF ne s'affiche pas bien dans la page : on propose de l'ouvrir en plein écran.
   const [phone, setPhone] = useState(false);
   useEffect(() => {
@@ -33,6 +36,10 @@ export default function DevisPdfCard({ projectId, mode, isAdmin }: { projectId: 
 
   async function preview() {
     if (working) return;
+    if (objectUrl && version !== undefined && builtVersionRef.current === version) {
+      setMessage("Le devis n’a pas changé depuis cet aperçu : il est déjà à jour (rien n’est refait).");
+      return;
+    }
     setWorking("preview"); setSaved(false); setMessage("Création de l’aperçu PDF…");
     try {
       const response = await fetch(`/api/devis/projects/${projectId}/pdf`, {
@@ -46,6 +53,7 @@ export default function DevisPdfCard({ projectId, mode, isAdmin }: { projectId: 
       const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
       if (urlRef.current) URL.revokeObjectURL(urlRef.current);
       urlRef.current = url;
+      builtVersionRef.current = version ?? null;
       setObjectUrl(url);
       setMessage("Aperçu prêt. Vérifiez-le, puis enregistrez pour mettre à jour le chantier et la facturation.");
     } catch (error) {
@@ -82,7 +90,7 @@ export default function DevisPdfCard({ projectId, mode, isAdmin }: { projectId: 
     <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 9 }}>
       <button type="button" onClick={() => void preview()} disabled={Boolean(working)} aria-busy={working === "preview"}
         style={{ ...primary, background: working === "preview" ? "#d1fae5" : "#166534", color: working === "preview" ? "#14532d" : "white", cursor: working ? "wait" : "pointer" }}>
-        {working === "preview" ? "Création de l’aperçu…" : objectUrl ? "Actualiser l’aperçu PDF" : mode === "internal" ? "Prévisualiser le devis interne" : "Prévisualiser le devis externe"}
+        {working === "preview" ? "Création de l’aperçu…" : objectUrl ? (stale ? "Actualiser l’aperçu PDF (devis modifié)" : "Aperçu PDF à jour") : mode === "internal" ? "Prévisualiser le devis interne" : "Prévisualiser le devis externe"}
       </button>
       {objectUrl && isAdmin && (
         <button type="button" onClick={() => void save()} disabled={Boolean(working)} aria-busy={working === "save"}

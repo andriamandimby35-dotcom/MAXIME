@@ -7,6 +7,7 @@ import { createClient } from "@/lib/supabase/client";
 import OfficialPdfButton from "@/components/estimates/OfficialPdfButton";
 import { LibraryPicker } from "@/components/estimates/LibraryPicker";
 import { compositeInputsFor } from "@/lib/compositions/works";
+import { estimateMaterialWeights } from "@/lib/devis/internal-costs";
 
 type DaoColumn = {
   name: string;
@@ -573,6 +574,12 @@ export default function EstimateBuilder({
   // Ligne dont la carte « Bibliothèque » est ouverte (choix manuel d'un prix, sans rien changer à la bibliothèque).
   const [libraryLine, setLibraryLine] = useState<number | null>(null);
   const [addLineOpen, setAddLineOpen] = useState(false);
+  // Transport des matériaux (valable pour tous les devis du DAO) : distance fournisseur → chantier et poids total.
+  const [transportDistanceInput, setTransportDistanceInput] = useState(0);
+  const [transportWeightInput, setTransportWeightInput] = useState(0);
+  const transportRestoredRef = useRef(false);
+  // Lignes internes sans prix : cachées par défaut (rien à afficher tant qu'il n'y a pas de donnée).
+  const [showEmptyInternal, setShowEmptyInternal] = useState(false);
   const [freeBusy, setFreeBusy] = useState(false);
   const [editingLine, setEditingLine] = useState<number | null>(null);
   const [estimateId, setEstimateId] = useState<string | null>(null);
@@ -695,10 +702,21 @@ export default function EstimateBuilder({
     const snapshot = estimateLinesSnapshot(estimateLines);
     if (snapshot === autoSaveSnapshotRef.current) return;
 
+    // Seules les lignes MODIFIÉES sont réécrites (pas les 170 lignes à chaque frappe) : moins d'écritures Supabase.
+    const previousLines = new Map<string, string>();
+    try {
+      for (const entry of JSON.parse(autoSaveSnapshotRef.current || "[]") as Array<{ id: string; data: unknown }>) previousLines.set(entry.id, JSON.stringify(entry.data));
+    } catch { /* ancien instantané illisible : toutes les lignes seront réécrites */ }
+    const changedLines = estimateLines.filter((line) => {
+      const id = String(line[LINE_ID_KEY] ?? "");
+      return id !== "" && previousLines.get(id) !== JSON.stringify(linePayload(line));
+    });
+
+    // Les modifications sont regroupées : une seule sauvegarde (et une seule mise à jour des PDF) après 3 secondes calmes.
     const timer = window.setTimeout(() => {
       void (async () => {
         const supabase = createClient();
-        const saveErrors = await Promise.all(estimateLines.map(async (line) => {
+        const saveErrors = await Promise.all(changedLines.map(async (line) => {
           const lineId = line[LINE_ID_KEY];
           if (!lineId) return null;
           const { error } = await supabase
@@ -738,7 +756,7 @@ export default function EstimateBuilder({
           ? "Modifications enregistrées et PDF actualisés."
           : "Modifications enregistrées, mais un PDF n'a pas pu être actualisé.");
       })();
-    }, 700);
+    }, 3000);
 
     return () => window.clearTimeout(timer);
   }, [estimateId, estimateLines, creating, applyingManualCalculation, priceSearchStatus?.running]);
@@ -1311,6 +1329,71 @@ export default function EstimateBuilder({
         )) ?? "",
       }));
   }, [estimateLines, daoColumns]);
+
+  const isEmptyInternalLine = (line: EstimateLineData) =>
+    line.__internalOnly === true && daoRowType(line) === "item" && !(numberFrom(line, UNIT_PRICE_KEYS) > 0);
+  const emptyInternalCount = useMemo(
+    () => estimateLines.filter((line) => isEmptyInternalLine(line) && line.__disabledInternal !== true && line.__excludedByChoice !== true).length,
+    [estimateLines],
+  );
+  const materialWeights = useMemo(() => {
+    const designationKey = daoColumnName(daoColumns, ["Désignation", "Designation"]);
+    const unitKey = daoColumnName(daoColumns, ["Unité", "Unite"]);
+    const quantityKey = daoColumnName(daoColumns, ["Quantité", "Quantite"]);
+    return estimateMaterialWeights(
+      estimateLines
+        .filter((line) => daoRowType(line) === "item" && line.__internalOnly !== true && line.__excludedByChoice !== true)
+        .map((line) => ({ designation: String(line[designationKey] ?? ""), unit: String(line[unitKey] ?? ""), quantity: line[quantityKey] as string | number | null })),
+    );
+  }, [estimateLines, daoColumns]);
+  const estimatedTonnes = Math.round(materialWeights.reduce((sum, row) => sum + row.tonnes, 0) * 100) / 100;
+  const daoTransportInfo = daoTransportRef.current;
+  const transportTonnes = transportWeightInput > 0 ? transportWeightInput : daoTransportInfo.totalKg > 0 ? daoTransportInfo.totalKg / 1000 : estimatedTonnes;
+  const transportKm = transportDistanceInput > 0 ? transportDistanceInput : daoTransportInfo.distanceKm;
+  const transportLineIndex = estimateLines.findIndex((line) => line.__internalOnly === true && daoRowType(line) === "item" && normalizedLabel(String(line[daoColumnName(daoColumns, ["Désignation", "Designation"])] ?? "")).includes("transportapprovisionnement"));
+
+  // Retrouve distance et poids déjà enregistrés sur la ligne de transport quand le devis est rouvert.
+  useEffect(() => {
+    if (transportRestoredRef.current || transportLineIndex < 0) return;
+    const line = estimateLines[transportLineIndex];
+    const km = Number(line.__transportDistanceKm) || 0;
+    const tonnes = Number(line.__transportWeightTonnes) || 0;
+    transportRestoredRef.current = true;
+    if (km > 0) setTransportDistanceInput(km);
+    if (tonnes > 0) setTransportWeightInput(tonnes);
+  }, [estimateLines, transportLineIndex]);
+
+  async function applyTransport() {
+    if (transportLineIndex < 0) { setMessage("Ce devis n'a pas de ligne « Transport, approvisionnement et livraison rendus chantier » : ajoute-la avec « + Ajouter une ligne » (unité T.KM, interne)."); return; }
+    if (!(transportTonnes > 0)) { setMessage("Poids inconnu : indique le poids total en tonnes (donné par le DAO ou le dossier de soumission)."); return; }
+    if (!(transportKm > 0)) { setMessage("Indique la distance fournisseur → chantier (km) pour calculer le transport."); return; }
+    const quantityKey = columnName(daoColumns, QUANTITY_KEYS);
+    const totalKey = columnName(daoColumns, TOTAL_KEYS);
+    const quantity = Math.round(transportTonnes * transportKm * 100) / 100;
+    const source = transportWeightInput > 0 ? "poids indiqué" : daoTransportInfo.totalKg > 0 ? `poids repris du DAO${daoTransportInfo.source ? ` (${daoTransportInfo.source})` : ""}` : "poids estimé d'après les matériaux du devis";
+    const nextLines = estimateLines.map((line, index) => {
+      if (index !== transportLineIndex) return line;
+      const changed = {
+        ...line,
+        [quantityKey]: quantity,
+        __transportDistanceKm: transportKm,
+        __transportWeightTonnes: transportTonnes,
+        __transportTonneKm: quantity,
+        __daoNeedsReview: false,
+        __aiSourceBasis: `Transport : ${transportTonnes.toLocaleString("fr-FR")} t (${source}) × ${transportKm.toLocaleString("fr-FR")} km = ${quantity.toLocaleString("fr-FR")} T.KM.`,
+      } as EstimateLineData;
+      return { ...changed, [totalKey]: numberFrom(changed, QUANTITY_KEYS) * numberFrom(changed, UNIT_PRICE_KEYS) };
+    });
+    setEstimateLines(nextLines);
+    const lineId = nextLines[transportLineIndex]?.[LINE_ID_KEY];
+    if (estimateId && lineId) {
+      const { error } = await createClient().from("estimate_lines").update({ data: linePayload(nextLines[transportLineIndex]) }).eq("id", lineId);
+      if (error) { setMessage(`Transport non enregistré : ${error.message}`); return; }
+    }
+    await persistEstimateTotal(nextLines);
+    const price = numberFrom(nextLines[transportLineIndex], UNIT_PRICE_KEYS);
+    setMessage(`Transport calculé : ${transportTonnes.toLocaleString("fr-FR")} t × ${transportKm.toLocaleString("fr-FR")} km = ${quantity.toLocaleString("fr-FR")} T.KM${price > 0 ? ` (${Math.round(quantity * price).toLocaleString("fr-FR")} Ar)` : " — le prix par T.KM reste à remplir"}.`);
+  }
 
   async function persistEstimateTotal(lines: EstimateLineData[]) {
     const total = lines.reduce((sum, line) => sum + (line.__excludedByChoice === true ? 0 : lineTotal(line)), 0);
@@ -2550,7 +2633,15 @@ export default function EstimateBuilder({
 
   // Après un ajout, une modification ou une suppression de ligne : si le chantier de ce devis existe, il suit le devis
   // (lignes + planning), puis la dernière facture non payée reprend les nouveaux prix. Les dépenses se recalculent seules.
+  // Plusieurs modifications de suite = UNE seule mise à jour du chantier (planning, dépenses, facture) après 6 secondes calmes :
+  // chaque mise à jour réécrit les lignes du chantier, inutile de la refaire à chaque ligne.
+  const projectSyncTimerRef = useRef<number | null>(null);
   async function syncProjectAfterChange(text: string) {
+    if (!estimateId) return;
+    if (projectSyncTimerRef.current !== null) window.clearTimeout(projectSyncTimerRef.current);
+    projectSyncTimerRef.current = window.setTimeout(() => { projectSyncTimerRef.current = null; void runProjectSync(text); }, 6000);
+  }
+  async function runProjectSync(text: string) {
     if (!estimateId) return;
     try {
       const sync = await fetch(`/api/estimates/${estimateId}/sync-project`, { method: "POST" }).then((response) => response.json().catch(() => ({}))).catch(() => ({})) as { synced?: boolean; projectId?: string; createdTasks?: number };
@@ -2913,6 +3004,56 @@ export default function EstimateBuilder({
           </p>
         </section>
       )}
+      {estimateLines.length > 0 && (
+        <section className="estimateTransportCard" style={{ padding: 14, border: "1px solid #9ca3af", borderRadius: 8, background: "#f9fafb", maxWidth: "100%" }}>
+          <h3 className="text-lg font-bold">Transport des matériaux</h3>
+          <p className="mt-1 text-sm text-gray-700">
+            {daoTransportInfo.totalKg > 0
+              ? `Poids donné par le DAO : ${(daoTransportInfo.totalKg / 1000).toLocaleString("fr-FR")} t${daoTransportInfo.source ? ` (${daoTransportInfo.source})` : ""}.`
+              : `Le DAO ne donne pas de poids : estimation d'après les matériaux du devis = ${estimatedTonnes.toLocaleString("fr-FR")} t.`}
+            {daoTransportInfo.distanceKm > 0 ? ` Distance lue dans le DAO : ${daoTransportInfo.distanceKm.toLocaleString("fr-FR")} km.` : ""}
+          </p>
+          <div className="estimateWorksiteFields" style={{ marginTop: 8 }}>
+            <label>
+              <span style={{ display: "block", fontWeight: 700 }}>Distance fournisseur → chantier (km)</span>
+              <input type="number" min="0" value={transportDistanceInput || ""} onChange={(event) => setTransportDistanceInput(Math.max(0, Number(event.target.value) || 0))}
+                placeholder={daoTransportInfo.distanceKm > 0 ? `DAO : ${daoTransportInfo.distanceKm}` : "Exemple : 120"} style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }} />
+            </label>
+            <label>
+              <span style={{ display: "block", fontWeight: 700 }}>Poids total à transporter (tonnes)</span>
+              <input type="number" min="0" step="0.01" value={transportWeightInput || ""} onChange={(event) => setTransportWeightInput(Math.max(0, Number(event.target.value) || 0))}
+                placeholder="Vide = poids du DAO ou estimation" style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }} />
+            </label>
+          </div>
+          <p className="mt-2 text-sm">
+            {transportTonnes > 0 && transportKm > 0
+              ? `${transportTonnes.toLocaleString("fr-FR")} t × ${transportKm.toLocaleString("fr-FR")} km = ${(Math.round(transportTonnes * transportKm * 100) / 100).toLocaleString("fr-FR")} T.KM`
+              : "Indique la distance (et le poids si le DAO ne le donne pas) pour calculer le transport."}
+          </p>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 8 }}>
+            <button type="button" className="estimatePrimaryAction" style={{ width: "auto" }} onClick={() => void applyTransport()}>Calculer le transport du devis</button>
+          </div>
+          {materialWeights.length > 0 && (
+            <details style={{ marginTop: 10 }}>
+              <summary style={{ cursor: "pointer", fontWeight: 700 }}>Poids des matériaux estimés (liste pour le dossier de soumission)</summary>
+              <table className="mb-2 mt-2 w-full border mobileCards">
+                <thead><tr><th className="border p-2">Matériau</th><th className="border p-2">Quantité</th><th className="border p-2">Poids (t)</th></tr></thead>
+                <tbody>
+                  {materialWeights.map((row) => (
+                    <tr key={row.designation + row.unit}>
+                      <td className="border p-2" data-label="Matériau">{row.designation}</td>
+                      <td className="border p-2" data-label="Quantité">{row.quantity.toLocaleString("fr-FR")} {row.unit}</td>
+                      <td className="border p-2" data-label="Poids (t)">{row.tonnes.toLocaleString("fr-FR")}</td>
+                    </tr>
+                  ))}
+                  <tr><td className="border p-2" data-label="Total"><strong>Total estimé</strong></td><td className="border p-2" /><td className="border p-2" data-label="Poids (t)"><strong>{estimatedTonnes.toLocaleString("fr-FR")}</strong></td></tr>
+                </tbody>
+              </table>
+              <p style={{ fontSize: 12 }}>Ciment, sable, gravillon, parpaings, briques, moellons, remblai, acier, carreaux… Les autres matériaux ne sont pas comptés : si le DAO donne un poids, il passe avant cette estimation.</p>
+            </details>
+          )}
+        </section>
+      )}
       {!sourceTenderId && estimateId && false && (
         <section style={{ padding: 14, border: "1px solid #9ca3af", borderRadius: 8, background: "#f9fafb" }}>
           <label>
@@ -2943,6 +3084,14 @@ export default function EstimateBuilder({
             <button type="button" role="tab" aria-selected={externalMarginPreview} className={externalMarginPreview ? "estimatePrimaryAction" : "estimateSecondaryAction"} onClick={() => setExternalMarginPreview(true)}>Devis externe</button>
           </div>
         </div>
+        {emptyInternalCount > 0 && !externalMarginPreview && (
+          <p style={{ margin: "10px 0 0", fontSize: 13 }}>
+            {showEmptyInternal ? "" : `${emptyInternalCount} ligne${emptyInternalCount > 1 ? "s" : ""} interne${emptyInternalCount > 1 ? "s" : ""} sans prix masquée${emptyInternalCount > 1 ? "s" : ""}. `}
+            <button type="button" className="estimateSecondaryAction" style={{ width: "auto" }} onClick={() => setShowEmptyInternal((value) => !value)}>
+              {showEmptyInternal ? "Masquer les lignes internes sans prix" : "Afficher les lignes internes sans prix"}
+            </button>
+          </p>
+        )}
         {(hasMasonryVariants || otherExclusiveGroups.length > 0) && (
           <section className="mb-4 mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4" style={{ maxWidth: "100%" }}>
             <h4 className="font-bold text-emerald-950">Choix à faire dans ce devis</h4>
@@ -3004,7 +3153,7 @@ export default function EstimateBuilder({
               </tr>
             )}
             {estimateLines.map((item, index) =>
-              item.__disabledInternal === true || item.__excludedByChoice === true || (externalMarginPreview && item.__internalOnly === true) ? null : daoRowType(item) === "section" ? (
+              item.__disabledInternal === true || item.__excludedByChoice === true || (externalMarginPreview && item.__internalOnly === true) || (!showEmptyInternal && isEmptyInternalLine(item) && selectedLine !== index) ? null : daoRowType(item) === "section" ? (
                 <tr key={index}>
                   <td
                     colSpan={daoColumns.length + 1 + (externalMarginPreview ? 2 : 0)}

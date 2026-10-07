@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { canonicalMaterialKey, canonicalUnit, materialFamily } from "@/lib/material-normalization";
 import { cheapestOf, priceSearchableText, usefulTokens } from "@/lib/price-engine/search-price";
+import { btpTokens, unitGroup } from "@/lib/prices/synonyms";
 
 // Recherche GRATUITE de prix dans la bibliothèque (aucun appel à l'IA, aucun
 // internet) pour plusieurs lignes d'un coup : la bibliothèque de l'entreprise
@@ -99,47 +100,61 @@ export async function lookupLibraryPrices(supabase: SupabaseClient, organization
 // - même verbe d'action (réparation, dépose, remplacement…) des deux côtés : un prix de
 //   matériel NEUF n'est jamais repris pour une « réparation » ;
 // - les mots de l'un doivent tous se retrouver dans l'autre (quelques mots d'écart permis).
-const LOOSE_STOP = new Set(["de", "des", "du", "la", "le", "les", "l", "d", "et", "en", "a", "au", "aux", "sur", "pour", "avec", "un", "une", "fourniture", "fournitures", "pose", "mise", "place", "travaux", "y", "compris", "ens", "ensemble"]);
 const LOOSE_ACTIONS = ["reparation", "remplacement", "depose", "demolition", "curage", "reprise", "remise", "ajustage", "nettoyage", "traitement", "decapage", "rebouchage", "repose", "renovation", "rehabilitation", "refection"];
-const LOOSE_SYNONYMS: Record<string, string> = { ventail: "vantail", ventaux: "vantail", vantaux: "vantail", vantail: "vantail", ventails: "vantail", metallique: "metal", metalliques: "metal", metalliq: "metal", carrelage: "carreau", carrelages: "carreau", bahu: "bahut", bahuts: "bahut", exterieure: "exterieur", exterieures: "exterieur", interieure: "interieur", interieures: "interieur" };
+// Vocabulaire du bâtiment (parpaing = agglo, fer HA10 = Ø10 = acier 10 mm, dosage 350 = Q350…) : voir synonyms.ts.
+const LOOSE_EXTRA: Record<string, string> = { ventail: "vantail", ventaux: "vantail", vantaux: "vantail", ventails: "vantail", metallique: "metal", metalliques: "metal", metalliq: "metal", bahu: "bahut", bahuts: "bahut", exterieure: "exterieur", exterieures: "exterieur", interieure: "interieur", interieures: "interieur" };
 
 function looseSignature(text: string) {
-  const words = text.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/['’]/g, " ").split(/[^a-z0-9]+/).filter(Boolean)
-    .map((word) => LOOSE_SYNONYMS[word] ?? (/\d/.test(word) || word.length <= 3 ? word : word.replace(/(s|x)$/, "")));
+  const words = btpTokens(text).map((word) => LOOSE_EXTRA[word] ?? word);
   const actions = new Set(words.filter((word) => LOOSE_ACTIONS.some((action) => word.startsWith(action.slice(0, 6)))));
   const digits = new Set(words.filter((word) => /\d/.test(word)));
-  const content = new Set(words.filter((word) => !LOOSE_STOP.has(word) && !actions.has(word) && !/\d/.test(word)));
+  const content = new Set(words.filter((word) => !actions.has(word) && !/\d/.test(word)));
   return { actions, digits, content };
 }
 const sameLooseSet = (left: Set<string>, right: Set<string>) => left.size === right.size && [...left].every((word) => right.has(word));
+// Une fiche de main-d'œuvre n'est jamais reprise pour une fourniture (et inversement).
+const isLabourText = (text: string) => /main[\s'’-]*d[\s'’-]*(?:oe|œ)uvre|\bsalaire\b|\bjour[\s-]*personne\b/i.test(text.normalize("NFD").replace(/[̀-ͯ]/g, ""));
+const sameUnitLoose = (left: string, right: string) => {
+  const a = unitGroup(left);
+  return Boolean(a) && a === unitGroup(right);
+};
 
 export type LooseHit = { price: number; matched: string; score: number };
 
 /** Meilleur prix de la bibliothèque pour une ligne, par comparaison souple des mots. null = rien de sûr. */
 export function looseLibraryMatch(library: PriceLibraryRow[], item: { designation: string; unit: string }): LooseHit | null {
-  const unit = canonicalUnit(item.unit);
-  if (!unit || !item.designation.trim()) return null;
+  if (!item.unit.trim() || !item.designation.trim()) return null;
   const target = looseSignature(item.designation);
   if (target.content.size === 0) return null;
-  let best: LooseHit | null = null;
+  let best: (LooseHit & { shared: number }) | null = null;
   for (const row of library) {
-    if (canonicalUnit(String(row.unite ?? "")) !== unit) continue;
+    if (!sameUnitLoose(item.unit, String(row.unite ?? ""))) continue;
     const price = savedPrice(row);
     if (!price) continue;
     const other = looseSignature(String(row.designation ?? ""));
     if (other.content.size === 0 || !sameLooseSet(target.actions, other.actions)) continue;
-    // Dimensions : identiques des deux côtés. Seule exception : la ligne n'en cite aucune et la fiche n'en a qu'une
-    // (ex. « Gouttière PVC Ø100 », « Plaque de plâtre BA13 ») ; une fiche à plusieurs dimensions (« Portillon 120x70 ») n'est jamais reprise pour une ligne sans dimension.
-    if (!(sameLooseSet(target.digits, other.digits) || (target.digits.size === 0 && other.digits.size <= 1))) continue;
+    if (isLabourText(String(row.designation ?? "")) !== isLabourText(item.designation)) continue;
+    // Dimensions : identiques des deux côtés ; ou toutes celles de la fiche se retrouvent dans la ligne du DAO (la ligne en
+    // donne plus : dosage, épaisseur…) ; ou la ligne n'en cite aucune et la fiche n'en a qu'une (« Gouttière PVC Ø100 »).
+    // Une fiche à plusieurs dimensions n'est jamais reprise pour une ligne qui n'en cite pas.
+    const digitsOk = sameLooseSet(target.digits, other.digits)
+      || (other.digits.size > 0 && [...other.digits].every((word) => target.digits.has(word)))
+      || (target.digits.size === 0 && other.digits.size <= 1);
+    if (!digitsOk) continue;
     const shared = [...target.content].filter((word) => other.content.has(word)).length;
     if (shared === 0) continue;
     const smaller = Math.min(target.content.size, other.content.size);
     const union = new Set([...target.content, ...other.content]).size;
-    // Tous les mots du plus court se retrouvent dans l'autre, et pas plus de 3 mots d'écart.
-    if (shared < smaller || union - shared > 3) continue;
+    const nearSame = shared >= 4 && shared / union >= 0.7; // textes presque identiques, un ou deux mots différents (« antirouille » / « protection »)
+    if (shared < smaller && !nearSame) continue;
+    const libraryInside = other.content.size === shared;
+    // La fiche est plus courte que le texte technique du DAO : tous ses mots s'y retrouvent (une fiche d'un seul mot
+    // n'est reprise que pour un texte court). Sinon (DAO plus court) : pas plus de 3 mots d'écart.
+    if (libraryInside) { if (other.content.size < 2 && target.content.size > 3) continue; }
+    else if (!nearSame && union - shared > 3) continue;
     const score = shared / union;
-    if (score < 0.4) continue;
-    if (!best || score > best.score || (score === best.score && price < best.price)) best = { price: Math.round(price * 100) / 100, matched: String(row.designation ?? ""), score };
+    if (!libraryInside && !nearSame && score < 0.4) continue;
+    if (!best || shared > best.shared || (shared === best.shared && (score > best.score || (score === best.score && price < best.price)))) best = { price: Math.round(price * 100) / 100, matched: String(row.designation ?? ""), score, shared };
   }
-  return best;
+  return best ? { price: best.price, matched: best.matched, score: best.score } : null;
 }
