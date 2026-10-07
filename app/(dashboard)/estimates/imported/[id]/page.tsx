@@ -21,7 +21,7 @@ export default async function ImportedDevisPage({ params }: { params: Promise<{ 
   if (!project) notFound();
 
   let lines: DevisLine[] = [];
-  for (const columns of ["id,position,designation,unit,quantity,unit_price,external_unit_price,is_internal,category,subcategory", "id,designation,unit,quantity,unit_price,external_unit_price,is_internal"]) {
+  for (const columns of ["id,position,designation,unit,quantity,unit_price,external_unit_price,is_internal,category,subcategory,description,concerne", "id,position,designation,unit,quantity,unit_price,external_unit_price,is_internal,category,subcategory", "id,designation,unit,quantity,unit_price,external_unit_price,is_internal"]) {
     const result = await supabase.from("project_price_items").select(columns).eq("project_id", id).order("created_at", { ascending: true }).range(0, 4999);
     if (!result.error) { lines = (result.data ?? []) as unknown as DevisLine[]; break; }
   }

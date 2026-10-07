@@ -1,5 +1,6 @@
 "use client";
 
+import { LineActions } from "@/components/estimates/LineActions";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { formatAr } from "@/components/money";
@@ -21,6 +22,8 @@ export type DevisLine = {
   is_internal: boolean | null;
   category?: string | null;
   subcategory?: string | null;
+  description?: string | null;
+  concerne?: string | null;
 };
 
 type Project = { id: string; name: string; createdAt: string | null; marginPercent: number | null; location?: string | null; internalParams?: Partial<InternalParams> | null };
@@ -51,6 +54,11 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   const [marginInput, setMarginInput] = useState("");
   const [libraryBusy, setLibraryBusy] = useState(false);
   const [calc, setCalc] = useState<CalcResult | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [addBusy, setAddBusy] = useState(false);
+  const [addForm, setAddForm] = useState({ category: "", newCategory: "", designation: "", unit: "", quantity: "1", unit_price: "", external_unit_price: "" });
   const stopRef = useRef(false);
   useEffect(() => setRows(lines), [lines]);
 
@@ -254,6 +262,77 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
     router.refresh();
   }
 
+  // Après un ajout, une modification ou une suppression de ligne : le chantier suit le devis.
+  // 1. planning : chaque ligne reste reliée à une tâche (nouvelle ligne = tâche ajoutée à 0 %) ;
+  // 2. facturation : la dernière facture non payée reprend les lignes et les prix du devis ;
+  // 3. dépenses : le budget par catégorie et le classement sont recalculés à chaque ouverture, rien à faire.
+  async function afterChange(text: string) {
+    setSyncBusy(true);
+    try {
+      const sync = await fetch(`/api/devis/projects/${project.id}/sync`, { method: "POST" }).then((response) => response.json().catch(() => ({}))).catch(() => ({})) as { createdTasks?: number; error?: string };
+      const claim = await fetch(`/api/billing/projects/${project.id}/refresh-claim`, { method: "POST" }).then((response) => response.json().catch(() => ({}))).catch(() => ({})) as { updated?: boolean; claimNumber?: string };
+      const parts = [text];
+      if (sync.createdTasks) parts.push(`${sync.createdTasks} tâche(s) ajoutée(s) au planning`);
+      parts.push(claim.updated ? `la facture ${claim.claimNumber ?? ""} (non payée) a été mise à jour`.replace("  ", " ") : "dépenses et facturation à jour");
+      setMessage(`${parts.join(" · ")}.`);
+    } finally { setSyncBusy(false); }
+  }
+
+  // Bouton « Actualiser le chantier » : renvoie tout ce qui a été corrigé dans le devis vers sa chaîne
+  // (marge, planning, dépenses, facture non payée), sans rien relire par l'IA.
+  async function refreshChain() {
+    await applyMargin();
+    await afterChange("Chantier actualisé");
+    router.refresh();
+  }
+
+  // Modifier une ligne (comme « Modifier » du DAO). Les prix manquants d'un côté sont complétés avec la marge du devis.
+  async function saveLine(line: DevisLine, patch: Record<string, string>) {
+    const response = await fetch(`/api/devis/projects/${project.id}/lines/${line.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) });
+    const result = await response.json().catch(() => ({})) as { error?: string };
+    if (!response.ok) { setMessage(result.error ?? "Modification non enregistrée."); return false; }
+    const toNumber = (value: string) => { const n = Number(String(value).replace(/\s/g, "").replace(",", ".")); return Number.isFinite(n) && n > 0 ? n : null; };
+    setRows((current) => current.map((row) => row.id !== line.id ? row : {
+      ...row,
+      designation: patch.designation ?? row.designation, unit: patch.unit ?? row.unit,
+      quantity: patch.quantity !== undefined ? (toNumber(patch.quantity) ?? row.quantity) : row.quantity,
+      unit_price: patch.unit_price !== undefined ? toNumber(patch.unit_price) : row.unit_price,
+      external_unit_price: patch.external_unit_price !== undefined ? toNumber(patch.external_unit_price) : row.external_unit_price,
+      ...(patch.description !== undefined ? { description: patch.description } : {}), ...(patch.concerne !== undefined ? { concerne: patch.concerne } : {}),
+    }));
+    await applyMargin();
+    await afterChange("Ligne modifiée");
+    router.refresh();
+    return true;
+  }
+
+  async function deleteLine(line: DevisLine) {
+    const response = await fetch(`/api/devis/projects/${project.id}/lines/${line.id}`, { method: "DELETE" });
+    const result = await response.json().catch(() => ({})) as { error?: string };
+    if (!response.ok) { setMessage(result.error ?? "Suppression impossible."); return; }
+    setRows((current) => current.filter((row) => row.id !== line.id));
+    setSelectedId(null);
+    await applyMargin();
+    await afterChange("Ligne supprimée du devis");
+    router.refresh();
+  }
+
+  // « + Ajouter une ligne » (comme dans le DAO) : la ligne va à la fin de sa catégorie.
+  async function addLine() {
+    const category = addForm.category === "__new" ? addForm.newCategory.trim() : addForm.category;
+    setAddBusy(true);
+    try {
+      const response = await fetch(`/api/devis/projects/${project.id}/lines`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...addForm, category }) });
+      const result = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) { setMessage(result.error ?? "Ligne non ajoutée."); return; }
+      setAddForm({ category: addForm.category, newCategory: addForm.newCategory, designation: "", unit: "", quantity: "1", unit_price: "", external_unit_price: "" });
+      setAddOpen(false);
+      await applyMargin();
+      await afterChange("Ligne ajoutée au devis");
+      router.refresh();
+    } finally { setAddBusy(false); }
+  }
+
   async function giveMargin() {
     if (!marginInput.trim()) { setMessage("Indique la marge à appliquer (en %)."); return; }
     if (await applyMargin(marginInput)) router.refresh();
@@ -300,11 +379,11 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   }
 
   useEffect(() => {
-    if (!progress && !reBusy) return;
+    if (!progress && !reBusy && !addBusy && !syncBusy) return;
     const previous = document.body.style.cursor;
     document.body.style.cursor = "wait";
     return () => { document.body.style.cursor = previous; };
-  }, [progress, reBusy]);
+  }, [progress, reBusy, addBusy, syncBusy]);
 
   const small: React.CSSProperties = { fontSize: ".78rem", color: "#666" };
   const margin = summary.marginPercent ?? project.marginPercent;
@@ -490,7 +569,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
                 const missing = view === "internal" ? internal <= 0 && !labor : external <= 0;
                 return (
                   <FragmentRows key={row.id} header={header} subheader={subheader} colSpan={6}>
-                    <tr style={missing ? { background: "#fff7ed" } : undefined}>
+                    <tr onClick={() => setSelectedId((current) => (current === row.id ? null : row.id))} className="cursor-pointer" style={{ ...(missing ? { background: "#fff7ed" } : {}), ...(selectedId === row.id ? { outline: "2px solid #2563eb", outlineOffset: -2 } : {}) }}>
                       <td className="border p-2" data-label="N°">{String(row.position ?? "").trim() || index + 1}</td>
                       <td className="border p-2" data-label="Désignation">{row.designation}</td>
                       <td className="border p-2" data-label="Unité">{displayUnit(row.unit)}</td>
@@ -498,7 +577,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
                       {view === "internal" ? <>
                         <td className="border p-2" data-label="PU interne" style={{ textAlign: "right" }}>
                           {isAdmin && !row.is_internal
-                            ? <input key={`${row.id}-${internal}`} type="text" inputMode="decimal" defaultValue={internal > 0 ? String(internal) : ""} placeholder={labor ? "main-d'œuvre" : "à remplir"} onBlur={(event) => void savePrice(row, event.target.value)} style={{ width: 110, textAlign: "right" }} />
+                            ? <input key={`${row.id}-${internal}`} type="text" inputMode="decimal" defaultValue={internal > 0 ? String(internal) : ""} placeholder={labor ? "main-d'œuvre" : "à remplir"} onClick={(event) => event.stopPropagation()} onBlur={(event) => void savePrice(row, event.target.value)} style={{ width: 110, textAlign: "right" }} />
                             : internal > 0 ? formatAr(internal) : labor ? "main-d'œuvre" : "—"}
                         </td>
                         <td className="border p-2" data-label="Montant interne" style={{ textAlign: "right" }}>{internal > 0 ? formatAr(quantity * internal) : "—"}</td>
@@ -507,6 +586,18 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
                         <td className="border p-2" data-label="Montant externe HT" style={{ textAlign: "right" }}>{external > 0 ? formatAr(quantity * external) : "—"}</td>
                       </>}
                     </tr>
+                    {selectedId === row.id && (
+                      <tr><td colSpan={6} style={{ padding: 0 }}>
+                        <LineActions
+                          key={`${row.id}-${internal}-${external}-${quantity}`}
+                          projectId={project.id} line={row} view={view} isAdmin={isAdmin && !row.is_internal}
+                          canPickLibrary={internal <= 0 && !labor}
+                          onSave={(patch) => saveLine(row, patch)}
+                          onSetPrice={async (price, label) => { setMessage(label ? `Prix repris : ${label}.` : "Prix appliqué à la ligne."); await savePrice(row, String(price)); }}
+                          onDelete={() => deleteLine(row)}
+                        />
+                      </td></tr>
+                    )}
                   </FragmentRows>
                 );
               })}
@@ -519,6 +610,35 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
             </tfoot>
           </table>
         </div>
+        {isAdmin && (
+          <div style={{ marginTop: 4 }}>
+            {!addOpen && <button type="button" className="estimateSecondaryAction" onClick={() => setAddOpen(true)}>+ Ajouter une ligne</button>}
+            {addOpen && (
+              <div className="card" style={{ padding: 12, border: "1px solid #d1d5db", borderRadius: 10, display: "grid", gap: 8, background: "#fff" }}>
+                <strong>Ajouter une ligne au devis</strong>
+                <label><span style={{ fontWeight: 700 }}>Catégorie (rubrique)</span>
+                  <select value={addForm.category} onChange={(event) => setAddForm({ ...addForm, category: event.target.value })} style={{ width: "100%", padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }}>
+                    <option value="">Sans catégorie (à la fin du devis)</option>
+                    {[...new Set(rows.filter((row) => !row.is_internal).map((row) => String(row.category ?? "").trim()).filter(Boolean))].map((name) => <option key={name} value={name}>{name}</option>)}
+                    <option value="__new">Nouvelle catégorie…</option>
+                  </select>
+                </label>
+                {addForm.category === "__new" && <input placeholder="Nom de la nouvelle catégorie" value={addForm.newCategory} onChange={(event) => setAddForm({ ...addForm, newCategory: event.target.value })} style={{ width: "100%", padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />}
+                <input placeholder="Désignation" value={addForm.designation} onChange={(event) => setAddForm({ ...addForm, designation: event.target.value })} style={{ width: "100%", padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
+                <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))" }}>
+                  <input placeholder="Unité (m2, ml, Fft…)" value={addForm.unit} onChange={(event) => setAddForm({ ...addForm, unit: event.target.value })} style={{ padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
+                  <input placeholder="Quantité" inputMode="decimal" value={addForm.quantity} onChange={(event) => setAddForm({ ...addForm, quantity: event.target.value })} style={{ padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
+                  <input placeholder="PU interne" inputMode="decimal" value={addForm.unit_price} onChange={(event) => setAddForm({ ...addForm, unit_price: event.target.value })} style={{ padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
+                  <input placeholder="PU externe" inputMode="decimal" value={addForm.external_unit_price} onChange={(event) => setAddForm({ ...addForm, external_unit_price: event.target.value })} style={{ padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button type="button" className="estimatePrimaryAction" disabled={addBusy} onClick={() => void addLine()}>{addBusy ? "Ajout…" : "Ajouter la ligne"}</button>
+                  <button type="button" className="estimateSecondaryAction" disabled={addBusy} onClick={() => setAddOpen(false)}>Annuler</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
       {isAdmin && (
@@ -528,6 +648,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <input type="file" accept="application/pdf" disabled={reBusy} onChange={(event) => { setReFile(event.target.files?.[0] ?? null); setReResult(null); }} />
             <button type="button" className="tenderButton tenderButtonPrimary" disabled={reBusy || !reFile} onClick={() => void reanalyzeRead()}>{reBusy ? "Lecture en cours…" : "Relire le PDF (utilise l'IA)"}</button>
+            <button type="button" className="estimateSecondaryAction" disabled={syncBusy || reBusy} onClick={() => void refreshChain()}>{syncBusy ? "Actualisation…" : "Actualiser le chantier"}</button>
           </div>
           {reBusy && <p style={small}>Lecture en cours : cela peut prendre une minute.</p>}
           {reResult && (
@@ -573,7 +694,13 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
         </section>
       )}
 
-      {isAdmin && <p style={{ marginTop: 8 }}><button type="button" className="text-red-700 underline" onClick={() => void deleteDevis()}>Supprimer ce devis (et son chantier)</button></p>}
+      {isAdmin && (
+        <div style={{ marginTop: 12, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <button type="button" className="estimatePrimaryAction" disabled={syncBusy} onClick={() => void refreshChain()}>{syncBusy ? "Actualisation…" : "Actualiser le chantier"}</button>
+          <span style={small}>Envoie les corrections du devis au planning, aux dépenses et à la facturation.</span>
+          <button type="button" className="text-red-700 underline" onClick={() => void deleteDevis()}>Supprimer ce devis (et son chantier)</button>
+        </div>
+      )}
     </div>
   );
 }
