@@ -572,7 +572,6 @@ export default function EstimateBuilder({
   const [selectedLine, setSelectedLine] = useState<number | null>(null);
   // Ligne dont la carte « Bibliothèque » est ouverte (choix manuel d'un prix, sans rien changer à la bibliothèque).
   const [libraryLine, setLibraryLine] = useState<number | null>(null);
-  const [chainBusy, setChainBusy] = useState(false);
   const [editingLine, setEditingLine] = useState<number | null>(null);
   const [estimateId, setEstimateId] = useState<string | null>(null);
   const [profitMarginPercent, setProfitMarginPercent] = useState(0);
@@ -2498,21 +2497,6 @@ export default function EstimateBuilder({
     await syncProjectAfterChange("Ligne ajoutée");
   }
 
-  // Bouton « Actualiser le chantier » : renvoie les corrections du devis vers le chantier, la facturation et les dépenses.
-  async function refreshProjectChain() {
-    if (!estimateId) return;
-    setChainBusy(true);
-    const previousCursor = document.body.style.cursor;
-    document.body.style.cursor = "wait";
-    try {
-      const sync = await fetch(`/api/estimates/${estimateId}/sync-project`, { method: "POST" }).then((response) => response.json().catch(() => ({}))).catch(() => ({})) as { synced?: boolean; projectId?: string; error?: string };
-      if (sync.error) { setMessage(`Actualisation impossible : ${sync.error}`); return; }
-      if (!sync.synced || !sync.projectId) { setMessage("Ce devis n'a pas encore de chantier : il se crée avec le PDF externe. Rien à actualiser."); return; }
-      const claim = await fetch(`/api/billing/projects/${sync.projectId}/refresh-claim`, { method: "POST" }).then((response) => response.json().catch(() => ({}))).catch(() => ({})) as { updated?: boolean; claimNumber?: string };
-      setMessage(`Chantier actualisé : lignes, planning, dépenses et facturation à jour${claim.updated ? ` (facture ${claim.claimNumber ?? ""} non payée recalculée)` : ""}.`);
-    } finally { document.body.style.cursor = previousCursor; setChainBusy(false); }
-  }
-
   // Après un ajout, une modification ou une suppression de ligne : si le chantier de ce devis existe, il suit le devis
   // (lignes + planning), puis la dernière facture non payée reprend les nouveaux prix. Les dépenses se recalculent seules.
   async function syncProjectAfterChange(text: string) {
@@ -2649,16 +2633,10 @@ export default function EstimateBuilder({
       {message && !priceSearchStatus && <p role="status" className="rounded border p-3">{message}</p>}
 
       {!showHistory && <>
+      <button type="button" onClick={() => router.push("/estimates")} className="estimateBackButton" style={{ marginBottom: 12 }}>← Retour aux devis</button>
       <div className="estimateWorkspace">
         <aside className="estimateWorkspaceSidebar">
           <section className="estimateControlPanel">
-            <button
-              type="button"
-              onClick={() => router.push("/estimates")}
-              className="estimateBackButton"
-            >
-              ← Retour aux devis
-            </button>
             <p className="estimatePanelEyebrow">DAO associé</p>
             <h2>{sourceTenderTitle || "Nouveau devis"}</h2>
             <p className="estimatePanelDescription">
@@ -2689,10 +2667,6 @@ export default function EstimateBuilder({
                 <div><span>Bénéfice attendu</span><strong>{financialSummary.expectedProfit.toLocaleString("fr-FR")} Ar</strong></div>
                 <div><span>Taxe de l&apos;État (8 %)</span><strong>{financialSummary.stateTax.toLocaleString("fr-FR")} Ar</strong></div>
                 <div className="estimateClientTotal"><span>Total à payer par le client</span><strong>{financialSummary.clientTotal.toLocaleString("fr-FR")} Ar</strong></div>
-              </div>
-              <div className="buttonRow" style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
-                <button type="button" className="estimatePrimaryAction" disabled={chainBusy} onClick={() => void refreshProjectChain()}>{chainBusy ? "Actualisation…" : "Actualiser le chantier"}</button>
-                <span style={{ fontSize: 13, color: "#4b5563" }}>Envoie les corrections du devis au planning, aux dépenses et à la facturation (si le chantier existe).</span>
               </div>
               <div className="estimatePdfCards">
                 <div className="estimatePdfCard"><strong>Devis interne</strong><span>Coûts réels et informations internes</span><OfficialPdfButton estimateId={estimateId} mode="internal" /></div>

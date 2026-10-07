@@ -426,6 +426,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
           <h3>Compléter les prix manquants</h3>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
             {summary.missingInternal > 0 && !progress && <button type="button" className="estimatePrimaryAction" disabled={libraryBusy} onClick={() => void calculatePrices()}>{libraryBusy ? "Calcul en cours…" : "1. Calculer les prix internes (gratuit)"}</button>}
+            {!addOpen && !progress && <button type="button" className="estimateSecondaryAction" onClick={() => setAddOpen(true)}>+ Ajouter une ligne</button>}
             {calc && calc.missingMaterials.length > 0 && !progress && <button type="button" className="estimateSecondaryAction" disabled={libraryBusy} onClick={() => void searchMissingMaterials()}>{`2. Chercher le prix de ${calc.missingMaterials.length} matériau(x) manquant(s) sur internet (crédits IA)`}</button>}
             {calc && calc.noCompositionIds.length > 0 && !progress && <button type="button" className="estimateSecondaryAction" disabled={libraryBusy} onClick={() => void fillInternalPrices(calc.noCompositionIds)}>{`3. Chercher ${calc.noCompositionIds.length} ligne(s) sans composition sur internet (crédits IA)`}</button>}
             {progress && <button type="button" className="estimateSecondaryAction" onClick={() => { stopRef.current = true; }}>Arrêter</button>}
@@ -435,6 +436,32 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
                 <input type="number" step="0.1" placeholder="Marge %" style={{ width: 96 }} value={marginInput} onChange={(event) => setMarginInput(event.target.value)} />
                 <button type="button" className="estimateSecondaryAction" onClick={() => void giveMargin()}>Appliquer la marge aux prix externes manquants</button>
               </span>
+            )}
+          </div>
+          <div style={{ marginTop: 12 }}>
+            {addOpen && (
+              <div className="card" style={{ padding: 12, border: "1px solid #d1d5db", borderRadius: 10, display: "grid", gap: 8, background: "#fff" }}>
+                <strong>Ajouter une ligne au devis</strong>
+                <label><span style={{ fontWeight: 700 }}>Catégorie (rubrique)</span>
+                  <select value={addForm.category} onChange={(event) => setAddForm({ ...addForm, category: event.target.value })} style={{ width: "100%", padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }}>
+                    <option value="">Sans catégorie (à la fin du devis)</option>
+                    {[...new Set(rows.filter((row) => !row.is_internal).map((row) => String(row.category ?? "").trim()).filter(Boolean))].map((name) => <option key={name} value={name}>{name}</option>)}
+                    <option value="__new">Nouvelle catégorie…</option>
+                  </select>
+                </label>
+                {addForm.category === "__new" && <input placeholder="Nom de la nouvelle catégorie" value={addForm.newCategory} onChange={(event) => setAddForm({ ...addForm, newCategory: event.target.value })} style={{ width: "100%", padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />}
+                <input placeholder="Désignation" value={addForm.designation} onChange={(event) => setAddForm({ ...addForm, designation: event.target.value })} style={{ width: "100%", padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
+                <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))" }}>
+                  <input placeholder="Unité (m2, ml, Fft…)" value={addForm.unit} onChange={(event) => setAddForm({ ...addForm, unit: event.target.value })} style={{ padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
+                  <input placeholder="Quantité" inputMode="decimal" value={addForm.quantity} onChange={(event) => setAddForm({ ...addForm, quantity: event.target.value })} style={{ padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
+                  <input placeholder="PU interne" inputMode="decimal" value={addForm.unit_price} onChange={(event) => setAddForm({ ...addForm, unit_price: event.target.value })} style={{ padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
+                  <input placeholder="PU externe" inputMode="decimal" value={addForm.external_unit_price} onChange={(event) => setAddForm({ ...addForm, external_unit_price: event.target.value })} style={{ padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button type="button" className="estimatePrimaryAction" disabled={addBusy} onClick={() => void addLine()}>{addBusy ? "Ajout…" : "Ajouter la ligne"}</button>
+                  <button type="button" className="estimateSecondaryAction" disabled={addBusy} onClick={() => setAddOpen(false)}>Annuler</button>
+                </div>
+              </div>
             )}
           </div>
           {progress && <>
@@ -610,35 +637,6 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
             </tfoot>
           </table>
         </div>
-        {isAdmin && (
-          <div style={{ marginTop: 4 }}>
-            {!addOpen && <button type="button" className="estimateSecondaryAction" onClick={() => setAddOpen(true)}>+ Ajouter une ligne</button>}
-            {addOpen && (
-              <div className="card" style={{ padding: 12, border: "1px solid #d1d5db", borderRadius: 10, display: "grid", gap: 8, background: "#fff" }}>
-                <strong>Ajouter une ligne au devis</strong>
-                <label><span style={{ fontWeight: 700 }}>Catégorie (rubrique)</span>
-                  <select value={addForm.category} onChange={(event) => setAddForm({ ...addForm, category: event.target.value })} style={{ width: "100%", padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }}>
-                    <option value="">Sans catégorie (à la fin du devis)</option>
-                    {[...new Set(rows.filter((row) => !row.is_internal).map((row) => String(row.category ?? "").trim()).filter(Boolean))].map((name) => <option key={name} value={name}>{name}</option>)}
-                    <option value="__new">Nouvelle catégorie…</option>
-                  </select>
-                </label>
-                {addForm.category === "__new" && <input placeholder="Nom de la nouvelle catégorie" value={addForm.newCategory} onChange={(event) => setAddForm({ ...addForm, newCategory: event.target.value })} style={{ width: "100%", padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />}
-                <input placeholder="Désignation" value={addForm.designation} onChange={(event) => setAddForm({ ...addForm, designation: event.target.value })} style={{ width: "100%", padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
-                <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))" }}>
-                  <input placeholder="Unité (m2, ml, Fft…)" value={addForm.unit} onChange={(event) => setAddForm({ ...addForm, unit: event.target.value })} style={{ padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
-                  <input placeholder="Quantité" inputMode="decimal" value={addForm.quantity} onChange={(event) => setAddForm({ ...addForm, quantity: event.target.value })} style={{ padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
-                  <input placeholder="PU interne" inputMode="decimal" value={addForm.unit_price} onChange={(event) => setAddForm({ ...addForm, unit_price: event.target.value })} style={{ padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
-                  <input placeholder="PU externe" inputMode="decimal" value={addForm.external_unit_price} onChange={(event) => setAddForm({ ...addForm, external_unit_price: event.target.value })} style={{ padding: 8, border: "1px solid #9ca3af", borderRadius: 6 }} />
-                </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button type="button" className="estimatePrimaryAction" disabled={addBusy} onClick={() => void addLine()}>{addBusy ? "Ajout…" : "Ajouter la ligne"}</button>
-                  <button type="button" className="estimateSecondaryAction" disabled={addBusy} onClick={() => setAddOpen(false)}>Annuler</button>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
       </section>
 
       {isAdmin && (
