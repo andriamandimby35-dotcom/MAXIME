@@ -6,7 +6,7 @@ import { formatAr } from "@/components/money";
 import { summarizeDevis } from "@/lib/devis/pricing";
 import { isLaborLine } from "@/lib/compositions/labor";
 import { displayUnit } from "@/lib/devis/units";
-import { openDevisPdf } from "@/components/estimates/openPdf";
+import DevisPdfCard from "@/components/estimates/DevisPdfCard";
 import { confirmDeletion } from "@/components/deletion/confirmDeletion";
 import { DEFAULT_INTERNAL_PARAMS, INTERNAL_COSTS_CATEGORY, TRANSPORT_DESIGNATION, TRANSPORT_UNIT, type InternalParams } from "@/lib/devis/internal-costs";
 
@@ -51,7 +51,6 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   const [marginInput, setMarginInput] = useState("");
   const [libraryBusy, setLibraryBusy] = useState(false);
   const [calc, setCalc] = useState<CalcResult | null>(null);
-  const [pdfBusy, setPdfBusy] = useState<View | null>(null);
   const stopRef = useRef(false);
   useEffect(() => setRows(lines), [lines]);
 
@@ -260,14 +259,6 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
     if (await applyMargin(marginInput)) router.refresh();
   }
 
-  async function showPdf(mode: View) {
-    setPdfBusy(mode);
-    setMessage("Préparation du PDF…");
-    const error = await openDevisPdf(`/api/devis/projects/${project.id}/pdf`, { mode });
-    setPdfBusy(null);
-    setMessage(error ?? "PDF ouvert dans un nouvel onglet.");
-  }
-
   // Ré-analyse du PDF : lecture par l'IA (aperçu), puis remplacement des lignes après relecture.
   async function reanalyzeRead() {
     if (!reFile) return;
@@ -309,11 +300,11 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   }
 
   useEffect(() => {
-    if (!progress && !pdfBusy && !reBusy) return;
+    if (!progress && !reBusy) return;
     const previous = document.body.style.cursor;
     document.body.style.cursor = "wait";
     return () => { document.body.style.cursor = previous; };
-  }, [progress, pdfBusy, reBusy]);
+  }, [progress, reBusy]);
 
   const small: React.CSSProperties = { fontSize: ".78rem", color: "#666" };
   const margin = summary.marginPercent ?? project.marginPercent;
@@ -344,11 +335,9 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
         {(summary.missingInternal > 0 || summary.missingExternal > 0) && <p style={{ ...small, marginTop: 8 }}>
           À compléter : {summary.missingInternal > 0 ? `${summary.missingInternal} prix interne(s)` : ""}{summary.missingInternal > 0 && summary.missingExternal > 0 ? " et " : ""}{summary.missingExternal > 0 ? `${summary.missingExternal} prix externe(s)` : ""}.
         </p>}
-        <div className="estimatePdfCards" style={{ marginTop: 12 }}>
-          <div className="estimatePdfCard"><strong>Devis interne</strong><span>Coûts réels et résumé marge / bénéfice</span>
-            <button type="button" className="estimatePrimaryAction" disabled={pdfBusy !== null} onClick={() => void showPdf("internal")}>{pdfBusy === "internal" ? "Préparation…" : "Générer / ouvrir le PDF interne"}</button></div>
-          <div className="estimatePdfCard"><strong>Devis externe</strong><span>Version importée, prix du client</span>
-            <button type="button" className="estimatePrimaryAction" disabled={pdfBusy !== null} onClick={() => void showPdf("external")}>{pdfBusy === "external" ? "Préparation…" : "Générer / ouvrir le PDF externe"}</button></div>
+        <div className="estimatePdfCards" style={{ marginTop: 12, gridTemplateColumns: "1fr" }}>
+          <div className="estimatePdfCard"><strong>Devis interne</strong><span>Coûts réels et résumé marge / bénéfice</span><DevisPdfCard projectId={project.id} mode="internal" isAdmin={isAdmin} /></div>
+          <div className="estimatePdfCard"><strong>Devis externe</strong><span>Version importée, prix du client</span><DevisPdfCard projectId={project.id} mode="external" isAdmin={isAdmin} /></div>
         </div>
       </section>
 
