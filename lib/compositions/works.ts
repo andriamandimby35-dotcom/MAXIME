@@ -255,6 +255,36 @@ const RULES: Rule[] = [
       };
     },
   },
+  {
+    id: "herissonnage", title: "Hérissonnage en pierre sèche", units: ["m3"], keywords: ["herissonnage", "herisson"], exclude: ["demolition", "depose"],
+    build: () => ({
+      dosage: null, thicknessCm: null,
+      notes: ["1,25 m³ de pierres par m³ de hérissonnage (vides et pertes), un peu de sable pour caler."],
+      components: [
+        { designation: "Moellons ou pierres sèches", search: "Moellons de pierre", unit: "m3", quantity: 1.25, note: "Vides et pertes compris.", match: { all: ["moellon"], exclude: ["main", "pose"] } },
+        { designation: "Sable de calage", search: "Sable", unit: "m3", quantity: 0.1, note: "Remplit les vides du dessus.", optional: true, match: SAND },
+      ],
+    }),
+  },
+  {
+    id: "dallage", title: "Dallage en béton", units: ["m2"], keywords: ["dallage", "dalle en beton", "dalle beton"], exclude: ["demolition", "depose", "prefabrique", "preface", "gazon", "peinture", "coffrage"],
+    build: (_key, designation) => {
+      const { dosage, note } = dosageInfo(designation);
+      const stated = parseThicknessCm(designation);
+      const plausible = stated !== null && stated >= 4 && stated <= 30;
+      const thickness = plausible ? (stated as number) : 10;
+      const volume = (thickness / 100) * 1.05;
+      return {
+        dosage, thicknessCm: thickness,
+        notes: [note, plausible ? `Épaisseur indiquée : ${thickness} cm.` : "Épaisseur non indiquée : 10 cm (dallage courant).", "Treillis et coffrage ne sont pas comptés : ajoute-les s'ils sont dans le prix."],
+        components: [
+          { designation: `Ciment (${dosage} kg/m³)`, search: "Ciment", unit: "kg", quantity: round(dosage * volume), note: "Béton du dallage, pertes comprises.", match: CEMENT },
+          { designation: "Sable", search: "Sable", unit: "m3", quantity: round(0.45 * volume), note: "Quantité indicative par m³ de béton.", match: SAND },
+          { designation: "Gravillon", search: "Gravillon", unit: "m3", quantity: round(0.85 * volume), note: "Quantité indicative par m³ de béton.", match: GRAVEL },
+        ],
+      };
+    },
+  },
 ];
 
 /** Composition standard de l'ouvrage, ou null si l'ouvrage n'est pas (encore) connu. */

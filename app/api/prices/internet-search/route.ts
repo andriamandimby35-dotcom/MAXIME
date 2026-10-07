@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { canonicalMaterialKey, canonicalUnit, materialFamily } from "@/lib/material-normalization";
 import { usefulTokens, priceSearchableText, cheapestOf } from "@/lib/price-engine/search-price";
+import { looseLibraryMatch } from "@/lib/prices/library-lookup";
 
 type SearchRequest = {
   action?: "search" | "save_manual_composite" | "resolve_component_prices";
@@ -197,13 +198,20 @@ export async function POST(request: Request) {
   // qui correspondent à la même famille de matériau et dont l'unité peut être
   // convertie vers celle demandée, on ne devine pas lequel utiliser — on
   // prend le moins cher.
+  // Reconnaissance « souple » (synonymes du bâtiment, dimensions, unités équivalentes) : la même que la recherche gratuite.
+  // Évite de lancer une recherche IA payante pour un matériau que la bibliothèque connaît sous un autre nom.
+  function looseSavedRow(text: string, requestedUnit: string) {
+    const hit = looseLibraryMatch((organizationPrices ?? []) as Array<Record<string, unknown>>, { designation: text, unit: requestedUnit });
+    if (!hit) return null;
+    return (organizationPrices ?? []).find((price) => String(price.designation ?? "") === hit.matched && savedPriceForRequestedUnit(price, requestedUnit) !== null) ?? null;
+  }
   function bestSavedComponentPrice(componentDesignation: string, requestedUnit: string) {
     const family = materialFamily(componentDesignation);
     const candidates = (organizationPrices ?? []).filter(
       (price) => materialFamily(String(price.designation)) === family
         && savedPriceForRequestedUnit(price, requestedUnit) !== null,
     );
-    if (candidates.length === 0) return null;
+    if (candidates.length === 0) return looseSavedRow(componentDesignation, requestedUnit);
     return candidates.reduce((best, price) =>
       (savedPriceForRequestedUnit(price, requestedUnit)! < savedPriceForRequestedUnit(best, requestedUnit)!) ? price : best,
     );
@@ -261,7 +269,7 @@ export async function POST(request: Request) {
     : familyAndDetailMatches.length > 0 ? cheapestOf(familyAndDetailMatches)
     : familyMatches.length > 0 ? cheapestOf(familyMatches)
     : detailMatches.length > 0 ? cheapestOf(detailMatches)
-    : null;
+    : looseSavedRow(designation, unite);
 
   async function cacheSharedPrice(price: number, source: { label: string; url?: string; supplier?: string; city?: string; region?: string; confidence?: number }) {
     const { data: organization } = await supabase.from("organizations").select("name").eq("id", organizationId).maybeSingle();

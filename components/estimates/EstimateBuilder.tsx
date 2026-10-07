@@ -578,6 +578,7 @@ export default function EstimateBuilder({
   // Transport des matériaux (valable pour tous les devis du DAO) : distance fournisseur → chantier et poids total.
   const [transportDistanceInput, setTransportDistanceInput] = useState(0);
   const [transportWeightInput, setTransportWeightInput] = useState(0);
+  const [costsBusy, setCostsBusy] = useState(false);
   const transportRestoredRef = useRef(false);
   // Lignes internes sans prix : cachées par défaut (rien à afficher tant qu'il n'y a pas de donnée).
   const [showEmptyInternal, setShowEmptyInternal] = useState(false);
@@ -1429,6 +1430,124 @@ export default function EstimateBuilder({
     setMessage(`Transport calculé : ${transportTonnes.toLocaleString("fr-FR")} t × ${transportKm.toLocaleString("fr-FR")} km = ${quantity.toLocaleString("fr-FR")} T.KM${price > 0 ? ` (${Math.round(quantity * price).toLocaleString("fr-FR")} Ar)` : " — le prix par T.KM reste à remplir"}.`);
   }
 
+  // Lignes internes du panneau « Paramètres internes du chantier » : salaires (main-d'œuvre) et transport.
+  const internalCostRows = estimateLines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line, index }) => line.__internalOnly === true && daoRowType(line) === "item" && line.__disabledInternal !== true && (isInternalLaborLine(line) || index === transportLineIndex));
+
+  async function rememberInternalPrice(designation: string, unit: string, price: number) {
+    // Le salaire ou le prix de transport saisi ici est gardé dans la bibliothèque (retrouvé dans les prochains devis).
+    try { await fetch("/api/library/internal-price", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ designation, unit, price }) }); } catch { /* le devis garde son prix */ }
+  }
+
+  async function setInternalPrice(index: number, raw: string) {
+    const value = Number(raw.replace(/\s/g, "").replace(",", "."));
+    if (!Number.isFinite(value) || value <= 0) { setMessage("Prix invalide : écris un nombre plus grand que 0."); return; }
+    const unitPriceKey = columnName(daoColumns, UNIT_PRICE_KEYS);
+    const totalKey = columnName(daoColumns, TOTAL_KEYS);
+    const designationKey = columnName(daoColumns, ["Désignation", "Designation"]);
+    const unitKey = columnName(daoColumns, ["Unité", "Unite", "unite"]);
+    const nextLines = estimateLines.map((line, itemIndex) => {
+      if (itemIndex !== index) return line;
+      const changed = { ...line, [unitPriceKey]: value, __priceStatus: "manual_enterprise" } as EstimateLineData;
+      return { ...changed, [totalKey]: numberFrom(changed, QUANTITY_KEYS) * value };
+    });
+    setEstimateLines(nextLines);
+    const lineId = nextLines[index]?.[LINE_ID_KEY];
+    if (estimateId && lineId) await createClient().from("estimate_lines").update({ data: linePayload(nextLines[index]) }).eq("id", lineId);
+    await persistEstimateTotal(nextLines);
+    await rememberInternalPrice(String(nextLines[index][designationKey] ?? ""), String(nextLines[index][unitKey] ?? ""), value);
+    setMessage("Prix enregistré (et gardé dans la bibliothèque).");
+    await syncProjectAfterChange("Prix interne modifié");
+  }
+
+  // « Enregistrer et calculer les salaires et le transport » : même logique que le devis PDF.
+  // 1) les salaires et le transport sans prix reprennent le prix de la bibliothèque (gratuit) ; 2) la quantité du transport = poids × distance.
+  async function saveInternalCosts() {
+    if (costsBusy) return;
+    setCostsBusy(true);
+    const previousCursor = document.body.style.cursor;
+    document.body.style.cursor = "wait";
+    try {
+      const designationKey = columnName(daoColumns, ["Désignation", "Designation"]);
+      const unitKey = columnName(daoColumns, ["Unité", "Unite", "unite"]);
+      const quantityKey = columnName(daoColumns, QUANTITY_KEYS);
+      const unitPriceKey = columnName(daoColumns, UNIT_PRICE_KEYS);
+      const totalKey = columnName(daoColumns, TOTAL_KEYS);
+      let nextLines = estimateLines;
+      const notes: string[] = [];
+
+      const targets = internalCostRows.filter(({ line }) => numberFrom(line, UNIT_PRICE_KEYS) <= 0);
+      if (targets.length > 0) {
+        const response = await fetch("/api/library/free-prices", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items: targets.map(({ line, index }) => ({ id: String(index), designation: String(line[designationKey] ?? ""), unit: String(line[unitKey] ?? ""), quantity: numberFrom(line, QUANTITY_KEYS) || 1 })) }),
+        });
+        const result = await response.json().catch(() => ({})) as { results?: Array<{ id: string; price: number; source: string }> };
+        const hits = new Map((result.results ?? []).map((hit) => [Number(hit.id), hit]));
+        nextLines = nextLines.map((line, index) => {
+          const hit = hits.get(index);
+          if (!hit) return line;
+          const changed = { ...line, [unitPriceKey]: hit.price, __priceStatus: "manual_enterprise", __priceProvenance: hit.source } as EstimateLineData;
+          return { ...changed, [totalKey]: numberFrom(changed, QUANTITY_KEYS) * hit.price };
+        });
+        const stillMissing = targets.filter(({ index }) => !hits.has(index)).length;
+        if (stillMissing > 0) notes.push(`${stillMissing} prix à saisir à la main dans le tableau ci-dessous (ou ajoute-les à la bibliothèque)`);
+      }
+
+      if (transportLineIndex >= 0) {
+        if (transportTonnes > 0 && transportKm > 0) {
+          const quantity = Math.round(transportTonnes * transportKm * 100) / 100;
+          nextLines = nextLines.map((line, index) => {
+            if (index !== transportLineIndex) return line;
+            const changed = { ...line, [quantityKey]: quantity, __transportDistanceKm: transportKm, __transportWeightTonnes: transportTonnes, __transportTonneKm: quantity, __daoNeedsReview: false } as EstimateLineData;
+            return { ...changed, [totalKey]: numberFrom(changed, QUANTITY_KEYS) * numberFrom(changed, UNIT_PRICE_KEYS) };
+          });
+        } else if (!worksiteLocation.trim()) notes.push("indique la localisation du chantier : le transport en dépend");
+        else if (!(transportKm > 0)) notes.push("indique la distance fournisseur → chantier (km) pour calculer le transport");
+      }
+      if (!(internalExecutionDays > 0)) notes.push("indique la durée interne prévue (jours) pour calculer les salaires");
+
+      const supabase = createClient();
+      await Promise.all(nextLines.map(async (line, index) => {
+        if (line === estimateLines[index]) return;
+        const lineId = line[LINE_ID_KEY];
+        if (estimateId && lineId) await supabase.from("estimate_lines").update({ data: linePayload(line) }).eq("id", lineId);
+      }));
+      setEstimateLines(nextLines);
+      await persistEstimateTotal(nextLines);
+      setMessage(`Coûts internes enregistrés (salaires et transport).${notes.length ? " À compléter : " + notes.join(" ; ") + "." : ""}`);
+      await syncProjectAfterChange("Coûts internes enregistrés");
+    } finally { document.body.style.cursor = previousCursor; setCostsBusy(false); }
+  }
+
+  async function searchTransportPriceOnInternet() {
+    if (transportLineIndex < 0) { setMessage("Ce devis n'a pas de ligne « Transport, approvisionnement et livraison rendus chantier » : ajoute-la avec « + Ajouter une ligne » (unité T.KM, interne)."); return; }
+    if (!worksiteLocation.trim()) { setMessage("Indique d'abord la localisation du chantier : le transport en dépend."); return; }
+    if (!window.confirm("Le prix du transport (par tonne-kilomètre) va être cherché sur internet pour cette localisation. Cela utilise des crédits IA. Lancer ?")) return;
+    setCostsBusy(true);
+    const previousCursor = document.body.style.cursor;
+    document.body.style.cursor = "wait";
+    try {
+      const designationKey = columnName(daoColumns, ["Désignation", "Designation"]);
+      const response = await fetch("/api/prices/internet-search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ designation: String(estimateLines[transportLineIndex][designationKey] ?? ""), categorie: "COÛTS INTERNES DU CHANTIER", unite: "T.KM", daoQuantity: 1, pricingContext: "", worksiteName: sourceTenderTitle, worksiteLocation: worksiteLocation.trim() }) });
+      const result = await response.json().catch(() => ({})) as { error?: string; found?: boolean; selected_price?: number };
+      const price = Number(result.selected_price);
+      if (!response.ok || !result.found || !(price > 0)) { setMessage(result.error || "Prix du transport introuvable : saisis-le à la main dans le tableau."); return; }
+      await setInternalPrice(transportLineIndex, String(price));
+    } finally { document.body.style.cursor = previousCursor; setCostsBusy(false); }
+  }
+
+  // Les salaires sans prix reprennent tout seuls le prix de la bibliothèque à l'ouverture du devis (une seule fois, gratuit).
+  const autoSalariesRef = useRef(false);
+  const salariesMissing = internalCostRows.some(({ line }) => numberFrom(line, UNIT_PRICE_KEYS) <= 0);
+  useEffect(() => {
+    if (autoSalariesRef.current || !estimateId || !salariesMissing || daoColumns.length === 0) return;
+    const timer = window.setTimeout(() => { autoSalariesRef.current = true; void saveInternalCosts(); }, 2500);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [estimateId, salariesMissing, daoColumns.length]);
+
   async function persistEstimateTotal(lines: EstimateLineData[]) {
     const total = lines.reduce((sum, line) => sum + (line.__excludedByChoice === true ? 0 : lineTotal(line)), 0);
     // Le détail des lignes est la source de vérité du total. Ne pas écrire
@@ -1533,7 +1652,8 @@ export default function EstimateBuilder({
       const lineId = String(line[LINE_ID_KEY] ?? "");
       const isTransportLine = line.__internalOnly === true && normalizedLabel(designation).includes("transportapprovisionnement");
       if (isTransportLine) {
-        quantity = Math.round(accumulatedTonneKm * 100) / 100;
+        // Même calcul que le panneau « Paramètres internes » : poids (indiqué, lu dans le DAO ou estimé) × distance fournisseur.
+        quantity = transportTonnes > 0 && transportKm > 0 ? Math.round(transportTonnes * transportKm * 100) / 100 : Math.round(accumulatedTonneKm * 100) / 100;
         unit = "T.KM";
         line = {
           ...line,
@@ -2616,8 +2736,8 @@ export default function EstimateBuilder({
     await syncProjectAfterChange("Ligne ajoutée");
   }
 
-  // Lignes du devis sans prix (hors main-d'œuvre) : elles attendent le calcul gratuit, la recherche IA ou un prix saisi.
-  const missingPriceCount = estimateLines.filter((line) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0 && !isInternalLaborLine(line)).length;
+  // Lignes du devis sans prix (salaires compris : leur prix vient de la bibliothèque) : elles attendent le calcul gratuit, la recherche IA ou un prix saisi.
+  const missingPriceCount = estimateLines.filter((line) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0).length;
 
   // « 1. Calculer les prix (gratuit) » : reprend, sans crédit IA, les prix déjà connus de la bibliothèque (nom exact, nom voisin
   // ou composition de matériaux) pour les lignes sans prix. Le choix du prix reste modifiable ligne par ligne.
@@ -2630,7 +2750,7 @@ export default function EstimateBuilder({
     const totalKey = columnName(daoColumns, TOTAL_KEYS);
     const targets = estimateLines
       .map((line, index) => ({ line, index }))
-      .filter(({ line }) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0 && !isInternalLaborLine(line));
+      .filter(({ line }) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0);
     if (targets.length === 0) { setMessage("Tous les prix sont déjà remplis."); return; }
     setFreeBusy(true);
     const previousCursor = document.body.style.cursor;
@@ -3032,15 +3152,21 @@ export default function EstimateBuilder({
                 onChange={(event) => setEngineerCount(Math.max(0, Number(event.target.value) || 0))}
                 style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }} />
             </label>
+            <label>
+              <span style={{ display: "block", fontWeight: 700 }}>Distance fournisseur → chantier (km)</span>
+              <input type="number" min="0" value={transportDistanceInput || ""} onChange={(event) => setTransportDistanceInput(Math.max(0, Number(event.target.value) || 0))}
+                placeholder={daoTransportInfo.distanceKm > 0 ? `DAO : ${daoTransportInfo.distanceKm}` : "Exemple : 120"} style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }} />
+            </label>
+            <label>
+              <span style={{ display: "block", fontWeight: 700 }}>Poids total à transporter (tonnes) — si le DAO ou le dossier le donne</span>
+              <input type="number" min="0" step="0.01" value={transportWeightInput || ""} onChange={(event) => setTransportWeightInput(Math.max(0, Number(event.target.value) || 0))}
+                placeholder="Vide = poids du DAO ou estimation" style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }} />
+            </label>
           </div>
           <p style={{ marginTop: 8, fontSize: 13 }}>
-            Les journées-personnes comprennent la nourriture. Les effectifs et la durée restent modifiables avant création.
+            Les journées-personnes comprennent la nourriture. Les effectifs et la durée restent modifiables. Le transport = poids des matériaux × distance fournisseur → chantier
+            {transportTonnes > 0 ? ` : ${transportTonnes.toLocaleString("fr-FR")} t${transportWeightInput > 0 ? " (poids indiqué)" : tableKg > 0 ? " (poids lu dans le DAO)" : daoTransportInfo.totalKg > 0 ? " (poids du DAO)" : " (estimées d'après les matériaux du devis)"}${transportKm > 0 ? ` × ${transportKm.toLocaleString("fr-FR")} km = ${(Math.round(transportTonnes * transportKm * 100) / 100).toLocaleString("fr-FR")} T.KM` : ""}.` : "."}
           </p>
-        </section>
-      )}
-      {estimateLines.length > 0 && (
-        <section className="estimateTransportCard" style={{ padding: 14, border: "1px solid #9ca3af", borderRadius: 8, background: "#f9fafb", maxWidth: "100%" }}>
-          <h3 className="text-lg font-bold">Transport des matériaux</h3>
           <p className="mt-1 text-sm text-gray-700">
             {weightTable
               ? `Poids lu dans le DAO (${weightTable.title.replace(/^.*?\)?\s*LISTE ET POIDS/i, "Liste et poids").slice(0, 120)}) : ${(weightTable.totalKg / 1000).toLocaleString("fr-FR")} t au total, dont ${(weightTable.outsideKg / 1000).toLocaleString("fr-FR")} t fournis hors de la localité (plus de 10 km) et ${(weightTable.localKg / 1000).toLocaleString("fr-FR")} t déjà dans la localité (10 km ou moins).`
@@ -3067,26 +3193,6 @@ export default function EstimateBuilder({
               </button>
             </p>
           )}
-          <div className="estimateWorksiteFields" style={{ marginTop: 8 }}>
-            <label>
-              <span style={{ display: "block", fontWeight: 700 }}>Distance fournisseur → chantier (km)</span>
-              <input type="number" min="0" value={transportDistanceInput || ""} onChange={(event) => setTransportDistanceInput(Math.max(0, Number(event.target.value) || 0))}
-                placeholder={daoTransportInfo.distanceKm > 0 ? `DAO : ${daoTransportInfo.distanceKm}` : "Exemple : 120"} style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }} />
-            </label>
-            <label>
-              <span style={{ display: "block", fontWeight: 700 }}>Poids total à transporter (tonnes)</span>
-              <input type="number" min="0" step="0.01" value={transportWeightInput || ""} onChange={(event) => setTransportWeightInput(Math.max(0, Number(event.target.value) || 0))}
-                placeholder="Vide = poids du DAO ou estimation" style={{ width: "100%", padding: 9, border: "1px solid #9ca3af", borderRadius: 6 }} />
-            </label>
-          </div>
-          <p className="mt-2 text-sm">
-            {transportTonnes > 0 && transportKm > 0
-              ? `${transportTonnes.toLocaleString("fr-FR")} t × ${transportKm.toLocaleString("fr-FR")} km = ${(Math.round(transportTonnes * transportKm * 100) / 100).toLocaleString("fr-FR")} T.KM`
-              : "Indique la distance (et le poids si le DAO ne le donne pas) pour calculer le transport."}
-          </p>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 8 }}>
-            <button type="button" className="estimatePrimaryAction" style={{ width: "auto" }} onClick={() => void applyTransport()}>Calculer le transport du devis</button>
-          </div>
           {weightTable && weightTable.rows.length > 0 && (
             <details style={{ marginTop: 10 }}>
               <summary style={{ cursor: "pointer", fontWeight: 700 }}>Liste des poids du DAO ({weightTable.rows.length} lignes)</summary>
@@ -3125,6 +3231,37 @@ export default function EstimateBuilder({
               </table>
               <p style={{ fontSize: 12 }}>Ciment, sable, gravillon, parpaings, briques, moellons, remblai, acier, carreaux… Les autres matériaux ne sont pas comptés : si le DAO donne un poids, il passe avant cette estimation.</p>
             </details>
+          )}
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
+            <button type="button" className="estimatePrimaryAction" disabled={costsBusy} onClick={() => void saveInternalCosts()}>{costsBusy ? "Calcul en cours…" : "Enregistrer et calculer les salaires et le transport"}</button>
+            <button type="button" className="estimateSecondaryAction" disabled={costsBusy} onClick={() => void searchTransportPriceOnInternet()}>Chercher le prix du transport sur internet (crédits IA)</button>
+          </div>
+          {internalCostRows.length > 0 && (
+            <div className="overflow-x-auto" style={{ marginTop: 12 }}>
+              <table className="w-full border mobileCards">
+                <thead><tr><th className="border p-2">Ligne interne</th><th className="border p-2">Unité</th><th className="border p-2">Quantité</th><th className="border p-2">PU interne</th><th className="border p-2">Montant interne</th></tr></thead>
+                <tbody>
+                  {internalCostRows.map(({ line, index }) => {
+                    const price = numberFrom(line, UNIT_PRICE_KEYS);
+                    const quantity = numberFrom(line, QUANTITY_KEYS);
+                    return (
+                      <tr key={index} style={!(price > 0) ? { background: "#fff7ed" } : undefined}>
+                        <td className="border p-2" data-label="Désignation">{String(line[columnName(daoColumns, ["Désignation", "Designation"])] ?? "")}</td>
+                        <td className="border p-2" data-label="Unité">{String(line[columnName(daoColumns, ["Unité", "Unite", "unite"])] ?? "")}</td>
+                        <td className="border p-2" data-label="Quantité" style={{ textAlign: "right" }}>{quantity > 0 ? quantity.toLocaleString("fr-FR") : "—"}</td>
+                        <td className="border p-2" data-label="PU interne" style={{ textAlign: "right" }}>
+                          <input key={`${index}-${price}`} type="text" inputMode="decimal" defaultValue={price > 0 ? String(price) : ""} placeholder="à remplir"
+                            onBlur={(event) => { const value = event.target.value.trim(); if (value && Number(value.replace(/\s/g, "").replace(",", ".")) !== price) void setInternalPrice(index, value); }}
+                            style={{ width: 110, textAlign: "right" }} />
+                        </td>
+                        <td className="border p-2" data-label="Montant interne" style={{ textAlign: "right" }}>{price > 0 && quantity > 0 ? `${Math.round(price * quantity).toLocaleString("fr-FR")} Ar` : "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <p style={{ fontSize: 12, marginTop: 6 }}>Un salaire journalier ou un prix de transport saisi ici est gardé dans la bibliothèque de prix et retrouvé automatiquement dans les prochains devis.</p>
+            </div>
           )}
         </section>
       )}
@@ -3376,7 +3513,7 @@ export default function EstimateBuilder({
                           Détail du prix
                         </button>
                       )}
-                      {numberFrom(item, UNIT_PRICE_KEYS) <= 0 && !isInternalLaborLine(item) && (
+                      {numberFrom(item, UNIT_PRICE_KEYS) <= 0 && (
                         <button
                           type="button"
                           onClick={(event) => {
