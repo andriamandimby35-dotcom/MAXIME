@@ -4,7 +4,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import { requireDevisAdmin } from "@/lib/devis/admin";
 import { externalPricesFromInternal } from "@/lib/devis/pricing";
 import { resolveItemTasks, type PlanningTask } from "@/lib/billing/task-matching";
-import { checklistForTitle, cleanWorkSteps } from "@/lib/devis/work-steps";
+import { checklistForTitle, cleanWorkSteps, disambiguateTitles } from "@/lib/devis/work-steps";
 
 // Étape 2 de « Ajouter un devis » : crée le chantier, son planning et son
 // bordereau de prix à partir des lignes lues (et relues à l'écran).
@@ -57,9 +57,11 @@ export async function POST(request: Request) {
   // Étapes de chaque travail (lues dans le texte des articles) : elles deviennent les sous-tâches
   // à cocher du planning. Le devis, lui, garde son texte complet.
   const workSteps = cleanWorkSteps(body.work_steps);
-  const taskRows = taskTitles.map((title, index) => {
-    const checklist = checklistForTitle(workSteps, title);
-    return { organization_id: auth.organizationId, project_id: projectId, title, dao_sequence: index + 1, is_dao_task: false, ...(checklist ? { checklist } : {}) };
+  // Travaux de même titre : la couleur (ligne « Concerne ») les distingue dans le planning.
+  const planningTitles = disambiguateTitles(taskTitles, lines);
+  const taskRows = planningTitles.map((entry, index) => {
+    const checklist = checklistForTitle(workSteps, entry.base, entry.occurrence);
+    return { organization_id: auth.organizationId, project_id: projectId, title: entry.title, dao_sequence: index + 1, is_dao_task: false, ...(checklist ? { checklist } : {}) };
   });
   let { data: createdTasks, error: tasksError } = await supabase.from("project_tasks").insert(taskRows).select("id,title,progress_percent");
   // Colonne « checklist » absente (ancienne base) : on crée quand même le planning, sans sous-tâches.
@@ -71,6 +73,10 @@ export async function POST(request: Request) {
 
   const matches = resolveItemTasks(lines.map((line) => ({ designation: String(line.designation), subcategory: line.subcategory, category: line.category })), tasks);
   const taskIdByLine: Array<string | null> = matches.map((match) => match?.id ?? null);
+  // Travaux de même titre : la n-ième ligne du devis va au n-ième travail (pas au premier trouvé).
+  planningTitles.forEach((entry, taskIndex) => {
+    if (entry.lineIndex !== null && tasks[taskIndex] && entry.title !== entry.base) taskIdByLine[entry.lineIndex] = tasks[taskIndex].id;
+  });
   const missing = taskIdByLine.map((id, index) => (id ? -1 : index)).filter((index) => index >= 0);
   let addedTasks = 0;
   if (missing.length > 0) {

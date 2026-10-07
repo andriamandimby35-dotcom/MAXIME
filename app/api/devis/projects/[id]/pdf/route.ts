@@ -1,9 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { getCompanyProfileForPdf } from "@/lib/organization-profile";
-import { generateOfficialEstimatePdf, type OfficialPdfRow } from "@/lib/estimates/official-pdf";
+import { generateImportedDevisPdf, type ImportedPdfRow } from "@/lib/devis/imported-devis-pdf";
 import { isLaborLine } from "@/lib/compositions/labor";
-import { displayUnit } from "@/lib/devis/units";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -76,7 +74,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     return NextResponse.json({ error: mode === "external" ? "Ce devis n'a pas encore de prix externe : donne la marge dans la page du devis." : "Ce devis n'a pas encore de prix interne : calcule ou remplis les prix dans la page du devis." }, { status: 400 });
   }
 
-  const pdfRows: OfficialPdfRow[] = [];
+  const pdfRows: ImportedPdfRow[] = [];
   const recapEntries: Array<{ reference: string; title: string; total: number }> = [];
   let currentSection: string | null = null;
   let currentSectionNumber = "";
@@ -123,37 +121,26 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     currentSubtotal += total ?? 0;
     grandTotal += total ?? 0;
     const fullText = String(row.description ?? "").trim() || String(row.designation ?? "").trim();
-    pdfRows.push({ kind: "item", number: String(row.ref ?? "").trim() || `${currentSectionNumber}.${itemInSection}`, designation: fullText, concerne: String(row.concerne ?? "").trim() || undefined, unit: displayUnit(row.unit).replace(/^JOUR-PERSONNE$/i, "J-pers"), quantity, unitPrice, total });
+    pdfRows.push({ kind: "item", number: String(row.ref ?? "").trim() || `${currentSectionNumber}.${itemInSection}`, text: fullText, concerne: String(row.concerne ?? "").trim() || undefined, unit: String(row.unit ?? "").trim().replace(/^JOUR-PERSONNE$/i, "J-pers"), quantity, unitPrice, total });
   });
   closeSection();
 
-  const organization = Array.isArray(member.organizations) ? member.organizations[0] : member.organizations;
-  const profile = await getCompanyProfileForPdf(supabase, member.organization_id, organization?.name);
-  const pdf = generateOfficialEstimatePdf({
-    companyName: profile.companyName,
-    companyDetails: [profile.ownerName, `${profile.address} — ${profile.phone}`, `NIF ${profile.nif} — STAT ${profile.stat}`],
-    documentLabel: mode === "internal" ? "DEVIS INTERNE" : "DEVIS EXTERNE",
-    titleLabel: "Chantier",
-    daoTitle: project.name,
-    daoReference: "",
-    clientName: "",
-    estimateDate: new Intl.DateTimeFormat("fr-FR").format(new Date()),
+  // Même présentation que le PDF d'origine : pas d'en-tête de société, titre centré, tableau fin.
+  const tmpLabel = tmpPercent.toLocaleString("fr-FR");
+  const pdf = generateImportedDevisPdf({
+    title: project.name,
+    subtitle: mode === "internal" ? "DEVIS INTERNE (coûts, ne pas remettre au client)" : undefined,
+    columns: mode === "internal"
+      ? ["N°", "DESIGNATION DES TRAVAUX", "UNITE", "QUANTITE", "PRIX UNIT. INTERNE", "MONTANT INTERNE Ar"]
+      : ["N°", "DESIGNATION DES TRAVAUX", "UNITE", "QUANTITE", "PRIX UNITAIRE", "MONTANT Ar"],
     rows: pdfRows,
-    grandTotal,
-    bdqeLayout: {
-      detail_table: {
-        columns: mode === "internal"
-          ? ["N°", "DÉSIGNATION DES TRAVAUX", "UNITÉ", "QUANTITÉ", "PRIX UNITAIRE INTERNE", "MONTANT INTERNE (Ar)"]
-          : ["N°", "DÉSIGNATION DES TRAVAUX", "UNITÉ", "QUANTITÉ", "PRIX UNITAIRE", "MONTANT (Ar)"],
-      },
-    },
-    recapGroups: [{ reference: "", title: "Bordereau détail quantitatif et estimatif", entries: recapEntries }],
-    includeExternalRecap: mode === "external",
+    recap: recapEntries.map((entry) => ({ number: entry.reference, title: entry.title, total: entry.total })),
+    total: grandTotal,
     // TMP (taxe écrite sous le total du devis d'origine) : seulement dans le devis externe.
     extraTotals: mode === "external" && tmpPercent > 0
       ? [
-          { label: `TMP ${tmpPercent.toLocaleString("fr-FR")} %`, amount: Math.round(grandTotal * tmpPercent) / 100 },
-          { label: `TOTAL AVEC TMP ${tmpPercent.toLocaleString("fr-FR")} %`, amount: Math.round(grandTotal * (100 + tmpPercent)) / 100 },
+          { label: `TMP ${tmpLabel}%`, amount: Math.round(grandTotal * tmpPercent) / 100 },
+          { label: `TOTAL AVEC TMP ${tmpLabel}%`, amount: Math.round(grandTotal * (100 + tmpPercent)) / 100 },
         ]
       : undefined,
   });
