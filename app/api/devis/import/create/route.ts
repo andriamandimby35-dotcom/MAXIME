@@ -4,6 +4,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import { requireDevisAdmin } from "@/lib/devis/admin";
 import { externalPricesFromInternal } from "@/lib/devis/pricing";
 import { resolveItemTasks, type PlanningTask } from "@/lib/billing/task-matching";
+import { checklistForTitle, cleanWorkSteps } from "@/lib/devis/work-steps";
 
 // Étape 2 de « Ajouter un devis » : crée le chantier, son planning et son
 // bordereau de prix à partir des lignes lues (et relues à l'écran).
@@ -21,7 +22,7 @@ export async function POST(request: Request) {
   if ("error" in auth) return auth.error;
 
   const body = await request.json().catch(() => ({})) as {
-    kind?: string; name?: string; location?: string; works?: string[]; lines?: InLine[]; margin_percent?: number | string | null; tmp_percent?: number | string | null;
+    kind?: string; name?: string; location?: string; works?: string[]; work_steps?: unknown; lines?: InLine[]; margin_percent?: number | string | null; tmp_percent?: number | string | null;
   };
   const kind = body.kind === "internal" ? "internal" : "external";
   const name = String(body.name ?? "").trim();
@@ -53,10 +54,18 @@ export async function POST(request: Request) {
   // tâche pour chaque ligne qui n'en a trouvé aucune (texte, ou lignes voisines).
   const titles = (body.works ?? []).map((title) => String(title).trim()).filter(Boolean);
   const taskTitles = titles.length > 0 ? titles : lines.map((line) => String(line.designation).trim());
-  const { data: createdTasks, error: tasksError } = await supabase
-    .from("project_tasks")
-    .insert(taskTitles.map((title, index) => ({ organization_id: auth.organizationId, project_id: projectId, title, dao_sequence: index + 1, is_dao_task: false })))
-    .select("id,title,progress_percent");
+  // Étapes de chaque travail (lues dans le texte des articles) : elles deviennent les sous-tâches
+  // à cocher du planning. Le devis, lui, garde son texte complet.
+  const workSteps = cleanWorkSteps(body.work_steps);
+  const taskRows = taskTitles.map((title, index) => {
+    const checklist = checklistForTitle(workSteps, title);
+    return { organization_id: auth.organizationId, project_id: projectId, title, dao_sequence: index + 1, is_dao_task: false, ...(checklist ? { checklist } : {}) };
+  });
+  let { data: createdTasks, error: tasksError } = await supabase.from("project_tasks").insert(taskRows).select("id,title,progress_percent");
+  // Colonne « checklist » absente (ancienne base) : on crée quand même le planning, sans sous-tâches.
+  if (tasksError && /checklist/.test(tasksError.message)) {
+    ({ data: createdTasks, error: tasksError } = await supabase.from("project_tasks").insert(taskRows.map(({ checklist: _c, ...rest }: Record<string, unknown>) => rest as typeof taskRows[number])).select("id,title,progress_percent"));
+  }
   if (tasksError) return NextResponse.json({ error: `Chantier créé, planning impossible : ${tasksError.message}`, projectId }, { status: 400 });
   const tasks: PlanningTask[] = (createdTasks ?? []).map((task) => ({ id: String(task.id), title: String(task.title), progress_percent: Number(task.progress_percent) || 0 }));
 

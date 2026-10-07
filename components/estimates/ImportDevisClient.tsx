@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import { formatAr } from "@/components/money";
 
 type Line = { category: string; subcategory: string; designation: string; unit: string; quantity: number; unit_price: number; ref?: string; description?: string; concerne?: string };
-type Extraction = { project_name: string; location: string; works: string[]; lines: Line[]; devis_total: number | null; tmp_percent?: number | null; warnings?: string[] };
+type Extraction = { project_name: string; location: string; works: string[]; work_steps?: Array<{ title: string; steps: string[] }>; lines: Line[]; devis_total: number | null; tmp_percent?: number | null; warnings?: string[] };
 
 // « Ajouter un devis » à partir d'un PDF : lecture par l'IA (une seule fois),
 // vérification à l'écran, puis création du chantier, du planning et des prix.
@@ -48,7 +48,7 @@ export function ImportDevisClient({ kind }: { kind: "internal" | "external" }) {
     const response = await fetch("/api/devis/import/create", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ kind, name, location, works: extraction.works, lines: extraction.lines, tmp_percent: extraction.tmp_percent ?? null, margin_percent: margin }),
+      body: JSON.stringify({ kind, name, location, works: extraction.works, work_steps: extraction.work_steps ?? [], lines: extraction.lines, tmp_percent: extraction.tmp_percent ?? null, margin_percent: margin }),
     });
     const result = await response.json().catch(() => ({}));
     setBusy(false);
@@ -114,6 +114,20 @@ export function ImportDevisClient({ kind }: { kind: "internal" | "external" }) {
               </label>
             )}
           </div>
+
+          {(extraction.work_steps?.length ?? 0) > 0 && (
+            <details className="notice" style={{ margin: "12px 0" }}>
+              <summary style={{ cursor: "pointer", fontWeight: 700 }}>Planning : {extraction.work_steps!.reduce((sum, item) => sum + item.steps.length, 0)} étape(s) lues dans {extraction.work_steps!.length} article(s) — elles deviendront les sous-tâches à cocher</summary>
+              <div style={{ maxHeight: "260px", overflow: "auto", marginTop: "8px" }}>
+                {extraction.work_steps!.map((item, index) => (
+                  <div key={index} style={{ marginBottom: "8px" }}>
+                    <strong style={{ fontSize: ".85rem" }}>{item.title}</strong>
+                    <ol style={{ margin: "2px 0 0 18px", fontSize: ".8rem" }}>{item.steps.map((step, position) => <li key={position}>{step}</li>)}</ol>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
 
           <div style={{ maxHeight: "360px", overflow: "auto", border: "1px solid #e0e8e2", borderRadius: "10px" }}>
             <table style={{ width: "100%", fontSize: ".8rem", minWidth: "760px" }}>

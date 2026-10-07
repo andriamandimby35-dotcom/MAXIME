@@ -5,10 +5,11 @@
 // Le PDF n'est jamais stocké : copie temporaire côté IA, supprimée aussitôt.
 
 import { reconcileLine } from "@/lib/devis/reconcile";
+import { cleanWorkSteps, type WorkSteps } from "@/lib/devis/work-steps";
 
 /** ref / description / concerne : texte d'origine du bordereau (numéro, texte complet de l'article, ligne « Concerne »), pour que le PDF généré ressemble à l'original. */
 export type DevisPriceLine = { category: string; subcategory: string; designation: string; unit: string; quantity: number; unit_price: number; ref?: string; description?: string; concerne?: string; amount?: number };
-export type DevisExtraction = { works: string[]; project_name: string; location: string; price_lines: DevisPriceLine[]; /** Toutes les lignes du devis, y compris celles sans prix (unit_price = 0). */ all_lines: DevisPriceLine[]; devis_total: number | null; /** Lignes corrigées ou à vérifier (quantité × prix ≠ montant du devis). */ warnings: string[]; /** Taux « TMP » écrit sous le total du devis (ex. 8), sinon null. */ tmp_percent: number | null };
+export type DevisExtraction = { works: string[]; /** Étapes de chaque travail (planning), lues dans le texte des articles qui les décrivent. */ work_steps: WorkSteps[]; project_name: string; location: string; price_lines: DevisPriceLine[]; /** Toutes les lignes du devis, y compris celles sans prix (unit_price = 0). */ all_lines: DevisPriceLine[]; devis_total: number | null; /** Lignes corrigées ou à vérifier (quantité × prix ≠ montant du devis). */ warnings: string[]; /** Taux « TMP » écrit sous le total du devis (ex. 8), sinon null. */ tmp_percent: number | null };
 export type DevisExtractionResult = { ok: true; data: DevisExtraction } | { ok: false; status: number; body: Record<string, unknown> };
 
 function extractResponseText(payload: { output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }) {
@@ -79,6 +80,9 @@ export async function extractDevisFromPdf(file: File): Promise<DevisExtractionRe
         "Vérifie toi-même avant de répondre : la toute dernière entrée de 'works' doit être un travail de fin de chantier (repli de chantier, nettoyage final, remise en état, réception des travaux) si un tel travail existe dans le devis ; s'il n'y en a pas, la dernière entrée est simplement le dernier travail de finition. Si ce n'est pas le cas, corrige l'ordre avant de répondre.",
         "Entre le début (installation) et la fin (repli), respecte l'ordre réel d'exécution : terrassement et fondations, puis gros œuvre (structure, élévation, toiture), puis second œuvre (cloisons, enduits, menuiserie, électricité, plomberie), puis finitions et peinture.",
         "Ne réordonne que les travaux réellement présents dans le devis : si une étape (installation, repli, etc.) n'existe pas dans le document, ne l'invente pas, saute-la simplement.",
+        // RÈGLE DES ÉTAPES — s'ajoute aux règles ci-dessus sans en modifier aucune.
+        "RÈGLE DES ÉTAPES (elle s'ajoute à TOUTES les règles précédentes, sans en modifier ni en annuler aucune : ordre d'exécution, installation en premier, repli en dernier, relevé complet des lignes, ref/description/concerne, colonnes, verbes d'action) : certains devis décrivent, dans chaque article, les étapes ou opérations à réaliser (liste à tirets ou à puces après « il comprend » ou « le repli comprend », ou suite d'opérations séparées par des virgules, des points ou des phrases : repérage, purge, nettoyage, préparation, application, finition…). Pour chaque travail de 'works' dont l'article décrit de telles étapes, ajoute à 'work_steps' un objet {title, steps} où title = EXACTEMENT le même texte que l'entrée correspondante de 'works', et steps = les étapes de CET article, dans l'ordre d'exécution décrit par l'article, chacune sous forme d'une action courte (3 à 12 mots, verbe + complément) rédigée avec les mots de l'article. Une étape par opération citée : n'en oublie AUCUNE (relis l'article phrase par phrase et tiret par tiret), n'en invente aucune, ne fusionne pas deux opérations différentes. Les simples formules de style (« toutes sujétions comprises », « y compris tous les frais ») ne sont pas des étapes ; en revanche une condition qui décrit une vraie opération (séchage entre les couches, protection des ouvrages voisins, nettoyage après intervention, plan d'installation soumis au Maître d'Œuvre) EST une étape. Si plusieurs lignes dépendent du même article descriptif (variantes de couleur, de dimension), chacune reprend les mêmes étapes. Si un article ne décrit aucune étape, ne l'ajoute pas à 'work_steps' (liste vide possible).",
+        "Les étapes servent UNIQUEMENT au planning. Elles ne changent JAMAIS le devis : dans 'price_lines', designation, description et concerne gardent le texte COMPLET du devis, mot pour mot, avec toutes les phrases, tous les tirets et toutes les puces, sans résumer, raccourcir, reformuler ni omettre une seule lettre, même quand l'article fait quinze lignes ou continue sur la page suivante ; la description recopie aussi la partie « il comprend : … » en entier. Aucune ligne du devis ne doit manquer.",
         "Si le devis indique un nom de projet, de chantier ou de client, indique-le dans project_name ; sinon laisse une chaîne vide.",
         "Si une localisation est mentionnée, indique-la dans location ; sinon laisse une chaîne vide.",
       ].join(" "),
@@ -101,6 +105,15 @@ export async function extractDevisFromPdf(file: File): Promise<DevisExtractionRe
               project_name: { type: "string" },
               location: { type: "string" },
               works: { type: "array", items: { type: "string" } },
+              work_steps: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: { title: { type: "string" }, steps: { type: "array", items: { type: "string" } } },
+                  required: ["title", "steps"],
+                },
+              },
               price_lines: {
                 type: "array",
                 items: {
@@ -124,7 +137,7 @@ export async function extractDevisFromPdf(file: File): Promise<DevisExtractionRe
               devis_total: { type: ["number", "null"] },
               tmp_percent: { type: ["number", "null"] },
             },
-            required: ["project_name", "location", "works", "price_lines", "devis_total", "tmp_percent"],
+            required: ["project_name", "location", "works", "work_steps", "price_lines", "devis_total", "tmp_percent"],
           },
         },
       },
@@ -168,7 +181,7 @@ export async function extractDevisFromPdf(file: File): Promise<DevisExtractionRe
     return { ok: false, status: 502, body: { error: `Réponse IA vide${reasonNote}. Réessayez.` } };
   }
 
-  let parsed: { project_name?: string; location?: string; works?: string[]; price_lines?: Array<{ category?: string; subcategory?: string; designation?: string; unit?: string; quantity?: number | null; unit_price?: number | null; ref?: string; description?: string; concerne?: string; amount?: number | null }>; devis_total?: number | null; tmp_percent?: number | null };
+  let parsed: { project_name?: string; location?: string; works?: string[]; work_steps?: unknown; price_lines?: Array<{ category?: string; subcategory?: string; designation?: string; unit?: string; quantity?: number | null; unit_price?: number | null; ref?: string; description?: string; concerne?: string; amount?: number | null }>; devis_total?: number | null; tmp_percent?: number | null };
   try {
     parsed = JSON.parse(outputText);
   } catch {
@@ -222,6 +235,7 @@ export async function extractDevisFromPdf(file: File): Promise<DevisExtractionRe
     ok: true,
     data: {
       works,
+      work_steps: cleanWorkSteps(parsed.work_steps),
       project_name: (parsed.project_name || "").trim(),
       location: (parsed.location || "").trim(),
       price_lines: priceLines,

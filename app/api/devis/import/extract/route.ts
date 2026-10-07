@@ -25,6 +25,7 @@ export async function POST(request: Request) {
     project_name: data.project_name,
     location: data.location,
     works: data.works,
+    work_steps: data.work_steps,
     lines: data.all_lines,
     devis_total: data.devis_total,
     tmp_percent: data.tmp_percent,
