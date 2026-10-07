@@ -79,11 +79,15 @@ export const FILLER_WORDS = new Set([
 
 // 3) Unités qui veulent dire la même chose (le DAO écrit « Fft », la bibliothèque « FFT » ou « Ens »…).
 const UNIT_GROUPS: string[][] = [
-  ["u", "un", "unite", "unites", "pce", "pc", "piece", "pieces", "nb", "nombre"],
+  ["u", "un", "unit", "unite", "unites", "unitaire", "pce", "pces", "pc", "piece", "pieces", "nb", "nombre", "nbre"],
   ["ff", "fft", "forfait", "ens", "ensemble", "lot", "fg", "forfaitaire"],
-  ["ml", "m l", "metre lineaire", "metres lineaires", "m"],
-  ["m2", "m 2", "metre carre", "metres carres"],
-  ["m3", "m 3", "metre cube", "metres cubes"],
+  ["ml", "m l", "metre lineaire", "metres lineaires", "m lineaire", "m", "metre", "metres"],
+  ["m2", "m 2", "m carre", "m carres", "metre carre", "metres carres"],
+  ["m3", "m 3", "m cube", "m cubes", "metre cube", "metres cubes"],
+  ["t", "tonne", "tonnes", "tn"],
+  ["kg", "kilo", "kilos", "kilogramme", "kilogrammes"],
+  ["l", "litre", "litres", "lt"],
+  ["sac", "sacs"],
   ["j", "jour", "jours", "jour personne", "jour-personne", "j pers", "j-pers", "hj", "homme jour"],
 ];
 
@@ -109,18 +113,44 @@ function normaliseNumbers(text: string): string {
     .replace(/(\d+)\s*kg\s*\/?\s*m\s?[3³]?/g, " $1kg ")
     // « sauf volige » : la restriction n'est pas le matériau de la fiche.
     .replace(/\bsauf\s+[^(),;]*/g, " ")
-    // Dimensions en mètres écrites « 1,10*2,10 » ou « 1,40x1,40x2,50m » (toutes avec virgule) : en centimètres (110x210).
-    .replace(/\d+[.,]\d+\s*m?(?:\s*[*x×]\s*\d+[.,]\d+\s*m?){1,2}\b/g, (match) => ` ${match.split(/\s*[*x×]\s*/).map((part) => Math.round(Number(part.replace(/\s*m$/, "").replace(",", ".")) * 100)).join("x")} `)
     // Épaisseurs de tôle « 50/100 », « 50/100è » : un seul bloc.
     .replace(/\b(\d+)\s*\/\s*(\d+)(?:e|eme|ieme)?\b/g, " $1sur$2 ")
     // Codes de types (Type_FP1a, Type ECH2, Type_01) : le numéro de type ne change pas le matériau.
     .replace(/\btype\s*_?\s*(fp|ech)\s*\d+[a-z]?\b/g, " $1 ")
     .replace(/\btype\s*_?\s*\d+\b/g, " ")
     .replace(/\b(fp|ech)\s?\d+[a-z]?\b/g, " $1 ")
-    .replace(/(\d+)\s*(?:x|×|\*)\s*(\d+)/g, " $1x$2 ")
-    .replace(/(\d+)\s*cm\b/g, " $1 ")
-    .replace(/(\d+)\s*millimetres?\b|(\d+)\s*mm\b/g, (_m, a, b) => ` ${a ?? b}mm `)
+    // Chaînes de dimensions « 20x20x40 », « 20 X 20 X 40 cm », « 0,20x0,20x0,40 m », « 800x2000 mm » : toutes ramenées à la même
+    // écriture en centimètres (20x20x40, 80x200). Section de câble « 3x2,5 mm² » ou « 3G2,5 » : 3x2p5.
+    .replace(/\b(\d)\s?g\s?(\d+[.,]\d+)/g, "$1x$2")
+    .replace(/\d+(?:[.,]\d+)?(?:\s*(?:mm|cm|m)(?![a-z0-9²³]))?(?:\s*[*x×]\s*\d+(?:[.,]\d+)?(?:\s*(?:mm|cm|m)(?![a-z0-9²³]))?){1,2}/g, normaliseDimensionChain)
+    // Mesure isolée en mètres avec décimales (« 0,10 m » = 10 cm).
+    .replace(/(\d+[.,]\d+)\s*m(?![a-z0-9²³])/g, (_m, value: string) => ` ${Math.round(Number(value.replace(",", ".")) * 100)} `)
+    .replace(/\bmm\s*[²2]/g, " ")
+    // Diamètre écrit « D100 » ou « diamètre 100 » = 100 mm.
+    .replace(/\bd\s?(\d{3})\b/g, " $1mm ")
+    .replace(/\bdiam(?:etre|\.)?\s*(\d{2,3})\b(?!\s*(?:cm|m)\b)/g, " $1mm ")
+    // Un nombre décimal reste UN seul mot (0,5 mm → 0p5mm ; 2,5 → 2p5) pour ne pas être coupé en deux chiffres.
+    .replace(/(\d)[.,](\d)/g, "$1p$2")
+    .replace(/(\d+(?:p\d+)?)\s*cm\b/g, " $1 ")
+    .replace(/(\d+(?:p\d+)?)\s*millimetres?\b|(\d+(?:p\d+)?)\s*mm\b/g, (_m, a, b) => ` ${a ?? b}mm `)
     .replace(/\bb\.?\s?a\.?\b(?!\s*\d)/g, " beton arme ");
+}
+
+// « 20 x 20 x 40 cm », « 0,20*0,20*0,40 m », « 800x2000 mm », « 3x2,5 » → écriture unique, en centimètres.
+function normaliseDimensionChain(match: string): string {
+  const parts = match.split(/\s*[*x×]\s*/).map((part) => {
+    const found = part.trim().match(/^(\d+(?:[.,]\d+)?)(?:\s*(mm|cm|m))?$/);
+    return found ? { value: Number(found[1].replace(",", ".")), raw: found[1], unit: found[2] ?? "" } : null;
+  });
+  if (parts.some((part) => !part)) return match;
+  const list = parts as Array<{ value: number; raw: string; unit: string }>;
+  const unit = [...list].reverse().find((part) => part.unit)?.unit ?? "";
+  const allDecimal = list.every((part) => /[.,]/.test(part.raw));
+  let values = list.map((part) => part.value);
+  if (unit === "m" || (!unit && allDecimal)) values = values.map((value) => value * 100);
+  else if (unit === "mm" && values.every((value) => value % 10 === 0)) values = values.map((value) => value / 10);
+  else if (unit === "mm") return ` ${list.map((part) => part.raw).join("x")}mm `;
+  return ` ${values.map((value) => String(Math.round(value * 100) / 100).replace(".", ",")).join("x")} `;
 }
 
 // Table mot (ou expression) → mot officiel, triée par longueur (les expressions longues d'abord).
@@ -166,4 +196,22 @@ export function stripLineReference(text: string): string {
     .replace(/^\s*\(?\d{1,3}(?:\s?[.,]\s?\d{1,3}){1,3}(?:[a-z](?![a-zà-ÿ]))?\)?\s*[-–—:.)]*\s*/i, "")
     .replace(/^\d\s+(?=[A-Za-zÀ-ÿ])/, "");
   return cleaned.trim() || String(text ?? "").trim();
+}
+
+/**
+ * Une sous-ligne « 6.02a Type_01 => … » n'a pas le nom de l'ouvrage : il est sur la ligne parente « 6.02 … » (au plus 40 lignes plus haut).
+ * Renvoie le texte de la ligne `index` complété du texte parent (sans numéros), ou le texte seul si ce n'est pas une sous-ligne.
+ * Sert au DAO comme au devis PDF : mêmes règles partout.
+ */
+export function designationWithParent(texts: string[], index: number): string {
+  const own = String(texts[index] ?? "");
+  const child = own.match(/^\s*\(?(\d{1,3}\s?[.,]\s?\d{1,3})\s?[a-z](?![a-zà-ÿ])/i);
+  if (!child) return own;
+  const base = child[1].replace(/\s/g, "").replace(",", ".");
+  for (let back = index - 1; back >= Math.max(0, index - 40); back -= 1) {
+    const text = String(texts[back] ?? "");
+    const ref = text.match(/^\s*\(?(\d{1,3}\s?[.,]\s?\d{1,3})(?![\d])\s?(?![a-z](?![a-zà-ÿ]))/i);
+    if (ref && ref[1].replace(/\s/g, "").replace(",", ".") === base) return `${stripLineReference(text)} ${stripLineReference(own)}`;
+  }
+  return own;
 }
