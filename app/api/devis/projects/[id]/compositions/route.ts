@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { requireDevisAdmin } from "@/lib/devis/admin";
 import { isLaborLine } from "@/lib/compositions/labor";
 import { computeLineFromComposition, type ComputedPart } from "@/lib/compositions/prices";
-import { loadPriceLibrary, lookupLibraryPrices } from "@/lib/prices/library-lookup";
+import { loadPriceLibrary, lookupLibraryPrices, looseLibraryMatch } from "@/lib/prices/library-lookup";
 
 // Calcul GRATUIT des prix internes manquants d'un devis (aucun crédit IA,
 // aucun internet). Pour chaque ligne sans prix interne :
@@ -70,7 +70,18 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
       continue;
     }
     const line = computeLineFromComposition(library, designation, unit);
-    if (!line) { details.push({ id: lineId, designation, unit, status: "sans composition", price: null }); continue; }
+    if (!line) {
+      // Dernier recours gratuit : un prix de la bibliothèque rangé sous un titre voisin (mêmes mots, mêmes dimensions, même verbe).
+      const loose = looseLibraryMatch(library, { designation, unit });
+      if (loose) {
+        updates.push({ id: lineId, unit_price: loose.price });
+        fromLibrary += 1;
+        details.push({ id: lineId, designation, unit, status: "bibliothèque", price: loose.price, title: `Prix déjà enregistré (titre voisin) : ${loose.matched}` });
+        continue;
+      }
+      details.push({ id: lineId, designation, unit, status: "sans composition", price: null });
+      continue;
+    }
     if (line.price !== null && line.price > 0) {
       updates.push({ id: lineId, unit_price: line.price });
       computed += 1;
