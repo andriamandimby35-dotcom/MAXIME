@@ -2746,7 +2746,12 @@ export default function EstimateBuilder({
   function isGroupHeader(line: EstimateLineData) {
     return !String(line[columnName(daoColumns, ["Unité", "Unite", "unite"])] ?? "").trim() && !(numberFrom(line, QUANTITY_KEYS) > 0);
   }
-  const needsPrice = (line: EstimateLineData) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0 && !isGroupHeader(line);
+  // Ligne sans prix à remplir (salaires et transport compris). Les « éléments manquants utiles aux travaux » proposés par l'application
+  // (camion, base-vie, petit matériel…) sont des suggestions sans prix : tant qu'elles sont masquées, elles ne comptent pas comme manquantes.
+  const needsPriceAny = (line: EstimateLineData) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0 && !isGroupHeader(line);
+  const isHiddenSuggestion = (line: EstimateLineData) => line.__internalOnly === true && !isInternalLaborLine(line)
+    && !normalizedLabel(String(line[columnName(daoColumns, ["Désignation", "Designation"])] ?? "")).includes("transportapprovisionnement") && !showEmptyInternal;
+  const needsPrice = (line: EstimateLineData) => needsPriceAny(line) && !isHiddenSuggestion(line);
   // Ligne à composition (enduit, béton, maçonnerie…) : son prix se calcule avec les matériaux ; sinon recherche directe de la ligne.
   const hasComposition = (line: EstimateLineData) => {
     if (isInternalLaborLine(line)) return false;
@@ -2793,7 +2798,7 @@ export default function EstimateBuilder({
     const totalKey = columnName(daoColumns, TOTAL_KEYS);
     const targets = estimateLines
       .map((line, index) => ({ line, index }))
-      .filter(({ line }) => needsPrice(line));
+      .filter(({ line }) => needsPriceAny(line));
     if (targets.length === 0) { setMessage("Tous les prix sont déjà remplis."); return; }
     setFreeBusy(true);
     const previousCursor = document.body.style.cursor;
