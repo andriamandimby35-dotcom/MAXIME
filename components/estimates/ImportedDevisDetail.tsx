@@ -24,6 +24,7 @@ export type DevisLine = {
 
 type Project = { id: string; name: string; createdAt: string | null; marginPercent: number | null; location?: string | null; internalParams?: Partial<InternalParams> | null };
 type View = "external" | "internal";
+type ReLine = { designation: string; unit: string; quantity: number; unit_price: number; ref?: string };
 
 type CalcPart = { designation: string; unit: string; quantity: number; unitPrice: number | null; amount: number; optional: boolean };
 type CalcDetail = { id: string; designation: string; unit: string; status: "bibliothèque" | "composition" | "matériau manquant" | "sans composition"; price: number | null; title?: string; notes?: string[]; parts?: CalcPart[]; missing?: string[] };
@@ -105,6 +106,13 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
       await saveInternalCosts({ [TRANSPORT_DESIGNATION]: price });
     } finally { setCostsBusy(false); }
   }
+  const [reFile, setReFile] = useState<File | null>(null);
+  const [reBusy, setReBusy] = useState(false);
+  const [reResult, setReResult] = useState<{ lines: ReLine[]; devis_total: number | null; tmp_percent: number | null; warnings: string[] } | null>(null);
+  const [reKind, setReKind] = useState<"external" | "internal">("external");
+  const [reMargin, setReMargin] = useState("");
+  const [reKeep, setReKeep] = useState(true);
+  const reSum = useMemo(() => (reResult?.lines ?? []).reduce((sum, line) => sum + (line.unit_price > 0 ? line.quantity * line.unit_price : 0), 0), [reResult]);
   const visibleRows = view === "external" ? rows.filter((row) => !row.is_internal) : rows;
   const canGiveMargin = summary.missingExternal > 0 && summary.lines - summary.missingInternal > 0;
 
@@ -259,6 +267,37 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
     setMessage(error ?? "PDF ouvert dans un nouvel onglet.");
   }
 
+  // Ré-analyse du PDF : lecture par l'IA (aperçu), puis remplacement des lignes après relecture.
+  async function reanalyzeRead() {
+    if (!reFile) return;
+    setReBusy(true); setReResult(null); setMessage("");
+    try {
+      const form = new FormData();
+      form.append("file", reFile);
+      const response = await fetch(`/api/devis/projects/${project.id}/reanalyze`, { method: "POST", body: form });
+      const result = await response.json().catch(() => ({})) as { error?: string; lines?: ReLine[]; devis_total?: number | null; tmp_percent?: number | null; warnings?: string[] };
+      if (!response.ok || !result.lines) { setMessage(result.error ?? "Lecture du PDF impossible."); return; }
+      setReResult({ lines: result.lines, devis_total: result.devis_total ?? null, tmp_percent: result.tmp_percent ?? null, warnings: result.warnings ?? [] });
+    } finally { setReBusy(false); }
+  }
+  async function reanalyzeApply() {
+    if (!reResult) return;
+    if (reKind === "internal" && reSum > 0 && !reMargin.trim() && project.marginPercent === null) { setMessage("Indique la marge à appliquer pour fabriquer le devis externe."); return; }
+    if (!window.confirm("Les lignes actuelles du devis vont être remplacées par cette lecture. Le chantier, le planning, les dépenses, les salaires et le transport sont gardés. Continuer ?")) return;
+    setReBusy(true); setMessage("");
+    try {
+      const response = await fetch(`/api/devis/projects/${project.id}/reanalyze`, {
+        method: "PUT", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ lines: reResult.lines, kind: reKind, keep_internal_prices: reKeep, margin_percent: reMargin || null, tmp_percent: reResult.tmp_percent }),
+      });
+      const result = await response.json().catch(() => ({})) as { error?: string; count?: number; addedTasks?: number; keptPrices?: number; warning?: string };
+      if (!response.ok) { setMessage(result.error ?? "Remplacement impossible."); return; }
+      setMessage(`Devis remplacé : ${result.count} lignes${result.keptPrices ? `, ${result.keptPrices} prix internes repris` : ""}${result.addedTasks ? `, ${result.addedTasks} tâche(s) ajoutée(s) au planning` : ""}.${result.warning ? " " + result.warning : ""} Pense à relancer le calcul des prix internes pour les lignes sans prix.`);
+      setReResult(null); setReFile(null);
+      router.refresh();
+    } finally { setReBusy(false); }
+  }
+
   async function deleteDevis() {
     if (!(await confirmDeletion("project", project.id))) return;
     const response = await fetch(`/api/projects/${project.id}`, { method: "DELETE" });
@@ -269,11 +308,11 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   }
 
   useEffect(() => {
-    if (!progress && !pdfBusy) return;
+    if (!progress && !pdfBusy && !reBusy) return;
     const previous = document.body.style.cursor;
     document.body.style.cursor = "wait";
     return () => { document.body.style.cursor = previous; };
-  }, [progress, pdfBusy]);
+  }, [progress, pdfBusy, reBusy]);
 
   const small: React.CSSProperties = { fontSize: ".78rem", color: "#666" };
   const margin = summary.marginPercent ?? project.marginPercent;
@@ -485,6 +524,58 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
           </table>
         </div>
       </section>
+
+      {isAdmin && (
+        <section className="estimateVersionsPanel" style={{ marginTop: 16 }}>
+          <div className="estimateVersionsHeading"><p className="estimatePanelEyebrow">Lecture du PDF</p><h3>Ré-analyser le PDF du devis</h3></div>
+          <p className="estimatePanelDescription">Si la lecture du PDF contient des erreurs, choisis à nouveau le PDF : l'IA le relit (crédits IA) et tu vérifies le résultat avant de remplacer les lignes. Le chantier, le planning, les dépenses, les salaires et le transport sont gardés.</p>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <input type="file" accept="application/pdf" disabled={reBusy} onChange={(event) => { setReFile(event.target.files?.[0] ?? null); setReResult(null); }} />
+            <button type="button" className="tenderButton tenderButtonPrimary" disabled={reBusy || !reFile} onClick={() => void reanalyzeRead()}>{reBusy ? "Lecture en cours…" : "Relire le PDF (utilise l'IA)"}</button>
+          </div>
+          {reBusy && <p style={small}>Lecture en cours : cela peut prendre une minute.</p>}
+          {reResult && (
+            <div style={{ marginTop: 12 }}>
+              <p><strong>{reResult.lines.length} lignes</strong> lues (le devis actuel en a {rows.filter((row) => !row.is_internal).length}) · total des lignes chiffrées : <strong>{formatAr(reSum)}</strong>{reResult.devis_total ? <> · total écrit dans le PDF : <strong>{formatAr(reResult.devis_total)}</strong> {Math.abs(reSum - reResult.devis_total) <= Math.max(1, reResult.devis_total * 0.001) ? "✔ identique" : "⚠ différent : une ligne manque peut-être"}</> : null}</p>
+              {reResult.warnings.length > 0 && (
+                <details className="notice" style={{ background: "#fbeee0" }}>
+                  <summary style={{ cursor: "pointer", fontWeight: 700 }}>⚠ {reResult.warnings.length} ligne(s) dont la quantité, le prix unitaire et le montant ne concordent pas</summary>
+                  <ul style={{ margin: "8px 0 0 18px" }}>{reResult.warnings.slice(0, 40).map((item, index) => <li key={index} style={{ fontSize: ".82rem" }}>{item}</li>)}</ul>
+                </details>
+              )}
+              <details style={{ margin: "8px 0" }}>
+                <summary style={{ cursor: "pointer", fontWeight: 700 }}>Voir les lignes lues</summary>
+                <div style={{ maxHeight: 320, overflow: "auto", border: "1px solid #e0e8e2", borderRadius: 10, marginTop: 6 }}>
+                  <table style={{ width: "100%", fontSize: ".8rem", minWidth: 700 }}>
+                    <thead><tr><th>N°</th><th>Désignation</th><th>Unité</th><th>Qté</th><th>Prix unitaire</th></tr></thead>
+                    <tbody>{reResult.lines.map((line, index) => (
+                      <tr key={index}><td>{line.ref ?? ""}</td><td>{line.designation}</td><td>{line.unit}</td><td>{line.quantity}</td><td>{line.unit_price > 0 ? formatAr(line.unit_price) : "—"}</td></tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              </details>
+              <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", margin: "8px 0" }}>
+                <label style={{ display: "grid", gap: 4 }}>Les prix du PDF sont…
+                  <select value={reKind} onChange={(event) => setReKind(event.target.value as "external" | "internal")}>
+                    <option value="external">ceux du client (externes)</option>
+                    <option value="internal">mes coûts (internes)</option>
+                  </select>
+                </label>
+                {reKind === "internal" && <label style={{ display: "grid", gap: 4 }}>Marge à appliquer (%)
+                  <input type="number" step="0.1" value={reMargin} onChange={(event) => setReMargin(event.target.value)} style={{ width: 120 }} />
+                </label>}
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input type="checkbox" checked={reKeep} onChange={(event) => setReKeep(event.target.checked)} /> Garder les prix internes déjà trouvés (même désignation)
+                </label>
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button type="button" className="tenderButton tenderButtonPrimary" disabled={reBusy} onClick={() => void reanalyzeApply()}>Remplacer les lignes du devis par cette lecture</button>
+                <button type="button" className="tenderButton" disabled={reBusy} onClick={() => { setReResult(null); setReFile(null); }}>Annuler</button>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
       {isAdmin && <p style={{ marginTop: 8 }}><button type="button" className="text-red-700 underline" onClick={() => void deleteDevis()}>Supprimer ce devis (et son chantier)</button></p>}
     </div>
