@@ -186,6 +186,23 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
     }
   }
 
+  // Liste des lignes encore sans prix (avec la raison quand le calcul gratuit l'a donnée), à copier et coller dans le chat
+  // pour que l'assistant prépare le SQL de la bibliothèque. Même bouton que dans le devis du DAO.
+  async function copyMissingList() {
+    const detailById = new Map((calc?.details ?? []).map((detail) => [detail.id, detail]));
+    const list = rows
+      .filter((row) => !row.is_internal && !(num(row.unit_price) > 0) && !isLaborLine(String(row.designation ?? "")))
+      .map((row) => {
+        const detail = detailById.get(row.id);
+        const reason = detail && detail.status === "sans composition" && detail.title ? ` | POURQUOI : ${detail.title}` : "";
+        return `${String(row.unit ?? "").trim() || "?"} | ${String(row.designation ?? "").replace(/\s+/g, " ").trim()}${reason}`;
+      });
+    if (list.length === 0) { setMessage("Aucune ligne sans prix."); return; }
+    const text = list.join("\n");
+    try { await navigator.clipboard.writeText(text); setMessage(`${list.length} ligne(s) sans prix copiée(s). Colle-les dans le chat : je prépare le SQL de la bibliothèque.`); }
+    catch { window.prompt("Copie cette liste (Ctrl+C) puis colle-la dans le chat :", text); }
+  }
+
   // Étape 2 (crédits IA) : cherche sur internet SEULEMENT le prix des matériaux
   // manquants (ciment, sable, parpaing…), puis relance le calcul gratuit.
   async function searchMissingMaterials() {
@@ -451,6 +468,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
             {!addOpen && !progress && <button type="button" className="estimateSecondaryAction" onClick={() => setAddOpen(true)}>+ Ajouter une ligne</button>}
             {calc && calc.missingMaterials.length > 0 && !progress && <button type="button" className="estimateSecondaryAction" disabled={libraryBusy} onClick={() => void searchMissingMaterials()}>{`2. Chercher le prix de ${calc.missingMaterials.length} matériau(x) manquant(s) sur internet (crédits IA)`}</button>}
             {calc && calc.noCompositionIds.length > 0 && !progress && <button type="button" className="estimateSecondaryAction" disabled={libraryBusy} onClick={() => void fillInternalPrices(calc.noCompositionIds)}>{`3. Chercher ${calc.noCompositionIds.length} ligne(s) sans composition sur internet (crédits IA)`}</button>}
+            {summary.missingInternal > 0 && !progress && <button type="button" className="estimateSecondaryAction" onClick={() => void copyMissingList()}>Copier la liste des lignes sans prix</button>}
             {progress && <button type="button" className="estimateSecondaryAction" onClick={() => { stopRef.current = true; }}>Arrêter</button>}
             {summary.missingInternal === 0 && <span style={{ color: "#1f7a46", fontWeight: 700 }}>Prix internes complets</span>}
             {canGiveMargin && !progress && (

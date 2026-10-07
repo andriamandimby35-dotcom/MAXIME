@@ -885,6 +885,37 @@ export async function POST(request: Request) {
       .single();
     if (error || !created) return NextResponse.json({ error: "Prix trouvé mais non enregistrable." }, { status: 500 });
     priceId = created.id;
+
+    // La fiche porte le nom commercial trouvé (« Ciment Orimbato »). Pour que le prochain devis ou DAO qui écrit la ligne comme
+    // aujourd'hui retrouve CE prix gratuitement, on garde aussi la fiche sous l'écriture du devis (sans numéro de poste), si elle
+    // n'existe pas déjà. Seuls les résultats de la recherche IA sont enregistrés : un prix repris de la bibliothèque ne l'est jamais.
+    try {
+      const wording = designation.replace(/\s+/g, " ").trim().slice(0, 240);
+      const sameWording = (organizationPrices ?? []).some((row) => canonicalMaterialKey(String(row.designation ?? "")) === canonicalMaterialKey(wording) && sameUnit(row));
+      if (wording && canonicalMaterialKey(libraryDesignation) !== canonicalMaterialKey(wording) && !sameWording) {
+        await supabase.from("price_library").insert({
+          organization_id: organizationId,
+          designation: wording,
+          categorie,
+          unite,
+          prix_ia: calculatedInternetPrice,
+          prix_retenu: calculatedInternetPrice,
+          prix_source: bestOffer.source_url,
+          fournisseur: bestOffer.supplier_name,
+          ville: bestOffer.supplier_city,
+          region: bestOffer.supplier_region,
+          reference_source: bestOffer.source_url,
+          statut_prix: "ia",
+          origine_prix: "internet_ia",
+          distance_chantier_km: bestOffer.distance_km,
+          confiance_ia: bestOffer.confidence,
+          nom_chantier: worksiteName,
+          delivery_cost: bestOffer.delivery_cost,
+          landed_price: calculatedInternetPrice,
+          last_checked_at: new Date().toISOString(),
+        });
+      }
+    } catch { /* la fiche principale est déjà enregistrée */ }
   }
 
   const historyRows = offers.map((offer, index) => ({

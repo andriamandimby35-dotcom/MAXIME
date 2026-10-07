@@ -7,7 +7,7 @@ import { createClient } from "@/lib/supabase/client";
 import OfficialPdfButton from "@/components/estimates/OfficialPdfButton";
 import { LibraryPicker } from "@/components/estimates/LibraryPicker";
 import { compositeInputsFor } from "@/lib/compositions/works";
-import { designationWithParent } from "@/lib/prices/synonyms";
+import { designationWithParent, stripLineReference } from "@/lib/prices/synonyms";
 import { estimateMaterialWeights } from "@/lib/devis/internal-costs";
 import type { TransportWeights } from "@/lib/dao/transport-weights";
 
@@ -1618,7 +1618,8 @@ export default function EstimateBuilder({
     setMessage(`Option ${selectedReference} retenue : les variantes exclusives écartées ne sont plus chiffrées ni exportées.`);
   }
 
-  async function searchInternetPrices(newEstimateId: string | null, lines: EstimateLineData[]) {
+  async function searchInternetPrices(newEstimateId: string | null, lines: EstimateLineData[], scope: "all" | "composition" | "direct" = "all") {
+    stopSearchRef.current = false;
     const designationKey = daoColumnName(daoColumns, ["Désignation", "Designation"]);
     const unitKey = daoColumnName(daoColumns, ["Unité", "Unite"]);
     const quantityKey = daoColumnName(daoColumns, ["Quantité", "Quantite"]);
@@ -1626,7 +1627,9 @@ export default function EstimateBuilder({
     const totalKey = daoColumnName(daoColumns, ["Total"]);
     const supabase = createClient();
     const updatedLines = [...lines];
-    const searchableTotal = updatedLines.filter((line) => daoRowType(line) === "item" && line.__excludedByChoice !== true).length;
+    // scope « composition » / « direct » : seulement les lignes encore sans prix après le calcul gratuit (boutons 2 et 3, comme le devis PDF).
+    const wanted = (line: EstimateLineData) => daoRowType(line) === "item" && line.__excludedByChoice !== true && (scope === "all" || (needsPrice(line) && hasComposition(line) === (scope === "composition")));
+    const searchableTotal = updatedLines.filter(wanted).length;
     let searchedCount = 0;
     let manualRequired = 0;
     let lowerOffersPending = 0;
@@ -1645,7 +1648,8 @@ export default function EstimateBuilder({
 
     for (let index = 0; index < updatedLines.length; index += 1) {
       let line = updatedLines[index];
-      if (daoRowType(line) !== "item" || line.__excludedByChoice === true) continue;
+      if (stopSearchRef.current) break;
+      if (!wanted(line)) continue;
       searchedCount += 1;
       const designation = String(line[designationKey] ?? "").trim();
       let unit = String(line[unitKey] ?? "").trim();
@@ -1838,10 +1842,10 @@ export default function EstimateBuilder({
     return { updatedLines, manualRequired, lowerOffersPending, searchError };
   }
 
-  async function searchAllDaoPrices() {
+  async function searchAllDaoPrices(scope: "all" | "composition" | "direct" = "all") {
     if (priceSearchStatus?.running) return;
 
-    const priceResult = await searchInternetPrices(estimateId, estimateLines);
+    const priceResult = await searchInternetPrices(estimateId, estimateLines, scope);
     setEstimateLines(priceResult.updatedLines);
 
     const notices = ["Recherche globale des prix terminée."];
@@ -2743,12 +2747,23 @@ export default function EstimateBuilder({
     return !String(line[columnName(daoColumns, ["Unité", "Unite", "unite"])] ?? "").trim() && !(numberFrom(line, QUANTITY_KEYS) > 0);
   }
   const needsPrice = (line: EstimateLineData) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0 && !isGroupHeader(line);
+  // Ligne à composition (enduit, béton, maçonnerie…) : son prix se calcule avec les matériaux ; sinon recherche directe de la ligne.
+  const hasComposition = (line: EstimateLineData) => {
+    if (isInternalLaborLine(line)) return false;
+    const text = stripLineReference(String(line[columnName(daoColumns, ["Désignation", "Designation"])] ?? ""));
+    return Boolean(compositeInputsFor(text, String(line[columnName(daoColumns, ["Unité", "Unite", "unite"])] ?? "")));
+  };
   const missingPriceCount = estimateLines.filter(needsPrice).length;
+  const missingCompositionCount = estimateLines.filter((line) => needsPrice(line) && hasComposition(line)).length;
+  const missingDirectCount = missingPriceCount - missingCompositionCount;
 
   // « 1. Calculer les prix (gratuit) » : reprend, sans crédit IA, les prix déjà connus de la bibliothèque (nom exact, nom voisin
   // ou composition de matériaux) pour les lignes sans prix. Le choix du prix reste modifiable ligne par ligne.
   // Raison pour laquelle une ligne n'a pas trouvé de prix au dernier calcul gratuit (sert à « Copier la liste »).
   const freeMissesRef = useRef<Map<number, string>>(new Map());
+  // Comme pour le devis PDF : le bouton « Chercher … sur internet (crédits IA) » n'apparaît qu'après le calcul gratuit, avec le nombre de lignes restantes.
+  const [freeCalcDone, setFreeCalcDone] = useState(false);
+  const stopSearchRef = useRef(false);
 
   // Sous-ligne « 6.02a … » : le nom de l'ouvrage est sur la ligne parente « 6.02 … » (même règle que pour le devis PDF).
   function designationWithParentLine(index: number) {
@@ -2792,6 +2807,7 @@ export default function EstimateBuilder({
       const result = await response.json().catch(() => ({})) as { error?: string; results?: Array<{ id: string; price: number; source: string; approximate?: boolean }>; misses?: Array<{ id: string; reason: string }> };
       if (!response.ok) { setMessage(result.error ?? "Calcul impossible."); return; }
       freeMissesRef.current = new Map((result.misses ?? []).map((miss) => [Number(miss.id), miss.reason]));
+      setFreeCalcDone(true);
       const hits = new Map((result.results ?? []).map((hit) => [Number(hit.id), hit]));
       if (hits.size === 0) { setMessage(`Aucun des ${targets.length} prix manquants n'est dans la bibliothèque. Essaie « Rechercher les prix avec l'IA », ou clique sur une ligne puis « Bibliothèque ».`); return; }
       const nextLines = estimateLines.map((line, index) => {
@@ -2984,6 +3000,7 @@ export default function EstimateBuilder({
                 <div><span>Taxe de l&apos;État (8 %)</span><strong>{financialSummary.stateTax.toLocaleString("fr-FR")} Ar</strong></div>
                 <div className="estimateClientTotal"><span>Total à payer par le client</span><strong>{financialSummary.clientTotal.toLocaleString("fr-FR")} Ar</strong></div>
               </div>
+              {missingPriceCount > 0 && <p style={{ fontSize: ".78rem", color: "#666", marginTop: 8 }}>À compléter : {missingPriceCount} prix interne(s).</p>}
               <div className="estimatePdfCards" style={{ marginTop: 12, gridTemplateColumns: "1fr" }}>
                 <div className="estimatePdfCard"><strong>Devis interne</strong><span>Coûts réels et informations internes</span><OfficialPdfButton estimateId={estimateId} mode="internal" /></div>
                 <div className="estimatePdfCard"><strong>Devis externe</strong><span>Version officielle à soumettre</span><OfficialPdfButton estimateId={estimateId} mode="external" /></div>
@@ -3047,13 +3064,19 @@ export default function EstimateBuilder({
               {missingPriceCount > 0 && !priceSearchStatus?.running && (
                 <button type="button" className="estimatePrimaryAction" disabled={freeBusy} onClick={() => void calculateFreePrices()}>{freeBusy ? "Calcul en cours…" : "1. Calculer les prix (gratuit)"}</button>
               )}
-              <button type="button" className="estimateSecondaryAction" onClick={() => void searchAllDaoPrices()} disabled={Boolean(priceSearchStatus?.running) || freeBusy}>
-                {priceSearchStatus?.running ? `Recherche en cours (${priceSearchStatus.current}/${priceSearchStatus.total})…` : "2. Rechercher les prix avec l’IA (crédits IA)"}
-              </button>
+              {freeCalcDone && missingCompositionCount > 0 && !priceSearchStatus?.running && (
+                <button type="button" className="estimateSecondaryAction" disabled={freeBusy} onClick={() => void searchAllDaoPrices("composition")}>{`2. Chercher le prix des matériaux manquants de ${missingCompositionCount} ligne(s) à composition (crédits IA)`}</button>
+              )}
+              {freeCalcDone && missingDirectCount > 0 && !priceSearchStatus?.running && (
+                <button type="button" className="estimateSecondaryAction" disabled={freeBusy} onClick={() => void searchAllDaoPrices("direct")}>{`3. Chercher ${missingDirectCount} ligne(s) sans composition sur internet (crédits IA)`}</button>
+              )}
+              {priceSearchStatus?.running && (
+                <button type="button" className="estimateSecondaryAction" onClick={() => { stopSearchRef.current = true; }}>Arrêter</button>
+              )}
               {missingPriceCount > 0 && !priceSearchStatus?.running && (
                 <button type="button" className="estimateSecondaryAction" onClick={() => void copyMissingList()}>Copier la liste des lignes sans prix</button>
               )}
-              {missingPriceCount === 0 && !priceSearchStatus?.running && <span style={{ color: "#1f7a46", fontWeight: 700 }}>Tous les prix sont remplis</span>}
+              {missingPriceCount === 0 && !priceSearchStatus?.running && <span style={{ color: "#1f7a46", fontWeight: 700 }}>Prix internes complets</span>}
               {!addLineOpen && <button type="button" className="estimateSecondaryAction" onClick={() => setAddLineOpen(true)}>+ Ajouter une ligne</button>}
             </div>
             {missingPriceCount > 0 && <p style={{ margin: "8px 0 0", fontSize: ".78rem", color: "#666" }}>{missingPriceCount} ligne(s) sans prix. Le calcul gratuit reprend les prix de la bibliothèque et des compositions, sans crédit IA. Pour une ligne précise, clique dessus puis « Bibliothèque ».</p>}
