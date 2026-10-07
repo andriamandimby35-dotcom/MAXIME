@@ -191,7 +191,7 @@ export function wordVariants(word: string): string[] {
 export function stripLineReference(text: string): string {
   const original = String(text ?? "");
   // « 2,5 mm² câble » commence par une mesure, pas par un numéro de ligne : on n'y touche pas.
-  if (/^\s*\d{1,3}(?:\s?[.,]\s?\d{1,3})+\s*(?:mm|cm|dm|m|ml|kg|t|l|%|x|\*|sur|ar)\b/i.test(original)) return original.trim();
+  if (/^\s*\d{1,3}(?:\s?[.,]\s?\d{1,3})+(?:\s*(?:mm|cm|dm|kg|%)|\s+(?:m|ml|t|l|x|\*|sur|ar))\b/i.test(original)) return original.trim();
   const cleaned = original
     .replace(/^\s*\(?\d{1,3}(?:\s?[.,]\s?\d{1,3}){1,3}(?:[a-z](?![a-zà-ÿ]))?\)?\s*[-–—:.)]*\s*/i, "")
     .replace(/^\d\s+(?=[A-Za-zÀ-ÿ])/, "");
@@ -211,7 +211,16 @@ export function designationWithParent(texts: string[], index: number): string {
   for (let back = index - 1; back >= Math.max(0, index - 40); back -= 1) {
     const text = String(texts[back] ?? "");
     const ref = text.match(/^\s*\(?(\d{1,3}\s?[.,]\s?\d{1,3})(?![\d])\s?(?![a-z](?![a-zà-ÿ]))/i);
-    if (ref && ref[1].replace(/\s/g, "").replace(",", ".") === base) return `${stripLineReference(text)} ${stripLineReference(own)}`;
+    if (ref && ref[1].replace(/\s/g, "").replace(",", ".") === base) {
+      // « Sous-désignations 6.02a à 6.02i détaillées ci-dessous » n'est pas du texte d'ouvrage : on l'enlève.
+      const parent = stripLineReference(text)
+        .replace(/\bsous[\s-]*d[ée]signations?\b.*$/i, " ")
+        .replace(/\b\d{1,3}\s?[.,]\s?\d{1,3}[a-z]?\s*(?:à|a|au|et)\s*\d{1,3}\s?[.,]\s?\d{1,3}[a-z]?\b/gi, " ")
+        .replace(/\bd[ée]taill[ée]e?s?\s+ci[\s-]*dessous\b/gi, " ")
+        .replace(/[\s:;,.]+$/g, "")
+        .trim();
+      return `${parent} ${stripLineReference(own)}`.trim();
+    }
   }
   return own;
 }

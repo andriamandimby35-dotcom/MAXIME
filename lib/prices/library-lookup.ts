@@ -171,3 +171,89 @@ export function looseLibraryMatch(library: PriceLibraryRow[], item: { designatio
   }
   return best ? { price: best.price, matched: best.matched, score: best.score } : null;
 }
+
+// ─── 3e niveau : prix « voisin » (à vérifier) ──────────────────────────────────
+// Quand ni le nom, ni la composition, ni la comparaison prudente ne trouvent un prix, on prend la fiche la plus proche
+// de la bibliothèque (même unité, même objet principal, au moins la moitié des mots en commun). Le prix est rempli
+// pour ne pas laisser de trou, mais marqué « à vérifier » dans le devis. Rien n'est enregistré dans la bibliothèque.
+export function approxLibraryMatch(library: PriceLibraryRow[], item: { designation: string; unit: string }): LooseHit | null {
+  if (!item.unit.trim() || !item.designation.trim()) return null;
+  const target = looseSignature(stripLineReference(item.designation));
+  if (target.content.size === 0) return null;
+  const targetHead = [...target.content][0];
+  let best: LooseHit | null = null;
+  for (const row of library) {
+    if (!sameUnitLoose(item.unit, String(row.unite ?? ""))) continue;
+    const price = savedPrice(row);
+    if (!price) continue;
+    const other = looseSignature(String(row.designation ?? ""));
+    if (other.content.size === 0 || !sameLooseSet(target.actions, other.actions)) continue;
+    if (isLabourText(String(row.designation ?? "")) !== isLabourText(item.designation)) continue;
+    if (objectWordsDiffer(target.content, other.content)) continue;
+    // Deux dimensions différentes (fer 8 / fer 12, dosage 250 / 350) = deux produits : jamais de prix voisin.
+    const targetNumbers = [...target.digits].filter((word) => !word.includes("x"));
+    const otherNumbers = [...other.digits].filter((word) => !word.includes("x"));
+    if (targetNumbers.length > 0 && otherNumbers.length > 0 && !otherNumbers.every((word) => target.digits.has(word)) && !targetNumbers.every((word) => other.digits.has(word))) continue;
+    const shared = [...target.content].filter((word) => other.content.has(word)).length;
+    if (shared === 0) continue;
+    const union = new Set([...target.content, ...other.content]).size;
+    const score = shared / union;
+    if (shared < Math.min(2, target.content.size, other.content.size) || score < 0.45) continue;
+    if (!other.content.has(targetHead) && !target.content.has([...other.content][0])) continue;
+    if (!best || score > best.score || (score === best.score && price < best.price)) best = { price: Math.round(price * 100) / 100, matched: String(row.designation ?? ""), score };
+  }
+  return best;
+}
+
+/** Pourquoi une ligne n'a pas trouvé de prix : la fiche la plus proche de la bibliothèque et ce qui l'écarte (pour le rapport). */
+export function whyNoMatch(library: PriceLibraryRow[], item: { designation: string; unit: string }): string {
+  const target = looseSignature(stripLineReference(item.designation));
+  if (target.content.size === 0) return "texte trop court ou sans mot reconnu";
+  let best: { row: PriceRow; shared: number; score: number } | null = null;
+  for (const row of library) {
+    const other = looseSignature(String(row.designation ?? ""));
+    const shared = [...target.content].filter((word) => other.content.has(word)).length;
+    if (shared === 0) continue;
+    const score = shared / new Set([...target.content, ...other.content]).size;
+    if (!best || score > best.score) best = { row, shared, score };
+  }
+  if (!best) return "aucune fiche de la bibliothèque ne partage un mot : à ajouter (SQL)";
+  const other = looseSignature(String(best.row.designation ?? ""));
+  const name = `« ${String(best.row.designation ?? "")} » (${String(best.row.unite ?? "?")})`;
+  if (!sameUnitLoose(item.unit, String(best.row.unite ?? ""))) return `fiche proche ${name} mais l'unité est différente (${item.unit})`;
+  if (!savedPrice(best.row)) return `fiche proche ${name} mais sans prix`;
+  if (!sameLooseSet(target.actions, other.actions)) return `fiche proche ${name} mais l'action diffère (réparation/dépose/neuf)`;
+  if (objectWordsDiffer(target.content, other.content)) return `fiche proche ${name} mais l'objet principal diffère`;
+  return `fiche proche ${name} mais seulement ${best.shared} mot(s) en commun ou dimensions différentes : à ajouter (SQL)`;
+}
+
+// ─── Salaires journaliers par poste ───────────────────────────────────────────
+// « Chef de chantier BT/Bac technique GC », « Maçon qualifié », « Aide-maçon »… : le salaire (JOUR-PERSONNE) se retrouve par le
+// poste, pas par le texte entier. Les salaires saisis dans la bibliothèque (nourriture comprise) servent pour tous les devis.
+const SALARY_ROLES: Array<[RegExp, string]> = [
+  [/\b(ingenieur|responsable technique|ingenieurs)\b/, "ingenieur"],
+  [/\bconducteur\b/, "conducteur"],
+  [/\bchef\b/, "chef"],
+  [/\b(aide|aides|manoeuvre|manoeuvres)\b/, "ouvrier"],
+  [/\bmacon/, "macon"],
+  [/\b(ouvrier|ouvriers|main d oeuvre|homme|manutentionnaire)\b/, "ouvrier"],
+];
+export function roleSalaryMatch(library: PriceLibraryRow[], item: { designation: string; unit: string }): LooseHit | null {
+  if (unitGroup(item.unit) !== "j") return null;
+  const text = stripLineReference(item.designation).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[œ]/g, "oe").replace(/[’'-]/g, " ");
+  const role = SALARY_ROLES.find(([pattern]) => pattern.test(text))?.[1];
+  if (!role) return null;
+  let best: LooseHit | null = null;
+  for (const row of library) {
+    if (unitGroup(String(row.unite ?? "")) !== "j") continue;
+    const price = savedPrice(row);
+    if (!price) continue;
+    const name = String(row.designation ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[œ]/g, "oe").replace(/[’'-]/g, " ");
+    const rowRole = SALARY_ROLES.find(([pattern]) => pattern.test(name))?.[1];
+    if (rowRole !== role) continue;
+    // Les salaires saisis par l'entreprise (« … journée avec nourriture comprise ») passent avant toute autre fiche du même poste.
+    const own = /^(ouvriers et aides|macons qualifies|chef de chantier|conducteur de travaux|ingenieur ou responsable technique)\b/.test(name) ? 2 : name.includes("nourriture comprise") ? 1 : 0;
+    if (!best || own > best.score || (own === best.score && price < best.price)) best = { price: Math.round(price * 100) / 100, matched: String(row.designation ?? ""), score: own };
+  }
+  return best;
+}

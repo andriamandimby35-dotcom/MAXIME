@@ -2738,7 +2738,12 @@ export default function EstimateBuilder({
   }
 
   // Lignes du devis sans prix (salaires compris : leur prix vient de la bibliothèque) : elles attendent le calcul gratuit, la recherche IA ou un prix saisi.
-  const missingPriceCount = estimateLines.filter((line) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0).length;
+  // Un titre de groupe (« 6.02 Liernes… Sous-désignations 6.02a à 6.02i ») n'a ni unité ni quantité : son prix est la somme de ses sous-lignes.
+  function isGroupHeader(line: EstimateLineData) {
+    return !String(line[columnName(daoColumns, ["Unité", "Unite", "unite"])] ?? "").trim() && !(numberFrom(line, QUANTITY_KEYS) > 0);
+  }
+  const needsPrice = (line: EstimateLineData) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0 && !isGroupHeader(line);
+  const missingPriceCount = estimateLines.filter(needsPrice).length;
 
   // « 1. Calculer les prix (gratuit) » : reprend, sans crédit IA, les prix déjà connus de la bibliothèque (nom exact, nom voisin
   // ou composition de matériaux) pour les lignes sans prix. Le choix du prix reste modifiable ligne par ligne.
@@ -2756,7 +2761,7 @@ export default function EstimateBuilder({
     const unitKey = columnName(daoColumns, ["Unité", "Unite", "unite"]);
     const rows = estimateLines
       .map((line, index) => ({ line, index }))
-      .filter(({ line }) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0)
+      .filter(({ line }) => needsPrice(line))
       .map(({ line, index }) => `${String(line[unitKey] ?? "").trim() || "?"} | ${designationWithParentLine(index).replace(/\s+/g, " ").trim()}${freeMissesRef.current.get(index) ? ` | POURQUOI : ${freeMissesRef.current.get(index)}` : ""}`);
     if (rows.length === 0) { setMessage("Aucune ligne sans prix."); return; }
     const text = rows.join("\n");
@@ -2773,7 +2778,7 @@ export default function EstimateBuilder({
     const totalKey = columnName(daoColumns, TOTAL_KEYS);
     const targets = estimateLines
       .map((line, index) => ({ line, index }))
-      .filter(({ line }) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0);
+      .filter(({ line }) => needsPrice(line));
     if (targets.length === 0) { setMessage("Tous les prix sont déjà remplis."); return; }
     setFreeBusy(true);
     const previousCursor = document.body.style.cursor;
@@ -3431,7 +3436,7 @@ export default function EstimateBuilder({
               <tr
                 onClick={() => setSelectedLine((current) => { setLibraryLine(null); return current === index ? null : index; })}
                 className="cursor-pointer"
-                style={numberFrom(item, UNIT_PRICE_KEYS) <= 0 ? { background: "#fff7ed" } : undefined}
+                style={numberFrom(item, UNIT_PRICE_KEYS) <= 0 && !isGroupHeader(item) ? { background: "#fff7ed" } : undefined}
               >
                 {daoColumns.map((column) => (
                   <td key={column.order} className="border p-2" data-label={column.name}>
