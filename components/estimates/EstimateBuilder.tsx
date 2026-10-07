@@ -2943,42 +2943,45 @@ export default function EstimateBuilder({
             <button type="button" role="tab" aria-selected={externalMarginPreview} className={externalMarginPreview ? "estimatePrimaryAction" : "estimateSecondaryAction"} onClick={() => setExternalMarginPreview(true)}>Devis externe</button>
           </div>
         </div>
-        {hasMasonryVariants && (
-          <section className="mb-4 mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
-            <h4 className="font-bold text-emerald-950">Choix de la maçonnerie</h4>
+        {(hasMasonryVariants || otherExclusiveGroups.length > 0) && (
+          <section className="mb-4 mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4" style={{ maxWidth: "100%" }}>
+            <h4 className="font-bold text-emerald-950">Choix à faire dans ce devis</h4>
             <p className="mt-1 text-sm text-emerald-900">
-              Le DAO impose une seule option pour les postes 5.01 et 5.02. La variante non retenue est retirée du devis, des sous-totaux et des PDF.
+              Le DAO impose une seule option par choix. L&apos;option non retenue est retirée du devis, des sous-totaux et des PDF.
             </p>
-            <div className="mt-3 flex flex-wrap gap-3">
-              <button type="button" onClick={() => void chooseMasonryVariant("parpaing")} className={masonryChoice === "parpaing" ? "estimatePrimaryAction" : "estimateSecondaryAction"}>
-                {masonryChoice === "parpaing" ? "✓ Parpaing retenu" : "Choisir Parpaing"}
-              </button>
-              <button type="button" onClick={() => void chooseMasonryVariant("brique")} className={masonryChoice === "brique" ? "estimatePrimaryAction" : "estimateSecondaryAction"}>
-                {masonryChoice === "brique" ? "✓ Brique retenue" : "Choisir Brique"}
-              </button>
-            </div>
+            {hasMasonryVariants && (
+              <div className="mt-3">
+                <p className="text-sm font-bold text-emerald-950">Maçonnerie (postes 5.01 et 5.02)</p>
+                <div className="mt-2" style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+                  <button type="button" style={{ flex: "1 1 220px", width: "auto", minWidth: 0 }} onClick={() => void chooseMasonryVariant("parpaing")} className={masonryChoice === "parpaing" ? "estimatePrimaryAction" : "estimateSecondaryAction"}>
+                    {masonryChoice === "parpaing" ? "✓ Parpaing retenu" : "Choisir Parpaing"}
+                  </button>
+                  <button type="button" style={{ flex: "1 1 220px", width: "auto", minWidth: 0 }} onClick={() => void chooseMasonryVariant("brique")} className={masonryChoice === "brique" ? "estimatePrimaryAction" : "estimateSecondaryAction"}>
+                    {masonryChoice === "brique" ? "✓ Brique retenue" : "Choisir Brique"}
+                  </button>
+                </div>
+              </div>
+            )}
+            {otherExclusiveGroups.map((group) => (
+              <div key={group.references.join("|")} className="mt-4">
+                <p className="text-sm font-bold text-emerald-950">Option exclusive du DAO : choisissez une seule ligne</p>
+                <div className="mt-2" style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+                  {group.references.map((reference) => (
+                    <button
+                      key={reference}
+                      type="button"
+                      style={{ flex: "1 1 220px", width: "auto", minWidth: 0, whiteSpace: "normal", textAlign: "center" }}
+                      onClick={() => void chooseExclusiveOption(group.references, reference)}
+                      className={group.selected === reference ? "estimatePrimaryAction" : "estimateSecondaryAction"}
+                    >
+                      {group.selected === reference ? "✓ " : "Choisir "}{group.labels.get(reference)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
           </section>
         )}
-        {otherExclusiveGroups.map((group) => (
-          <section key={group.references.join("|")} className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
-            <h4 className="font-bold text-amber-950">Option exclusive du DAO</h4>
-            <p className="mt-1 text-sm text-amber-900">
-              Choisissez une seule ligne : les autres options de cette paire seront retirées du chiffrage et des PDF.
-            </p>
-            <div className="mt-3 flex flex-wrap gap-3">
-              {group.references.map((reference) => (
-                <button
-                  key={reference}
-                  type="button"
-                  onClick={() => void chooseExclusiveOption(group.references, reference)}
-                  className={group.selected === reference ? "estimatePrimaryAction" : "estimateSecondaryAction"}
-                >
-                  {group.selected === reference ? "✓ " : "Choisir "}{group.labels.get(reference)}
-                </button>
-              ))}
-            </div>
-          </section>
-        ))}
         <table className="mb-8 mt-3 w-full border mobileCards">
           <thead>
             <tr>
