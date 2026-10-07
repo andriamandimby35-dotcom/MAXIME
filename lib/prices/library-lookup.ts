@@ -101,7 +101,7 @@ export async function lookupLibraryPrices(supabase: SupabaseClient, organization
 // - les mots de l'un doivent tous se retrouver dans l'autre (quelques mots d'écart permis).
 const LOOSE_STOP = new Set(["de", "des", "du", "la", "le", "les", "l", "d", "et", "en", "a", "au", "aux", "sur", "pour", "avec", "un", "une", "fourniture", "fournitures", "pose", "mise", "place", "travaux", "y", "compris", "ens", "ensemble"]);
 const LOOSE_ACTIONS = ["reparation", "remplacement", "depose", "demolition", "curage", "reprise", "remise", "ajustage", "nettoyage", "traitement", "decapage", "rebouchage", "repose", "renovation", "rehabilitation", "refection"];
-const LOOSE_SYNONYMS: Record<string, string> = { ventail: "vantail", ventaux: "vantail", vantaux: "vantail", vantail: "vantail", ventails: "vantail", metallique: "metal", metalliques: "metal", metalliq: "metal" };
+const LOOSE_SYNONYMS: Record<string, string> = { ventail: "vantail", ventaux: "vantail", vantaux: "vantail", vantail: "vantail", ventails: "vantail", metallique: "metal", metalliques: "metal", metalliq: "metal", carrelage: "carreau", carrelages: "carreau" };
 
 function looseSignature(text: string) {
   const words = text.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/['’]/g, " ").split(/[^a-z0-9]+/).filter(Boolean)
@@ -127,7 +127,10 @@ export function looseLibraryMatch(library: PriceLibraryRow[], item: { designatio
     const price = savedPrice(row);
     if (!price) continue;
     const other = looseSignature(String(row.designation ?? ""));
-    if (other.content.size === 0 || !sameLooseSet(target.actions, other.actions) || !sameLooseSet(target.digits, other.digits)) continue;
+    if (other.content.size === 0 || !sameLooseSet(target.actions, other.actions)) continue;
+    // Dimensions : identiques des deux côtés. Seule exception : la ligne n'en cite aucune et la fiche n'en a qu'une
+    // (ex. « Gouttière PVC Ø100 », « Plaque de plâtre BA13 ») ; une fiche à plusieurs dimensions (« Portillon 120x70 ») n'est jamais reprise pour une ligne sans dimension.
+    if (!(sameLooseSet(target.digits, other.digits) || (target.digits.size === 0 && other.digits.size <= 1))) continue;
     const shared = [...target.content].filter((word) => other.content.has(word)).length;
     if (shared === 0) continue;
     const smaller = Math.min(target.content.size, other.content.size);
