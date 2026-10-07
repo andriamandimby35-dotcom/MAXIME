@@ -1066,3 +1066,33 @@ table tbody tr:hover { background: #f4fbf6; }
 /* Curseur « travail » partout dans l'appli pendant un chargement, une génération
    ou une analyse (voir components/busy-cursor.tsx, qui pose data-busy sur <html>). */
 html[data-busy="1"], html[data-busy="1"] *, html[data-busy="1"] *:disabled, html[data-busy="1"] input[type="file"]::file-selector-button { cursor: progress !important; }
+
+/* ===== Téléphone en portrait (écran étroit) : rien ne dépasse, tout s'empile. Aucun effet sur ordinateur. ===== */
+@media (max-width: 640px) {
+  html, body { max-width: 100%; overflow-x: hidden; }
+  .content { padding-left: 12px !important; padding-right: 12px !important; }
+  img, video, iframe, canvas, svg { max-width: 100%; }
+  h1, h2, h3, h4, p, li, label, summary, small, strong, span, td, th, a, button, div { overflow-wrap: anywhere; }
+  button, .button, .tenderButton, .estimatePrimaryAction, .estimateSecondaryAction, .estimateBackButton { max-width: 100%; white-space: normal; text-align: center; height: auto; }
+  .estimatePrimaryAction, .estimateSecondaryAction, .estimateBackButton { width: 100%; }
+  input, select, textarea { max-width: 100%; min-width: 0; box-sizing: border-box; }
+  .estimateFinancialSummary, .estimateWorksiteFields, .estimatePdfCards { grid-template-columns: 1fr !important; }
+  .estimateVersionsPanel, .estimateControlPanel, .estimateWorksitePanel, .estimateLineEntryPanel, .estimateDetailPanel { padding: 12px !important; }
+  .estimateDetailPanel, .overflow-x-auto, .tablePanel { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .pageHead { flex-direction: column; align-items: stretch !important; gap: 10px; }
+  table { font-size: .8rem; }
+  td, th { padding: 6px !important; }
+  div:has(> table) { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  /* Tableaux du devis importé : une ligne = une petite carte (désignation en haut, chiffres dessous). */
+  table.mobileCards, .mobileCards tbody, .mobileCards tfoot, .mobileCards tr, .mobileCards td { display: block; width: 100%; box-sizing: border-box; }
+  .mobileCards thead { display: none; }
+  .mobileCards tr { border: 1px solid #c5dfcc; border-radius: 10px; margin: 8px 0; padding: 4px 8px; background: #fff; }
+  .mobileCards td { border: 0 !important; display: flex; justify-content: space-between; align-items: center; gap: 12px; text-align: right; padding: 4px 2px !important; min-width: 0 !important; }
+  .mobileCards td::before { content: attr(data-label); font-weight: 700; color: #527160; text-align: left; flex: 0 0 auto; }
+  .mobileCards td[data-label="Désignation"] { display: block; text-align: left; font-weight: 700; }
+  .mobileCards td[data-label="Désignation"]::before { display: none; }
+  .mobileCards td[colspan] { display: block; text-align: left; font-weight: 800; }
+  .mobileCards td[colspan]::before { content: none; }
+  .mobileCards tr:has(> td[colspan]) { background: #e5e7eb; }
+  .mobileCards input { width: 120px !important; }
+}

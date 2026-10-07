@@ -13,6 +13,15 @@ export default function DevisPdfCard({ projectId, mode, isAdmin }: { projectId: 
   const [message, setMessage] = useState("");
   const [saved, setSaved] = useState(false);
   const urlRef = useRef<string | null>(null);
+  // Sur téléphone, un PDF ne s'affiche pas bien dans la page : on propose de l'ouvrir en plein écran.
+  const [phone, setPhone] = useState(false);
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 640px)");
+    const update = () => setPhone(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
 
   useEffect(() => () => { if (urlRef.current) URL.revokeObjectURL(urlRef.current); }, []);
   useEffect(() => {
@@ -88,8 +97,14 @@ export default function DevisPdfCard({ projectId, mode, isAdmin }: { projectId: 
       {message && <small role="status" style={{ flexBasis: "100%", color: hasError ? "#b91c1c" : "#166534", maxWidth: 720 }}>{message}</small>}
       {objectUrl && (
         <div style={{ flexBasis: "100%" }}>
-          <iframe src={objectUrl} title={mode === "internal" ? "Aperçu du devis interne" : "Aperçu du devis externe"} style={{ width: "100%", height: "70vh", minHeight: 420, border: "1px solid #b8d7c0", borderRadius: 8, background: "#fff" }} />
-          <a href={objectUrl} target="_blank" rel="noreferrer" style={{ fontSize: ".8rem", color: "#166534" }}>Ouvrir l’aperçu en plein écran (onglet)</a>
+          {phone ? (
+            <a href={objectUrl} target="_blank" rel="noreferrer" className="estimateSecondaryAction" style={{ textDecoration: "none" }}>Ouvrir le PDF (plein écran)</a>
+          ) : (
+            <>
+              <iframe src={objectUrl} title={mode === "internal" ? "Aperçu du devis interne" : "Aperçu du devis externe"} style={{ width: "100%", height: "70vh", minHeight: 420, border: "1px solid #b8d7c0", borderRadius: 8, background: "#fff" }} />
+              <a href={objectUrl} target="_blank" rel="noreferrer" style={{ fontSize: ".8rem", color: "#166534" }}>Ouvrir l’aperçu en plein écran (onglet)</a>
+            </>
+          )}
         </div>
       )}
     </div>

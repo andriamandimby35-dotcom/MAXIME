@@ -430,20 +430,20 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
           </div>
           {costRows.length > 0 && (
             <div className="overflow-x-auto" style={{ marginTop: 12 }}>
-              <table className="w-full border">
+              <table className="w-full border mobileCards">
                 <thead><tr><th className="border p-2">Ligne interne</th><th className="border p-2">Unité</th><th className="border p-2">Quantité</th><th className="border p-2">PU interne</th><th className="border p-2">Montant interne</th></tr></thead>
                 <tbody>
                   {costRows.map((row) => (
                     <tr key={row.id} style={!(num(row.unit_price) > 0) ? { background: "#fff7ed" } : undefined}>
-                      <td className="border p-2">{row.designation}</td>
-                      <td className="border p-2">{row.unit}</td>
-                      <td className="border p-2" style={{ textAlign: "right" }}>{num(row.quantity).toLocaleString("fr-FR")}</td>
-                      <td className="border p-2" style={{ textAlign: "right" }}>
+                      <td className="border p-2" data-label="Désignation">{row.designation}</td>
+                      <td className="border p-2" data-label="Unité">{row.unit}</td>
+                      <td className="border p-2" data-label="Quantité" style={{ textAlign: "right" }}>{num(row.quantity).toLocaleString("fr-FR")}</td>
+                      <td className="border p-2" data-label="PU interne" style={{ textAlign: "right" }}>
                         <input key={`${row.id}-${num(row.unit_price)}`} type="text" inputMode="decimal" defaultValue={num(row.unit_price) > 0 ? String(num(row.unit_price)) : ""} placeholder="à remplir"
                           onBlur={(event) => { const value = event.target.value.trim(); if (value && Number(value.replace(/\s/g, "").replace(",", ".")) !== num(row.unit_price)) void saveInternalCosts({ [String(row.designation)]: value }); }}
                           style={{ width: 110, textAlign: "right" }} />
                       </td>
-                      <td className="border p-2" style={{ textAlign: "right" }}>{num(row.unit_price) > 0 ? formatAr(num(row.unit_price) * num(row.quantity)) : "—"}</td>
+                      <td className="border p-2" data-label="Montant interne" style={{ textAlign: "right" }}>{num(row.unit_price) > 0 ? formatAr(num(row.unit_price) * num(row.quantity)) : "—"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -463,7 +463,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
           </div>
         </div>
         <div className="overflow-x-auto">
-          <table className="mb-8 mt-3 w-full border">
+          <table className="mb-8 mt-3 w-full border mobileCards">
             <thead>
               <tr>
                 <th className="border p-2">N°</th><th className="border p-2">Désignation</th><th className="border p-2">Unité</th><th className="border p-2">Quantité</th>
@@ -491,20 +491,20 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
                 return (
                   <FragmentRows key={row.id} header={header} subheader={subheader} colSpan={6}>
                     <tr style={missing ? { background: "#fff7ed" } : undefined}>
-                      <td className="border p-2">{String(row.position ?? "").trim() || index + 1}</td>
-                      <td className="border p-2">{row.designation}</td>
-                      <td className="border p-2">{displayUnit(row.unit)}</td>
-                      <td className="border p-2" style={{ textAlign: "right" }}>{quantity.toLocaleString("fr-FR")}</td>
+                      <td className="border p-2" data-label="N°">{String(row.position ?? "").trim() || index + 1}</td>
+                      <td className="border p-2" data-label="Désignation">{row.designation}</td>
+                      <td className="border p-2" data-label="Unité">{displayUnit(row.unit)}</td>
+                      <td className="border p-2" data-label="Quantité" style={{ textAlign: "right" }}>{quantity.toLocaleString("fr-FR")}</td>
                       {view === "internal" ? <>
-                        <td className="border p-2" style={{ textAlign: "right" }}>
+                        <td className="border p-2" data-label="PU interne" style={{ textAlign: "right" }}>
                           {isAdmin && !row.is_internal
                             ? <input key={`${row.id}-${internal}`} type="text" inputMode="decimal" defaultValue={internal > 0 ? String(internal) : ""} placeholder={labor ? "main-d'œuvre" : "à remplir"} onBlur={(event) => void savePrice(row, event.target.value)} style={{ width: 110, textAlign: "right" }} />
                             : internal > 0 ? formatAr(internal) : labor ? "main-d'œuvre" : "—"}
                         </td>
-                        <td className="border p-2" style={{ textAlign: "right" }}>{internal > 0 ? formatAr(quantity * internal) : "—"}</td>
+                        <td className="border p-2" data-label="Montant interne" style={{ textAlign: "right" }}>{internal > 0 ? formatAr(quantity * internal) : "—"}</td>
                       </> : <>
-                        <td className="border p-2" style={{ textAlign: "right" }}>{external > 0 ? formatAr(external) : "—"}</td>
-                        <td className="border p-2" style={{ textAlign: "right" }}>{external > 0 ? formatAr(quantity * external) : "—"}</td>
+                        <td className="border p-2" data-label="PU externe" style={{ textAlign: "right" }}>{external > 0 ? formatAr(external) : "—"}</td>
+                        <td className="border p-2" data-label="Montant externe HT" style={{ textAlign: "right" }}>{external > 0 ? formatAr(quantity * external) : "—"}</td>
                       </>}
                     </tr>
                   </FragmentRows>
@@ -514,7 +514,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
             <tfoot>
               <tr style={{ fontWeight: 800, background: "#f3f4f6" }}>
                 <td className="border p-2" colSpan={5} style={{ textAlign: "right" }}>{view === "internal" ? "Total interne (lignes chiffrées)" : "Total externe HT"}</td>
-                <td className="border p-2" style={{ textAlign: "right" }}>{formatAr(grandTotal)}</td>
+                <td className="border p-2" data-label="Montant" style={{ textAlign: "right" }}>{formatAr(grandTotal)}</td>
               </tr>
             </tfoot>
           </table>
