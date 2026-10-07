@@ -57,7 +57,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   }
 
   // Le devis externe ne contient jamais les lignes « internes seulement ».
-  const items = rows.filter((row) => mode === "internal" || !row.is_internal);
+  // Les lignes « interne seulement » (salaires, transport) viennent TOUJOURS après le devis : sinon elles
+  // décalent la numérotation des rubriques (surtout après une ré-analyse, qui les rend plus anciennes).
+  const items = [
+    ...rows.filter((row) => !row.is_internal),
+    ...(mode === "internal" ? rows.filter((row) => row.is_internal) : []),
+  ];
   // Prix de la ligne dans CE devis uniquement : null = pas encore de prix (case vide).
   // Interne : une ligne de main-d'œuvre / chantier sans prix compte 0 (déjà dans les salaires).
   const priceOf = (row: Row): number | null => {
