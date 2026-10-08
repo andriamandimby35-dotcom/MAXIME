@@ -2,13 +2,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { formatDate } from "@/components/money";
+import { usePdfViewer } from "@/components/PdfViewerProvider";
+import { isPhoneDevice } from "@/lib/is-phone-device";
 
 const TYPE_LABELS: Record<string, string> = { dao: "DAO", plan: "PLAN", estimate: "DEVIS", report: "RAPPORT", photo: "PHOTO CHANTIER", other: "AUTRE" };
 
 // Documents en cartes cliquables (comme le reste de l'application) : un clic
-// ouvre le fichier dans un nouvel onglet. Le lien privé n'est demandé qu'au
+// ouvre le fichier dans la carte de l'appli (bouton « Fermer »), sauf sur téléphone (plein écran). Le lien privé n'est demandé qu'au
 // clic, donc aucun transfert Supabase tant qu'on n'ouvre pas le document.
 export function DocumentManager({ organizationId, userId, initialRows }: { organizationId: string | null; userId: string | null; initialRows: any[] }) {
+  const { openPdf } = usePdfViewer();
   const [rows, setRows] = useState(initialRows);
   const [busy, setBusy] = useState(false);
   const [openingId, setOpeningId] = useState<string | null>(null);
@@ -39,7 +42,8 @@ export function DocumentManager({ organizationId, userId, initialRows }: { organ
   async function openDocument(row: any) {
     if (!row.storage_path) { setError("Ce document n'a pas de fichier associé."); return; }
     setError("");
-    const preview = window.open("about:blank", "_blank");
+    // Téléphone : plein écran dans son onglet (le seul lecteur correct). Ordinateur : dans la carte de l'appli, avec « Fermer ».
+    const preview = isPhoneDevice() ? window.open("about:blank", "_blank") : null;
     setOpeningId(row.id);
     const signed = await sb.storage.from("btp-documents").createSignedUrl(row.storage_path, 300);
     setOpeningId(null);
@@ -49,7 +53,8 @@ export function DocumentManager({ organizationId, userId, initialRows }: { organ
       return;
     }
     if (preview) preview.location.replace(signed.data.signedUrl);
-    else window.location.assign(signed.data.signedUrl);
+    else if (isPhoneDevice()) window.location.assign(signed.data.signedUrl);
+    else void openPdf(String(row.name ?? "Document"), signed.data.signedUrl);
   }
 
   return <div className="stack">

@@ -8,6 +8,7 @@ import type { ImportedDevis } from "@/components/estimates/ImportedDevisTable";
 import { confirmDeletion } from "@/components/deletion/confirmDeletion";
 import { fetchDevisPdfUrl, openDevisPdf } from "@/components/estimates/openPdf";
 import { isPhoneDevice } from "@/lib/is-phone-device";
+import { usePdfViewer } from "@/components/PdfViewerProvider";
 
 type Estimate = { id: string; label: string; createdAt: string | null; internalTotal: number; externalBase: number; markupBase: number; margin: number };
 
@@ -23,11 +24,10 @@ export function EstimateList({ estimates, imported = [] }: { estimates: Estimate
   const router = useRouter();
   const [rows, setRows] = useState(estimates);
   const [message, setMessage] = useState("");
-  // Aperçu PDF affiché PAR-DESSUS la page (ordinateur) : aucune nouvelle fenêtre.
-  const [viewer, setViewer] = useState<{ url: string; title: string } | null>(null);
+  // Lecteur PDF commun à toute l'appli (même fenêtre, mêmes boutons Imprimer / Fermer) : jamais de nouvelle fenêtre sur ordinateur.
+  const { showPdf } = usePdfViewer();
   const [pdfBusy, setPdfBusy] = useState(false);
   useEffect(() => setRows(estimates), [estimates]);
-  useEffect(() => () => { if (viewer) URL.revokeObjectURL(viewer.url); }, [viewer]);
   useEffect(() => {
     if (!pdfBusy) return;
     const previous = document.body.style.cursor;
@@ -56,7 +56,7 @@ export function EstimateList({ estimates, imported = [] }: { estimates: Estimate
     if ("error" in result) { setMessage(result.error); return; }
     setMessage("");
     const label = entry.kind === "dao" ? entry.row.label : entry.row.name;
-    setViewer({ url: result.url, title: `${mode === "internal" ? "Devis interne" : "Devis externe"} — ${label}` });
+    showPdf(`${mode === "internal" ? "Devis interne" : "Devis externe"} — ${label}`, result.url, true);
   }
   async function deleteEntry(entry: Entry) {
     // Supprime le devis ET, en chaîne, son chantier (dépenses, factures non payées) ; les factures payées sont gardées.
@@ -102,15 +102,6 @@ export function EstimateList({ estimates, imported = [] }: { estimates: Estimate
   return <main className="estimateListPage">
     <div className="pageHead"><div><h1>Devis</h1><p>Un même chiffrage enregistre deux versions séparées : interne privée et soumission externe. Cliquez sur un devis pour l’ouvrir.</p></div><AddEstimateChooser /></div>
     {message && <p className="notice" style={{ overflowWrap: "anywhere" }}>{message}</p>}
-    {viewer && (
-      <div role="dialog" aria-modal="true" aria-label={viewer.title} style={{ position: "fixed", inset: 0, zIndex: 80, background: "rgba(15,23,20,.72)", display: "flex", flexDirection: "column", padding: 16, gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, color: "#fff", minWidth: 0 }}>
-          <strong style={{ overflowWrap: "anywhere" }}>{viewer.title}</strong>
-          <button type="button" className="tenderButton tenderButtonPrimary" onClick={() => setViewer(null)}>Fermer</button>
-        </div>
-        <iframe src={viewer.url} title={viewer.title} style={{ flex: 1, width: "100%", border: 0, borderRadius: 8, background: "#fff" }} />
-      </div>
-    )}
     {entries.length === 0 ? (
       <section className="projectEmptyCard"><h2>Aucun devis</h2><p>Créez un devis depuis un DAO analysé, ou ajoutez-en un par PDF.</p></section>
     ) : (

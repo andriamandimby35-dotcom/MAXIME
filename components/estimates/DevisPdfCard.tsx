@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { usePdfViewer } from "@/components/PdfViewerProvider";
 
 // Carte PDF d'un devis importé — MÊME présentation que le devis du DAO :
 // « Prévisualiser » → l'aperçu s'affiche DANS la carte (pas de nouvelle fenêtre) →
@@ -12,6 +13,9 @@ export default function DevisPdfCard({ projectId, mode, isAdmin, version }: { pr
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [saved, setSaved] = useState(false);
+  // Lecteur PDF commun à toute l'appli (même fenêtre, mêmes boutons Imprimer / Fermer).
+  const { showPdf } = usePdfViewer();
+  const viewerTitle = mode === "internal" ? "Aperçu du devis interne" : "Aperçu du devis externe";
   const urlRef = useRef<string | null>(null);
   // Contenu du devis au moment où l'aperçu a été fabriqué : le PDF n'est refait que si le devis a changé depuis.
   const builtVersionRef = useRef<string | null>(null);
@@ -37,6 +41,7 @@ export default function DevisPdfCard({ projectId, mode, isAdmin, version }: { pr
   async function preview() {
     if (working) return;
     if (objectUrl && version !== undefined && builtVersionRef.current === version) {
+      if (!phone) showPdf(viewerTitle, objectUrl);
       setMessage("Le devis n’a pas changé depuis cet aperçu : il est déjà à jour (rien n’est refait).");
       return;
     }
@@ -55,7 +60,8 @@ export default function DevisPdfCard({ projectId, mode, isAdmin, version }: { pr
       urlRef.current = url;
       builtVersionRef.current = version ?? null;
       setObjectUrl(url);
-      setMessage("Aperçu prêt. Vérifiez-le, puis enregistrez pour mettre à jour le chantier et la facturation.");
+      if (!phone) showPdf(viewerTitle, url);
+      setMessage("Aperçu prêt. Vérifiez-le, fermez-le, puis enregistrez pour mettre à jour le chantier et la facturation.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Prévisualisation impossible.");
     } finally { setWorking(null); }
@@ -104,15 +110,9 @@ export default function DevisPdfCard({ projectId, mode, isAdmin, version }: { pr
       )}
       {message && <small role="status" style={{ flexBasis: "100%", color: hasError ? "#b91c1c" : "#166534", maxWidth: "min(720px, 100%)", overflowWrap: "anywhere" }}>{message}</small>}
       {objectUrl && (
-        <div style={{ flexBasis: "100%" }}>
-          {phone ? (
-            <a href={objectUrl} target="_blank" rel="noreferrer" className="estimateSecondaryAction" style={{ textDecoration: "none" }}>Ouvrir le PDF (plein écran)</a>
-          ) : (
-            <>
-              <iframe src={objectUrl} title={mode === "internal" ? "Aperçu du devis interne" : "Aperçu du devis externe"} style={{ width: "100%", height: "70vh", minHeight: 420, border: "1px solid #b8d7c0", borderRadius: 8, background: "#fff" }} />
-            </>
-          )}
-        </div>
+        phone
+          ? <a href={objectUrl} target="_blank" rel="noreferrer" className="estimateSecondaryAction" style={{ textDecoration: "none" }}>Ouvrir le PDF (plein écran)</a>
+          : <button type="button" className="estimateSecondaryAction" onClick={() => showPdf(viewerTitle, objectUrl)}>Ouvrir l’aperçu PDF</button>
       )}
     </div>
   );

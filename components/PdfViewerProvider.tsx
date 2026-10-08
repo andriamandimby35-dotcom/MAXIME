@@ -11,10 +11,12 @@ import { toFriendlyPdfError } from "@/lib/submission/friendly-pdf-error";
 // n'imprime que ce document. Même principe que celui déjà utilisé dans
 // SubmissionDossierManager pour les pièces du dossier de soumission.
 
-type ViewingPdf = { title: string; objectUrl: string };
+type ViewingPdf = { title: string; objectUrl: string; revoke: boolean };
 
 type PdfViewerContextValue = {
   openPdf: (title: string, documentUrl: string, options?: { method?: "GET" | "POST"; cache?: RequestCache }) => Promise<void>;
+  /** Affiche un PDF déjà prêt (adresse locale « blob: » ou lien signé) dans le même lecteur ; le PDF reste utilisable après « Fermer ». */
+  showPdf: (title: string, objectUrl: string, revokeOnClose?: boolean) => void;
 };
 
 const PdfViewerContext = createContext<PdfViewerContextValue | null>(null);
@@ -32,7 +34,7 @@ export function PdfViewerProvider({ children }: { children: ReactNode }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
   function closePdf() {
-    if (viewingPdf) URL.revokeObjectURL(viewingPdf.objectUrl);
+    if (viewingPdf?.revoke) URL.revokeObjectURL(viewingPdf.objectUrl);
     setViewingPdf(null);
     setErrorMessage("");
   }
@@ -79,7 +81,7 @@ export function PdfViewerProvider({ children }: { children: ReactNode }) {
       }
 
       const objectUrl = isLocal ? URL.createObjectURL(blob) : documentUrl;
-      setViewingPdf({ title, objectUrl });
+      setViewingPdf({ title, objectUrl, revoke: isLocal });
     } catch (error) {
       const raw = error instanceof Error ? error.message : "Le PDF n’a pas pu être préparé.";
       if (raw !== "Le PDF n’a pas pu être préparé.") console.error("Échec de préparation du PDF :", raw);
@@ -89,7 +91,12 @@ export function PdfViewerProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  const value = useMemo(() => ({ openPdf }), []);
+  function showPdf(title: string, objectUrl: string, revokeOnClose = false) {
+    setErrorMessage("");
+    setViewingPdf({ title, objectUrl, revoke: revokeOnClose });
+  }
+
+  const value = useMemo(() => ({ openPdf, showPdf }), []);
 
   return (
     <PdfViewerContext.Provider value={value}>

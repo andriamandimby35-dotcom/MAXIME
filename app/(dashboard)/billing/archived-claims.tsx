@@ -1,5 +1,7 @@
 "use client";
 
+import { OpenPdfButton } from "@/components/OpenPdfButton";
+
 export type ArchivedClaim = {
   id: string;
   claim_number: string;
@@ -30,7 +32,7 @@ export function ArchivedClaims({ claims }: { claims: ArchivedClaim[] }) {
               <td>{claim.project_name || "—"}</td>
               <td>{claim.issue_date ? new Date(claim.issue_date).toLocaleDateString("fr-FR") : "—"}</td>
               <td>{ariary.format(Number(claim.net_amount) || 0)} Ar</td>
-              <td><a className="tenderButton" href={`/api/billing/claims/${claim.id}/pdf`} target="_blank" rel="noopener noreferrer">Ouvrir</a></td>
+              <td><OpenPdfButton className="tenderButton" title={`Facture ${claim.claim_number}`} url={`/api/billing/claims/${claim.id}/pdf`}>Ouvrir</OpenPdfButton></td>
             </tr>
           ))}
         </tbody>
