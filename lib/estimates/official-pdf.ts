@@ -201,20 +201,19 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
   };
   const ensureSpace = (height: number) => { if (y - height < BOTTOM + 18) newPage(); };
   const horizontalLine = (baseline: number, width = 0.35) => page.lines.push({ x1: LEFT, y1: baseline, x2: PAGE_WIDTH - RIGHT, y2: baseline, width });
-  const drawCell = (x: number, top: number, width: number, height: number, value: string, bold = false, align: "left" | "center" | "right" = "left") => {
+  const drawCell = (x: number, top: number, width: number, height: number, value: string, bold = false, align: "left" | "center" | "right" = "left", size = 8.2) => {
     page.lines.push({ x1: x, y1: top, x2: x + width, y2: top, width: 0.55 });
     page.lines.push({ x1: x, y1: top - height, x2: x + width, y2: top - height, width: 0.55 });
     page.lines.push({ x1: x, y1: top, x2: x, y2: top - height, width: 0.55 });
     page.lines.push({ x1: x + width, y1: top, x2: x + width, y2: top - height, width: 0.55 });
-    const size = 8.2;
     let rendered = cleanText(value);
     // Texte trop long pour la case : on le raccourcit plutôt que de le laisser déborder.
-    const charWidth = size * (rendered === rendered.toLocaleUpperCase("fr-FR") ? 0.64 : 0.5); // les majuscules sont plus larges
+    const charWidth = size * (rendered === rendered.toLocaleUpperCase("fr-FR") ? (bold ? 0.68 : 0.64) : 0.5); // les majuscules sont plus larges
     const maxChars = Math.max(4, Math.floor((width - 10) / charWidth));
     if (rendered.length > maxChars) rendered = `${rendered.slice(0, maxChars - 3)}...`;
     const estimatedWidth = rendered.length * charWidth;
     const textX = align === "center" ? x + Math.max(4, (width - estimatedWidth) / 2) : align === "right" ? x + Math.max(4, width - estimatedWidth - 4) : x + 5;
-    addText(rendered, textX, top - Math.min(12, height - 5), size, bold);
+    addText(rendered, textX, top - Math.min(12 + (size - 8.2), height - 5), size, bold);
   };
   const recapPage = (title: string, entries: Array<{ reference?: string; title: string; total: number }>, withSignature = false, showTotal = true, reference = "", showExtras = false) => {
     page = { draw: [], lines: [], fills: [] }; pages.push(page); y = PAGE_HEIGHT - TOP;
@@ -237,16 +236,18 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
         drawCell(LEFT, y, TABLE_WIDTH, headingHeight, title.toLocaleUpperCase("fr-FR"), true, "center"); y -= headingHeight;
         drawCell(LEFT, y, refWidth, 20, labels[0] || "REF", true, "center"); drawCell(LEFT + refWidth, y, titleWidth, 20, labels[1] || "DÉSIGNATION", true, "center"); drawCell(LEFT + refWidth + titleWidth, y, amountWidth, 20, labels[2] || "MONTANT (Ar)", true, "center"); y -= 20;
       }
-      drawCell(LEFT, y, refWidth, 22, entry.reference || "", false, "center");
-      drawCell(LEFT + refWidth, y, titleWidth, 22, entry.title);
-      drawCell(LEFT + refWidth + titleWidth, y, amountWidth, 22, money(entry.total), false, "right");
+      // Récapitulatif lisible au premier coup d'œil : lignes en GRAS et MAJUSCULES.
+      drawCell(LEFT, y, refWidth, 22, (entry.reference || "").toLocaleUpperCase("fr-FR"), true, "center");
+      drawCell(LEFT + refWidth, y, titleWidth, 22, cleanText(entry.title).toLocaleUpperCase("fr-FR"), true);
+      drawCell(LEFT + refWidth + titleWidth, y, amountWidth, 22, money(entry.total), true, "right");
       y -= 22;
     }
     if (showTotal) {
       const total = entries.reduce((sum, entry) => sum + entry.total, 0);
-      drawCell(LEFT, y, refWidth + titleWidth, 24, (template?.total_label || `TOTAL ${title}`).toLocaleUpperCase("fr-FR"), true, "right");
-      drawCell(LEFT + refWidth + titleWidth, y, amountWidth, 24, money(total), true, "right");
-      y -= 24;
+      // Total général : gras et plus grand que le reste.
+      drawCell(LEFT, y, refWidth + titleWidth, 30, (template?.total_label || `TOTAL ${title}`).toLocaleUpperCase("fr-FR"), true, "right", 11);
+      drawCell(LEFT + refWidth + titleWidth, y, amountWidth, 30, money(total), true, "right", 11);
+      y -= 30;
       for (const extra of showExtras ? (input.extraTotals ?? []) : []) {
         drawCell(LEFT, y, refWidth + titleWidth, 22, cleanText(extra.label).toLocaleUpperCase("fr-FR"), true, "right");
         drawCell(LEFT + refWidth + titleWidth, y, amountWidth, 22, money(extra.amount), true, "right");

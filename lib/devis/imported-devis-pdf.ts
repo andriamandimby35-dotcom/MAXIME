@@ -187,7 +187,7 @@ export function generateImportedDevisPdf(input: ImportedPdfInput) {
     y -= height;
   };
 
-  const newPage = (first = false) => {
+  const newPage = (first = false, withTableHeader = true) => {
     page = { text: [], lines: [], fills: [] };
     pages.push(page);
     y = PAGE_HEIGHT - TOP;
@@ -224,7 +224,7 @@ export function generateImportedDevisPdf(input: ImportedPdfInput) {
       }
       y -= 12;
     }
-    header();
+    if (withTableHeader) header();
   };
   const ensure = (height: number) => { if (y - height < BOTTOM + 14) newPage(); };
 
@@ -295,36 +295,51 @@ export function generateImportedDevisPdf(input: ImportedPdfInput) {
     }
   }
 
-  // Récapitulation (comme la fin du devis d'origine).
-  const recapRows = input.recap.length + 1 + (input.extraTotals?.length ?? 0);
-  if (y - (28 + recapRows * 14) < BOTTOM + 14) { page = { text: [], lines: [], fills: [] }; pages.push(page); y = PAGE_HEIGHT - TOP; } else y -= 18;
+  // Récapitulatif : EXACTEMENT la présentation du récapitulatif du DAO (cases encadrées,
+  // titre, en-tête REF / DÉSIGNATION / MONTANT (Ar), lignes en gras et majuscules,
+  // total général gras et plus grand). Montants écrits comme dans le DAO (« 1 234 567 Ar »).
   {
-    const title = "RECAPITULATION";
-    addText(title, (PAGE_WIDTH - textWidth(title, 9, true)) / 2, y - 8, 9, true);
-    y -= 18;
-    const rw = [colN, colText + colUnit + colQty + colPrice, colAmount];
-    const rx = [LEFT, LEFT + rw[0], LEFT + rw[0] + rw[1], RIGHT_EDGE];
-    const rowGrid = (top: number, bottom: number) => { rx.forEach((x) => vline(x, top, bottom)); hline(top); hline(bottom); };
-    page.fills.push({ x: LEFT, y: y - 14, w: TABLE_WIDTH, h: 14, rgb: GREY });
-    const head = ["N°", "DESIGNATION", "MONTANT (Ar)"];
-    head.forEach((label, index) => addText(label, rx[index] + (rw[index] - textWidth(label, 7, true)) / 2, y - 10, 7, true));
-    rowGrid(y, y - 14); y -= 14;
+    const recapMoney = (value: number) => `${new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 2 }).format(Number(value) || 0).replace(/[\u202f\u00a0]/g, " ")} Ar`;
+    const refWidth = 50;
+    const amountWidth = 120;
+    const titleWidth = TABLE_WIDTH - refWidth - amountWidth;
+    const cell = (x: number, top: number, width: number, height: number, value: string, bold = false, align: "left" | "center" | "right" = "left", size = 8.2) => {
+      hline(top, x, x + width, 0.55); hline(top - height, x, x + width, 0.55);
+      vline(x, top, top - height, 0.55); vline(x + width, top, top - height, 0.55);
+      let fontSize = size;
+      while (fontSize > 6 && textWidth(value, fontSize, bold) > width - 10) fontSize -= 0.4;
+      const w = textWidth(value, fontSize, bold);
+      const tx = align === "center" ? x + Math.max(4, (width - w) / 2) : align === "right" ? x + Math.max(4, width - w - 5) : x + 5;
+      addText(value, tx, top - (height + fontSize * 0.7) / 2 + 1, fontSize, bold);
+    };
+    const recapTitle = "RECAPITULATION GENERALE";
+    const drawHead = () => {
+      cell(LEFT, y, TABLE_WIDTH, 24, recapTitle, true, "center"); y -= 24;
+      cell(LEFT, y, refWidth, 20, "REF", true, "center");
+      cell(LEFT + refWidth, y, titleWidth, 20, "DÉSIGNATION", true, "center");
+      cell(LEFT + refWidth + titleWidth, y, amountWidth, 20, "MONTANT (Ar)", true, "center");
+      y -= 20;
+    };
+    const totals = [{ label: "TOTAL", amount: input.total }, ...(input.extraTotals ?? []).map((extra) => ({ label: extra.label, amount: extra.amount }))];
+    const needed = 24 + 20 + input.recap.length * 22 + 30 + Math.max(0, totals.length - 1) * 22;
+    // Tient sur la page du bordereau → pas de page supplémentaire ; sinon une page à part, avec le même en-tête.
+    if (y - needed < BOTTOM + 14) newPage(false, false); else y -= 18;
+    drawHead();
     for (const entry of input.recap) {
-      addText(entry.number, rx[0] + (rw[0] - textWidth(entry.number, FONT)) / 2, y - 10);
-      addText(repairMojibake(entry.title).toLocaleUpperCase("fr-FR"), rx[1] + 5, y - 10);
-      const amount = formatAmount(entry.total);
-      addText(amount, rx[3] - textWidth(amount, FONT) - 5, y - 10);
-      rowGrid(y, y - 14); y -= 14;
+      if (y - 22 < BOTTOM + 14) { newPage(false, false); drawHead(); }
+      cell(LEFT, y, refWidth, 22, String(entry.number).toLocaleUpperCase("fr-FR"), true, "center");
+      cell(LEFT + refWidth, y, titleWidth, 22, repairMojibake(entry.title).toLocaleUpperCase("fr-FR"), true);
+      cell(LEFT + refWidth + titleWidth, y, amountWidth, 22, recapMoney(entry.total), true, "right");
+      y -= 22;
     }
-    const totals = [{ label: "TOTAL Ar", amount: input.total }, ...(input.extraTotals ?? []).map((extra) => ({ label: `${extra.label} Ar`, amount: extra.amount }))];
-    for (const total of totals) {
-      const label = total.label;
-      addText(label, rx[2] - textWidth(label, FONT, true) - 6, y - 10, FONT, true);
-      const amount = formatAmount(total.amount);
-      addText(amount, rx[3] - textWidth(amount, FONT, true) - 5, y - 10, FONT, true);
-      hline(y, rx[2], rx[3]); hline(y - 14, rx[2], rx[3]); vline(rx[2], y, y - 14); vline(rx[3], y, y - 14);
-      y -= 14;
-    }
+    totals.forEach((total, index) => {
+      const height = index === 0 ? 30 : 22;
+      const size = index === 0 ? 11 : 8.2;
+      if (y - height < BOTTOM + 14) { newPage(false, false); drawHead(); }
+      cell(LEFT, y, refWidth + titleWidth, height, total.label.toLocaleUpperCase("fr-FR"), true, "right", size);
+      cell(LEFT + refWidth + titleWidth, y, amountWidth, height, recapMoney(total.amount), true, "right", size);
+      y -= height;
+    });
   }
 
   // Numéros de page « Page X de Y ».

@@ -595,6 +595,8 @@ export default function EstimateBuilder({
   const [externalPricingMode, setExternalPricingMode] = useState<"percentage" | "target_total">("percentage");
   const [targetClientTotal, setTargetClientTotal] = useState("");
   const [externalMarginPreview, setExternalMarginPreview] = useState(false);
+  const [applyingMargin, setApplyingMargin] = useState(false);
+  const [marginFeedback, setMarginFeedback] = useState("");
   const [creating, setCreating] = useState(false);
   const [message, setMessage] = useState("");
   const [newLineScope, setNewLineScope] = useState<"dao" | "internal">("dao");
@@ -1240,9 +1242,33 @@ export default function EstimateBuilder({
     : lineTotal(line) * externalMarginFactor;
   const marginClass = financialSummary.appliedMarginPercent < 0 ? "negative" : financialSummary.appliedMarginPercent > 0 ? "positive" : "neutral";
 
-  function applyExternalMarginPreview() {
+  // Le bouton applique vraiment le réglage choisi (marge % OU montant total attendu)
+  // au devis EXTERNE uniquement : le devis interne garde ses prix exacts.
+  async function applyExternalMarginPreview() {
+    if (applyingMargin) return;
+    setApplyingMargin(true);
+    setMarginFeedback("");
     setExternalMarginPreview(true);
-    setMessage("Aperçu du devis externe activé : les prix internes ne sont pas modifiés et aucun PDF n'est créé.");
+    try {
+      if (externalPricingMode === "target_total") {
+        const target = Math.max(0, Number(targetClientTotal) || 0);
+        if (target <= 0) {
+          setMarginFeedback("Tapez d’abord le montant total attendu.");
+          return;
+        }
+        if (financialSummary.externalBase <= 0) {
+          setMarginFeedback("Ajoutez d’abord des prix au devis : la marge sera calculée ensuite.");
+          return;
+        }
+        await saveTargetClientTotal(String(target));
+        setMarginFeedback(`Montant appliqué au devis externe : ${target.toLocaleString("fr-FR")} Ar TTC (marge ${financialSummary.appliedMarginPercent.toLocaleString("fr-FR", { maximumFractionDigits: 2 })} %). Le devis interne ne change pas.`);
+      } else {
+        await saveProfitMargin(String(profitMarginPercent));
+        setMarginFeedback(`Marge de ${profitMarginPercent.toLocaleString("fr-FR", { maximumFractionDigits: 2 })} % appliquée au devis externe. Le devis interne ne change pas.`);
+      }
+    } finally {
+      setApplyingMargin(false);
+    }
   }
 
   // `target` : montant total TTC fixé (mode « montant total fixé »). Il est
@@ -3056,9 +3082,10 @@ export default function EstimateBuilder({
               <span>Marge appliquée <strong className={`estimateMarginTrend ${marginClass}`}>{financialSummary.appliedMarginPercent.toLocaleString("fr-FR", { maximumFractionDigits: 2 })} %</strong></span>
               <span>Total client TTC <strong>{financialSummary.clientTotal.toLocaleString("fr-FR")} Ar</strong></span>
             </div>
-            <button type="button" onClick={applyExternalMarginPreview} className="estimatePrimaryAction mt-3">
-              {externalMarginPreview ? "Actualiser l’aperçu du devis externe" : "Appliquer la marge pour l’aperçu"}
+            <button type="button" onClick={() => void applyExternalMarginPreview()} disabled={applyingMargin} style={{ cursor: applyingMargin ? "progress" : undefined }} className="estimatePrimaryAction mt-3">
+              {applyingMargin ? "Application en cours…" : externalPricingMode === "target_total" ? "Appliquer le montant total attendu" : "Appliquer la marge au devis externe"}
             </button>
+            {marginFeedback ? <p className="estimatePanelDescription mt-3" style={{ fontWeight: 700 }}>{marginFeedback}</p> : null}
             {!estimateId ? <p className="estimatePanelDescription mt-3">Le réglage sera enregistré lors de la création du devis.</p> : null}
           </section>
 

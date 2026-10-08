@@ -36,13 +36,30 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     // lignes reçoivent leur prix externe avec la marge déjà retenue.
     const known = Number((project as { expected_margin_percent?: number | string | null }).expected_margin_percent);
     const toPrice = items.filter((item) => Number(item.unit_price) > 0 && !(Number(item.external_unit_price) > 0));
-    if (toPrice.length > 0 && Number.isFinite(known) && (project as { expected_margin_percent?: unknown }).expected_margin_percent !== null) {
-      const externals = externalPricesFromInternal(toPrice, known);
+    // Ce que l'utilisateur vient de taper (marge % ou montant total attendu) passe AVANT la marge déjà retenue.
+    const typedTarget = Number(String(body.target_client_total ?? "").replace(/\s/g, "").replace(",", "."));
+    const typedMarginRaw = String(body.margin_percent ?? "").replace(/\s/g, "").replace(",", ".");
+    const typedMargin = typedMarginRaw === "" ? NaN : Number(typedMarginRaw);
+    let useMargin: number | null = null;
+    if (toPrice.length > 0 && typedTarget > 0) {
+      // Montant total TTC attendu : on retire ce qui est déjà chiffré, la marge est calculée pour le reste.
+      const alreadyExternal = items.reduce((sum, item) => sum + (Number(item.external_unit_price) > 0 ? (Number(item.quantity) || 1) * Number(item.external_unit_price) : 0), 0);
+      const remainingBase = toPrice.reduce((sum, item) => sum + (Number(item.quantity) || 1) * Number(item.unit_price), 0);
+      const remainingTarget = typedTarget / 1.08 - alreadyExternal;
+      if (remainingBase <= 0 || remainingTarget <= 0) return NextResponse.json({ error: "Le montant total attendu est trop petit : les lignes déjà chiffrées le dépassent." }, { status: 400 });
+      useMargin = (remainingTarget / remainingBase - 1) * 100;
+    } else if (toPrice.length > 0 && Number.isFinite(typedMargin) && typedMargin > -100) {
+      useMargin = typedMargin;
+    } else if (toPrice.length > 0 && Number.isFinite(known) && (project as { expected_margin_percent?: unknown }).expected_margin_percent !== null) {
+      useMargin = known;
+    }
+    if (toPrice.length > 0 && useMargin !== null) {
+      const externals = externalPricesFromInternal(toPrice, useMargin);
       for (let index = 0; index < toPrice.length; index += 1) {
         const quantity = Number(toPrice[index].quantity) || 1;
         await supabase.from("project_price_items").update({ external_unit_price: externals[index], total: Math.round(quantity * externals[index] * 100) / 100 }).eq("id", toPrice[index].id);
       }
-      marginPercent = known;
+      marginPercent = useMargin;
     }
   } else if (Number(String(body.target_client_total ?? "").replace(/\s/g, "").replace(",", ".")) > 0) {
     // Mode « montant total attendu » (comme le devis du DAO) : total TTC donné, marge calculée, prix externes ajustés.
