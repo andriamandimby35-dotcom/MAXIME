@@ -1,6 +1,8 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { OpenPdfButton } from "@/components/OpenPdfButton";
+import { isPhoneDevice } from "@/lib/is-phone-device";
 
 export type ArchivedClaim = {
   id: string;
@@ -16,6 +18,9 @@ const ariary = new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 0 });
 // Factures PAYÉES dont le chantier a été supprimé : on les garde (comptabilité),
 // sans chantier. Leur PDF reste consultable.
 export function ArchivedClaims({ claims }: { claims: ArchivedClaim[] }) {
+  // Téléphone : comportement d'avant (lien ouvert dans son onglet). Ordinateur : lecteur PDF commun avec « Fermer ».
+  const [phone, setPhone] = useState(false);
+  useEffect(() => setPhone(isPhoneDevice()), []);
   if (claims.length === 0) return null;
   return (
     <section className="panel tablePanel" style={{ marginTop: 24 }}>
@@ -32,7 +37,9 @@ export function ArchivedClaims({ claims }: { claims: ArchivedClaim[] }) {
               <td>{claim.project_name || "—"}</td>
               <td>{claim.issue_date ? new Date(claim.issue_date).toLocaleDateString("fr-FR") : "—"}</td>
               <td>{ariary.format(Number(claim.net_amount) || 0)} Ar</td>
-              <td><OpenPdfButton className="tenderButton" title={`Facture ${claim.claim_number}`} url={`/api/billing/claims/${claim.id}/pdf`}>Ouvrir</OpenPdfButton></td>
+              <td>{phone
+                ? <a className="tenderButton" href={`/api/billing/claims/${claim.id}/pdf`} target="_blank" rel="noopener noreferrer">Ouvrir</a>
+                : <OpenPdfButton className="tenderButton" title={`Facture ${claim.claim_number}`} url={`/api/billing/claims/${claim.id}/pdf`}>Ouvrir</OpenPdfButton>}</td>
             </tr>
           ))}
         </tbody>
