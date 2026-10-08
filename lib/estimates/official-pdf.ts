@@ -176,8 +176,8 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
     drawGrid(y + 5, y - height + 5, true);
     y -= height;
   };
-  const newPage = () => {
-    page = { draw: [], lines: [], fills: [] }; pages.push(page); y = PAGE_HEIGHT - TOP;
+  // En-tête complet (société, devis, DAO, date) : identique sur TOUTES les pages, récapitulatifs compris.
+  const drawPageHeader = () => {
     // En-tête portrait : la société à gauche, le devis et le DAO à droite.
     const RIGHT_X = LEFT + 290;
     const RIGHT_WIDTH = PAGE_WIDTH - RIGHT - RIGHT_X;
@@ -195,6 +195,10 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
     extra.forEach((text) => wrapText(text, RIGHT_WIDTH, 8).slice(0, 2).forEach((part) => { addText(part, RIGHT_X, rightY, 8); rightY -= 10.5; }));
     y = Math.min(leftY, rightY) - 6;
     page.lines.push({ x1: LEFT, y1: y, x2: PAGE_WIDTH - RIGHT, y2: y, width: 1 }); y -= 20;
+  };
+  const newPage = () => {
+    page = { draw: [], lines: [], fills: [] }; pages.push(page); y = PAGE_HEIGHT - TOP;
+    drawPageHeader();
     const detailTitle = cleanText(input.bdqeLayout?.detail_table?.title);
     if (detailTitle) { wrapText(detailTitle.toLocaleUpperCase("fr-FR"), TABLE_WIDTH * 0.78, 9).slice(0, 2).forEach((part) => { addText(part, LEFT, y, 9, true); y -= 12; }); y -= 3; }
     drawTableHeader();
@@ -217,9 +221,7 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
   };
   const recapPage = (title: string, entries: Array<{ reference?: string; title: string; total: number }>, withSignature = false, showTotal = true, reference = "", showExtras = false) => {
     page = { draw: [], lines: [], fills: [] }; pages.push(page); y = PAGE_HEIGHT - TOP;
-    addText(input.companyName, LEFT, y, 14, true);
-    addText("BDQE - RÉCAPITULATION", PAGE_WIDTH - RIGHT - 175, y, 12, true);
-    y -= 38;
+    drawPageHeader();
     const template = (input.bdqeLayout?.recap_tables ?? []).find((item) => cleanText(item.reference) === cleanText(reference) || cleanText(item.title).toLocaleLowerCase("fr-FR") === cleanText(title).replace(/^récapitulation\s+/i, "").toLocaleLowerCase("fr-FR"));
     const labels = template?.columns?.length === 3 ? template.columns : ["REF", "DÉSIGNATION", "MONTANT (Ar)"];
     const refWidth = 50; const amountWidth = 120; const titleWidth = TABLE_WIDTH - refWidth - amountWidth;
@@ -233,6 +235,7 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
     for (const entry of entries) {
       if (y < BOTTOM + 90) {
         page = { draw: [], lines: [], fills: [] }; pages.push(page); y = PAGE_HEIGHT - TOP;
+        drawPageHeader();
         drawCell(LEFT, y, TABLE_WIDTH, headingHeight, title.toLocaleUpperCase("fr-FR"), true, "center"); y -= headingHeight;
         drawCell(LEFT, y, refWidth, 20, labels[0] || "REF", true, "center"); drawCell(LEFT + refWidth, y, titleWidth, 20, labels[1] || "DÉSIGNATION", true, "center"); drawCell(LEFT + refWidth + titleWidth, y, amountWidth, 20, labels[2] || "MONTANT (Ar)", true, "center"); y -= 20;
       }
@@ -264,8 +267,12 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
       else { addText("................................................................................................................................", LEFT, y, 9); y -= 16; }
       addText("Fait à, ........................................ le ........................................", LEFT, y, 9); y -= 28;
       addText("Le Soumissionnaire", LEFT, y, 10, true); y -= 44;
-      const annotations = input.bdqeLayout?.annotations?.filter(Boolean) ?? [];
-      annotations.slice(0, 3).flatMap((annotation) => wrapText(annotation, TABLE_WIDTH, 8)).forEach((part) => { addText(part, LEFT, y, 8); y -= 11; });
+      // Observations / notes du DAO : on retire celles que le PDF écrit déjà lui-même avec le vrai montant
+      // (« Arrêté le présent bordereau… : ... (Montant en chiffres et en lettres) », « Fait à… », « Le Soumissionnaire »).
+      const annotations = (input.bdqeLayout?.annotations ?? [])
+        .map((annotation) => cleanText(annotation).replace(/arr[êe]t[ée]e?\s+le\s+pr[ée]sent[\s\S]*$/i, "").trim())
+        .filter((annotation) => annotation && !/^fait\s+[àa]\b|^le\s+soumissionnaire\b/i.test(annotation));
+      annotations.slice(0, 8).flatMap((annotation) => wrapText(annotation, TABLE_WIDTH, 8)).forEach((part) => { addText(part, LEFT, y, 8); y -= 11; });
     }
   };
 
@@ -351,17 +358,28 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
   // Les rubriques de récapitulation viennent du DAO et sont séparées du
   // détail du bordereau. Elles figurent dans les deux devis ; la page globale
   // avec signature ne figure que dans la version externe à soumettre.
-  for (const group of input.recapGroups ?? []) {
+  // Un récapitulatif à 0 Ar n'apporte rien : les lignes à 0 sont retirées, et une page
+  // dont tout est à 0 n'est pas imprimée (ni dans le récapitulatif général).
+  const positiveGroups = (input.recapGroups ?? [])
+    .map((group) => ({ ...group, entries: group.entries.filter((entry) => Number(entry.total) > 0) }))
+    .filter((group) => group.entries.length > 0);
+  for (const group of positiveGroups) {
     const extractedTitle = (input.bdqeLayout?.recap_tables ?? []).find((item) => cleanText(item.reference) === cleanText(group.reference))?.title;
     recapPage(extractedTitle || `Récapitulation ${group.title}`, group.entries, false, true, group.reference || "", true);
   }
   if ((input.internalFinancialSummary?.length ?? 0) > 0) {
     recapPage("Synthèse financière interne", input.internalFinancialSummary!.map((entry) => ({ title: entry.title, total: entry.total })), false, false);
   }
-  if (input.includeExternalRecap && (input.recapGroups?.length ?? 0) > 0) {
+  if (input.includeExternalRecap && positiveGroups.length > 0) {
     const generalTitle = (input.bdqeLayout?.recap_tables ?? []).find((item) => /récapitulation générale|recapitulation generale/i.test(cleanText(item.title)))?.title || "Récapitulation générale";
-    recapPage(generalTitle, (input.recapGroups ?? []).map((group, index) => ({ reference: group.reference || String.fromCharCode(65 + index), title: group.title, total: group.entries.reduce((sum, entry) => sum + entry.total, 0) })), true);
+    recapPage(generalTitle, positiveGroups.map((group, index) => ({ reference: group.reference || String.fromCharCode(65 + index), title: group.title, total: group.entries.reduce((sum, entry) => sum + entry.total, 0) })), true);
   }
+
+  // Numéros de page « Page X de Y » en bas de chaque page (comme le PDF des devis PDF).
+  pages.forEach((commands, index) => {
+    const label = `Page ${index + 1} de ${pages.length}`;
+    commands.draw.push({ text: label, x: (PAGE_WIDTH - textWidth(label, 7)) / 2, y: 20, size: 7, bold: false });
+  });
 
   const objects: string[] = ["<< /Type /Catalog /Pages 2 0 R >>"];
   const pageObjectNumbers = pages.map((_, index) => 5 + index * 2);

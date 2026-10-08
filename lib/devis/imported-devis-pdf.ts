@@ -320,12 +320,14 @@ export function generateImportedDevisPdf(input: ImportedPdfInput) {
       cell(LEFT + refWidth + titleWidth, y, amountWidth, 20, "MONTANT (Ar)", true, "center");
       y -= 20;
     };
+    // Comme le DAO : une rubrique à 0 n'apparaît pas dans le récapitulatif.
+    const recapEntries = input.recap.filter((entry) => Number(entry.total) > 0);
     const totals = [{ label: "TOTAL", amount: input.total }, ...(input.extraTotals ?? []).map((extra) => ({ label: extra.label, amount: extra.amount }))];
-    const needed = 24 + 20 + input.recap.length * 22 + 30 + Math.max(0, totals.length - 1) * 22;
+    const needed = 24 + 20 + recapEntries.length * 22 + 30 + Math.max(0, totals.length - 1) * 22;
     // Tient sur la page du bordereau → pas de page supplémentaire ; sinon une page à part, avec le même en-tête.
     if (y - needed < BOTTOM + 14) newPage(false, false); else y -= 18;
     drawHead();
-    for (const entry of input.recap) {
+    for (const entry of recapEntries) {
       if (y - 22 < BOTTOM + 14) { newPage(false, false); drawHead(); }
       cell(LEFT, y, refWidth, 22, String(entry.number).toLocaleUpperCase("fr-FR"), true, "center");
       cell(LEFT + refWidth, y, titleWidth, 22, repairMojibake(entry.title).toLocaleUpperCase("fr-FR"), true);
