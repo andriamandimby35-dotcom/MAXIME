@@ -87,7 +87,7 @@ export default function DevisPdfCard({ projectId, mode, isAdmin, version }: { pr
   const hasError = /impossible|expirée|introuvable|erreur/i.test(message);
   const primary: React.CSSProperties = { border: "1px solid #14532d", borderRadius: 6, padding: "9px 14px", fontWeight: 700 };
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 9 }}>
+    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 9, maxWidth: "100%", minWidth: 0 }}>
       <button type="button" onClick={() => void preview()} disabled={Boolean(working)} aria-busy={working === "preview"}
         style={{ ...primary, background: working === "preview" ? "#d1fae5" : "#166534", color: working === "preview" ? "#14532d" : "white", cursor: working ? "wait" : "pointer" }}>
         {working === "preview" ? "Création de l’aperçu…" : objectUrl ? (stale ? "Actualiser l’aperçu PDF (devis modifié)" : "Aperçu PDF à jour") : mode === "internal" ? "Prévisualiser le devis interne" : "Prévisualiser le devis externe"}
@@ -102,7 +102,7 @@ export default function DevisPdfCard({ projectId, mode, isAdmin, version }: { pr
       {working && (
         <div className="appProgress appProgressCompact isIndeterminate" role="progressbar" aria-label="Préparation du PDF en cours" aria-valuetext="Préparation en cours"><span /></div>
       )}
-      {message && <small role="status" style={{ flexBasis: "100%", color: hasError ? "#b91c1c" : "#166534", maxWidth: 720 }}>{message}</small>}
+      {message && <small role="status" style={{ flexBasis: "100%", color: hasError ? "#b91c1c" : "#166534", maxWidth: "min(720px, 100%)", overflowWrap: "anywhere" }}>{message}</small>}
       {objectUrl && (
         <div style={{ flexBasis: "100%" }}>
           {phone ? (
@@ -110,7 +110,6 @@ export default function DevisPdfCard({ projectId, mode, isAdmin, version }: { pr
           ) : (
             <>
               <iframe src={objectUrl} title={mode === "internal" ? "Aperçu du devis interne" : "Aperçu du devis externe"} style={{ width: "100%", height: "70vh", minHeight: 420, border: "1px solid #b8d7c0", borderRadius: 8, background: "#fff" }} />
-              <a href={objectUrl} target="_blank" rel="noreferrer" style={{ fontSize: ".8rem", color: "#166534" }}>Ouvrir l’aperçu en plein écran (onglet)</a>
             </>
           )}
         </div>

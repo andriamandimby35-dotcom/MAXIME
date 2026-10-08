@@ -2,11 +2,16 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { isPhoneDevice } from "@/lib/is-phone-device";
 
 export default function OfficialPdfButton({ estimateId, mode = "external" }: { estimateId: string; mode?: "external" | "internal" }) {
   const [working, setWorking] = useState<"preview" | "save" | null>(null);
   const [previewReady, setPreviewReady] = useState(false);
   const [message, setMessage] = useState("");
+  // Sur ordinateur, l'aperçu s'affiche DANS la carte (aucune nouvelle fenêtre) ; sur téléphone, plein écran dans son onglet.
+  const [showInline, setShowInline] = useState(false);
+  const [phone, setPhone] = useState(false);
+  useEffect(() => { setPhone(isPhoneDevice() || window.matchMedia("(max-width: 640px)").matches); }, []);
 
   async function authenticatedHeaders(): Promise<Record<string, string>> {
     const { data: { session } } = await createClient().auth.getSession();
@@ -70,7 +75,10 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
       previewUrlRef.current = url;
       setPreviewUrl(url);
       setPreviewReady(true);
-      setMessage("Aperçu prêt. Cliquez sur « Ouvrir l’aperçu PDF » pour l’afficher dans le lecteur PDF du navigateur.");
+      setShowInline(!phone);
+      setMessage(phone
+        ? "Aperçu prêt. Touchez « Ouvrir l’aperçu PDF » pour l’afficher en plein écran."
+        : "Aperçu prêt. Vérifiez-le ci-dessous, puis enregistrez.");
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Prévisualisation impossible.";
       setMessage(errorMessage);
@@ -84,10 +92,11 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
       setMessage("Préparez d’abord l’aperçu PDF.");
       return;
     }
-    // Aucune nouvelle fabrication : on rouvre le PDF déjà créé.
+    // Aucune nouvelle fabrication : on réaffiche le PDF déjà créé, dans la carte (ordinateur) ou plein écran (téléphone).
+    if (!phone) { setShowInline((current) => !current); return; }
     const opened = window.open(previewUrl, "_blank");
     if (!opened) setMessage("Le navigateur a bloqué la fenêtre PDF. Autorisez les fenêtres surgissantes puis réessayez.");
-    else setMessage("Aperçu ouvert dans le lecteur PDF du navigateur.");
+    else setMessage("Aperçu ouvert dans le lecteur PDF du téléphone.");
   }
 
   async function savePdf() {
@@ -102,17 +111,28 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
     setWorking("save");
     setMessage("Enregistrement privé du PDF officiel…");
     try {
-      const preview = openPreviewWindow();
-      if (!preview) return;
-      try {
-        showPdf(preview, await requestPdf(true));
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : "Ouverture du PDF impossible.";
-        preview.document.title = "PDF indisponible";
-        preview.document.body.innerHTML = `<p style="font-family:system-ui;padding:24px">${detail.replace(/[<>&]/g, "")}</p>`;
-        throw error;
+      if (phone) {
+        // Téléphone : une fenêtre doit être ouverte avant l'attente réseau, sinon elle est bloquée.
+        const preview = openPreviewWindow();
+        if (!preview) return;
+        try {
+          showPdf(preview, await requestPdf(true));
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : "Ouverture du PDF impossible.";
+          preview.document.title = "PDF indisponible";
+          preview.document.body.innerHTML = `<p style="font-family:system-ui;padding:24px">${detail.replace(/[<>&]/g, "")}</p>`;
+          throw error;
+        }
+        setPreviewReady(false);
+      } else {
+        // Ordinateur : le PDF enregistré remplace l'aperçu, dans la carte (pas de nouvelle fenêtre).
+        const url = blobUrlFrom(await requestPdf(true));
+        if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+        previewUrlRef.current = url;
+        setPreviewUrl(url);
+        setShowInline(true);
+        setPreviewReady(false);
       }
-      setPreviewReady(false);
       setMessage("PDF enregistré. Il remplace l’ancienne version de ce type de devis.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Enregistrement impossible.");
@@ -123,7 +143,7 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
 
   const hasError = /impossible|expirée|introuvable/i.test(message);
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 9 }}>
+    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 9, maxWidth: "100%", minWidth: 0 }}>
       <button
         type="button"
         onClick={previewPdf}
@@ -149,7 +169,7 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
           cursor: previewReady && !working ? "pointer" : "not-allowed", fontWeight: 700,
         }}
       >
-        Ouvrir l’aperçu PDF
+        {!phone && showInline ? "Masquer l’aperçu PDF" : "Ouvrir l’aperçu PDF"}
       </button>
       {previewReady && (
         <button
@@ -177,7 +197,12 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
           <span />
         </div>
       )}
-      {message && <small role="status" style={{ flexBasis: "100%", color: hasError ? "#b91c1c" : "#166534", maxWidth: 720 }}>{message}</small>}
+      {message && <small role="status" style={{ flexBasis: "100%", color: hasError ? "#b91c1c" : "#166534", maxWidth: "min(720px, 100%)", overflowWrap: "anywhere" }}>{message}</small>}
+      {!phone && showInline && previewUrl && (
+        <div style={{ flexBasis: "100%", minWidth: 0 }}>
+          <iframe src={previewUrl} title={mode === "internal" ? "Aperçu du devis interne" : "Aperçu du devis externe"} style={{ width: "100%", height: "70vh", minHeight: 420, border: "1px solid #b8d7c0", borderRadius: 8, background: "#fff" }} />
+        </div>
+      )}
     </div>
   );
 }

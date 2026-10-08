@@ -26,3 +26,21 @@ export async function openDevisPdf(url: string, body: Record<string, unknown>): 
     return detail;
   }
 }
+
+// Ordinateur : fabrique le PDF et renvoie son adresse locale (blob), pour l'afficher DANS la page
+// (aucune nouvelle fenêtre). Sur téléphone, on garde openDevisPdf (plein écran dans son onglet).
+export async function fetchDevisPdfUrl(url: string, body: Record<string, unknown>): Promise<{ url: string } | { error: string }> {
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-PDF-Client-Fetch": "1" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json().catch(() => ({})) as { pdfBase64?: string; error?: string };
+    if (!response.ok || !payload.pdfBase64) return { error: payload.error || "Le PDF ne peut pas être ouvert." };
+    const bytes = Uint8Array.from(atob(payload.pdfBase64), (character) => character.charCodeAt(0));
+    return { url: URL.createObjectURL(new Blob([bytes], { type: "application/pdf" })) };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : "Le PDF ne peut pas être ouvert." };
+  }
+}
