@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { usePdfViewer } from "@/components/PdfViewerProvider";
 
 // Carte PDF d'un devis importé — MÊME présentation que le devis du DAO :
 // « Prévisualiser » → l'aperçu s'affiche DANS la carte (pas de nouvelle fenêtre) →
@@ -13,9 +12,7 @@ export default function DevisPdfCard({ projectId, mode, isAdmin, version }: { pr
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [saved, setSaved] = useState(false);
-  // Lecteur PDF commun à toute l'appli (même fenêtre, mêmes boutons Imprimer / Fermer).
-  const { showPdf } = usePdfViewer();
-  const viewerTitle = mode === "internal" ? "Aperçu du devis interne" : "Aperçu du devis externe";
+  const [closed, setClosed] = useState(false); // « Fermer » masque l'aperçu (le PDF reste prêt, « Aperçu PDF à jour » le réaffiche)
   const urlRef = useRef<string | null>(null);
   // Contenu du devis au moment où l'aperçu a été fabriqué : le PDF n'est refait que si le devis a changé depuis.
   const builtVersionRef = useRef<string | null>(null);
@@ -41,11 +38,11 @@ export default function DevisPdfCard({ projectId, mode, isAdmin, version }: { pr
   async function preview() {
     if (working) return;
     if (objectUrl && version !== undefined && builtVersionRef.current === version) {
-      if (!phone) showPdf(viewerTitle, objectUrl);
+      setClosed(false);
       setMessage("Le devis n’a pas changé depuis cet aperçu : il est déjà à jour (rien n’est refait).");
       return;
     }
-    setWorking("preview"); setSaved(false); setMessage("Création de l’aperçu PDF…");
+    setWorking("preview"); setSaved(false); setClosed(false); setMessage("Création de l’aperçu PDF…");
     try {
       const response = await fetch(`/api/devis/projects/${projectId}/pdf`, {
         method: "POST",
@@ -60,8 +57,7 @@ export default function DevisPdfCard({ projectId, mode, isAdmin, version }: { pr
       urlRef.current = url;
       builtVersionRef.current = version ?? null;
       setObjectUrl(url);
-      if (!phone) showPdf(viewerTitle, url);
-      setMessage("Aperçu prêt. Vérifiez-le, fermez-le, puis enregistrez pour mettre à jour le chantier et la facturation.");
+      setMessage("Aperçu prêt. Vérifiez-le, puis enregistrez pour mettre à jour le chantier et la facturation.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Prévisualisation impossible.");
     } finally { setWorking(null); }
@@ -104,16 +100,25 @@ export default function DevisPdfCard({ projectId, mode, isAdmin, version }: { pr
           {working === "save" ? "Enregistrement…" : "Confirmer et enregistrer"}
         </button>
       )}
+      {objectUrl && !phone && !closed && (
+        <button type="button" onClick={() => setClosed(true)} style={{ ...primary, border: "1px solid #6b7280", background: "#fff", color: "#374151", cursor: "pointer" }}>
+          Fermer
+        </button>
+      )}
       {saved && <Link href={`/billing/${projectId}`} style={{ ...primary, border: "1px solid #0f766e", background: "#0f766e", color: "white", textDecoration: "none" }}>Ouvrir la facturation</Link>}
       {working && (
         <div className="appProgress appProgressCompact isIndeterminate" role="progressbar" aria-label="Préparation du PDF en cours" aria-valuetext="Préparation en cours"><span /></div>
       )}
       {message && <small role="status" style={{ flexBasis: "100%", color: hasError ? "#b91c1c" : "#166534", maxWidth: "min(720px, 100%)", overflowWrap: "anywhere" }}>{message}</small>}
-      {objectUrl && (
-        phone
-          ? <a href={objectUrl} target="_blank" rel="noreferrer" className="estimateSecondaryAction" style={{ textDecoration: "none" }}>Ouvrir le PDF (plein écran)</a>
-          : <button type="button" className="estimateSecondaryAction" onClick={() => showPdf(viewerTitle, objectUrl)}>Ouvrir l’aperçu PDF</button>
-      )}
+      {objectUrl && (phone ? (
+        <div style={{ flexBasis: "100%" }}>
+          <a href={objectUrl} target="_blank" rel="noreferrer" className="estimateSecondaryAction" style={{ textDecoration: "none" }}>Ouvrir le PDF (plein écran)</a>
+        </div>
+      ) : !closed ? (
+        <div style={{ flexBasis: "100%", minWidth: 0 }}>
+          <iframe src={objectUrl} title={mode === "internal" ? "Aperçu du devis interne" : "Aperçu du devis externe"} style={{ width: "100%", height: "70vh", minHeight: 420, border: "1px solid #b8d7c0", borderRadius: 8, background: "#fff" }} />
+        </div>
+      ) : null)}
     </div>
   );
 }
