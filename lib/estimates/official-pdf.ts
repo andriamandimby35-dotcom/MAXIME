@@ -1,4 +1,4 @@
-import { amountInWordsFr } from "@/lib/number-to-words-fr";
+import { closingBlock } from "@/lib/pdf-closing";
 
 export type OfficialPdfRow =
   | { kind: "section"; title: string; number?: string }
@@ -258,22 +258,7 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
       }
       y -= 14;
     } else y -= 16;
-    if (withSignature) {
-      addText("Arrêté le présent bordereau détail quantitatif et estimatif à la somme de :", LEFT, y, 9); y -= 14;
-      // Somme en toutes lettres (total de la récapitulation) ; à défaut de
-      // montant, la ligne de points à remplir à la main.
-      const sumWords = entries.reduce((sum, entry) => sum + entry.total, 0) > 0 ? `${amountInWordsFr(entries.reduce((sum, entry) => sum + entry.total, 0))}.` : "";
-      if (sumWords) { wrapText(sumWords, TABLE_WIDTH * 0.88, 9).forEach((part) => { addText(part, LEFT, y, 9, true); y -= 12; }); y -= 4; }
-      else { addText("................................................................................................................................", LEFT, y, 9); y -= 16; }
-      addText("Fait à, ........................................ le ........................................", LEFT, y, 9); y -= 28;
-      addText("Le Soumissionnaire", LEFT, y, 10, true); y -= 44;
-      // Observations / notes du DAO : on retire celles que le PDF écrit déjà lui-même avec le vrai montant
-      // (« Arrêté le présent bordereau… : ... (Montant en chiffres et en lettres) », « Fait à… », « Le Soumissionnaire »).
-      const annotations = (input.bdqeLayout?.annotations ?? [])
-        .map((annotation) => cleanText(annotation).replace(/arr[êe]t[ée]e?\s+le\s+pr[ée]sent[\s\S]*$/i, "").trim())
-        .filter((annotation) => annotation && !/^fait\s+[àa]\b|^le\s+soumissionnaire\b/i.test(annotation));
-      annotations.slice(0, 8).flatMap((annotation) => wrapText(annotation, TABLE_WIDTH, 8)).forEach((part) => { addText(part, LEFT, y, 8); y -= 11; });
-    }
+    void withSignature; // la somme en lettres et la signature sont écrites une seule fois, à la toute fin (voir closing)
   };
 
   newPage();
@@ -373,6 +358,24 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
   if (input.includeExternalRecap && positiveGroups.length > 0) {
     const generalTitle = (input.bdqeLayout?.recap_tables ?? []).find((item) => /récapitulation générale|recapitulation generale/i.test(cleanText(item.title)))?.title || "Récapitulation générale";
     recapPage(generalTitle, positiveGroups.map((group, index) => ({ reference: group.reference || String.fromCharCode(65 + index), title: group.title, total: group.entries.reduce((sum, entry) => sum + entry.total, 0) })), true);
+  }
+
+  // Fin du devis (dernière page seulement) : somme en lettres, « Fait à », signature, observations du DAO, NB, texte de loi.
+  {
+    const externalGroupsTotal = positiveGroups.reduce((sum, group) => sum + group.entries.reduce((inner, entry) => inner + entry.total, 0), 0);
+    const closingTotal = input.includeExternalRecap && externalGroupsTotal > 0 ? externalGroupsTotal : input.grandTotal;
+    const block = closingBlock(closingTotal, "Arrêté le présent bordereau détail quantitatif et estimatif à la somme de :", input.bdqeLayout?.annotations);
+    const SIZE = 8.2;
+    const strongLines = block.strong.map((text) => wrapText(text, TABLE_WIDTH * 0.74, SIZE)); // gras + majuscules = plus large
+    const smallLines = block.small.flatMap((text) => wrapText(text, TABLE_WIDTH, 7));
+    const needed = 30 + strongLines.reduce((sum, parts) => sum + parts.length * 12 + 6, 0) + 44 + smallLines.length * 9.5 + 10;
+    if (y - needed < BOTTOM + 18) { page = { draw: [], lines: [], fills: [] }; pages.push(page); y = PAGE_HEIGHT - TOP; drawPageHeader(); }
+    y -= 14;
+    strongLines.forEach((parts, index) => {
+      parts.forEach((part) => { addText(part, LEFT, y, SIZE, true); y -= 12; });
+      y -= index === block.strong.length - 2 ? 18 : index === block.strong.length - 1 ? 40 : 6;
+    });
+    smallLines.forEach((part) => { addText(part, LEFT, y, 7); y -= 9.5; });
   }
 
   // Numéros de page « Page X de Y » en bas de chaque page (comme le PDF des devis PDF).

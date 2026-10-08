@@ -1,3 +1,5 @@
+import { closingBlock } from "@/lib/pdf-closing";
+
 // PDF d'un devis ajouté par PDF, présenté COMME LE PDF D'ORIGINE (bordereau
 // détail quantitatif et estimatif) : titre centré sur deux lignes, tableau fin
 // N° | DESIGNATION DES TRAVAUX | UNITE | QUANTITE | PRIX UNITAIRE | MONTANT Ar,
@@ -342,6 +344,23 @@ export function generateImportedDevisPdf(input: ImportedPdfInput) {
       cell(LEFT + refWidth + titleWidth, y, amountWidth, height, recapMoney(total.amount), true, "right", size);
       y -= height;
     });
+  }
+
+  // Fin du devis (dernière page seulement) : somme en lettres, « Fait à », signature, texte de loi — comme les DAO.
+  {
+    const lastExtra = (input.extraTotals ?? []).length > 0 ? input.extraTotals![input.extraTotals!.length - 1].amount : input.total;
+    const block = closingBlock(lastExtra, "Arrêté le présent devis à la somme de :");
+    const SIZE = 8.2;
+    const strongLines = block.strong.map((text) => wrap(text, TABLE_WIDTH, SIZE, true));
+    const smallLines = block.small.flatMap((text) => wrap(text, TABLE_WIDTH, 7));
+    const needed = 30 + strongLines.reduce((sum, parts) => sum + parts.length * 12 + 6, 0) + 44 + smallLines.length * 9.5 + 10;
+    if (y - needed < BOTTOM + 14) newPage(false, false);
+    y -= 14;
+    strongLines.forEach((parts, index) => {
+      parts.forEach((part) => { addText(part, LEFT, y - 8, SIZE, true); y -= 12; });
+      y -= index === block.strong.length - 2 ? 18 : index === block.strong.length - 1 ? 40 : 6;
+    });
+    smallLines.forEach((part) => { addText(part, LEFT, y - 8, 7); y -= 9.5; });
   }
 
   // Numéros de page « Page X de Y ».
