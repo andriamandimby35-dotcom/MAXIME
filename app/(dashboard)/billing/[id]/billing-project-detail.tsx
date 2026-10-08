@@ -5,6 +5,8 @@ import { CSSProperties, FormEvent, Fragment, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { certifiedAmount } from "@/lib/billing";
 import { usePdfViewer } from "@/components/PdfViewerProvider";
+import { useInlinePdf } from "@/components/InlinePdf";
+import { isPhoneDevice } from "@/lib/is-phone-device";
 import { overpaidAmount } from "@/lib/billing/pricing";
 import { matchTaskForItem } from "@/lib/billing/task-matching";
 
@@ -83,7 +85,10 @@ const claimStatusLabel: Record<string, string> = { draft: "Brouillon", submitted
 
 export function BillingProjectDetail({ project, tender, payments, claims, isAdmin, pricing }: { project: Project; tender: Tender | null; payments: Payment[]; claims: Claim[]; isAdmin: boolean; pricing: PricingInfo }) {
   const router = useRouter();
-  const { openPdf } = usePdfViewer();
+  const { openPdf: openPdfModal } = usePdfViewer();
+  const inlinePdf = useInlinePdf();
+  // Ordinateur : facture affichée sous le tableau des factures (bouton « Fermer ») ; téléphone : comme avant.
+  const openPdf = (title: string, url: string, options?: { cache?: RequestCache }) => (isPhoneDevice() ? openPdfModal(title, url, options) : inlinePdf.open(title, url, options));
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [paymentForm, setPaymentForm] = useState({
@@ -915,6 +920,7 @@ export function BillingProjectDetail({ project, tender, payments, claims, isAdmi
               </tr>
             ))}</tbody>
           </table>
+          {inlinePdf.frame}
           {!openClaims.length && <p className="emptyState">{claims.length ? "Toutes les factures sont payées (voir les paiements reçus ci-dessous)." : "Aucune facture générée pour ce chantier."}</p>}
           <p style={{ fontSize: ".68rem", color: "#777", margin: "8px 0 0", display: "flex", gap: "12px", flexWrap: "wrap" }}>
             <span><span style={{ display: "inline-block", width: 8, height: 8, background: "#d9dedb", borderRadius: 2, marginRight: 4 }} />Émise</span>

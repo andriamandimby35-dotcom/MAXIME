@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { OpenPdfButton } from "@/components/OpenPdfButton";
+import { useInlinePdf } from "@/components/InlinePdf";
 import { isPhoneDevice } from "@/lib/is-phone-device";
 
 export type ArchivedClaim = {
@@ -19,6 +20,7 @@ const ariary = new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 0 });
 // sans chantier. Leur PDF reste consultable.
 export function ArchivedClaims({ claims }: { claims: ArchivedClaim[] }) {
   // Téléphone : comportement d'avant (lien ouvert dans son onglet). Ordinateur : lecteur PDF commun avec « Fermer ».
+  const inline = useInlinePdf();
   const [phone, setPhone] = useState(false);
   useEffect(() => setPhone(isPhoneDevice()), []);
   if (claims.length === 0) return null;
@@ -39,11 +41,12 @@ export function ArchivedClaims({ claims }: { claims: ArchivedClaim[] }) {
               <td>{ariary.format(Number(claim.net_amount) || 0)} Ar</td>
               <td>{phone
                 ? <a className="tenderButton" href={`/api/billing/claims/${claim.id}/pdf`} target="_blank" rel="noopener noreferrer">Ouvrir</a>
-                : <OpenPdfButton className="tenderButton" title={`Facture ${claim.claim_number}`} url={`/api/billing/claims/${claim.id}/pdf`}>Ouvrir</OpenPdfButton>}</td>
+                : <OpenPdfButton className="tenderButton" title={`Facture ${claim.claim_number}`} url={`/api/billing/claims/${claim.id}/pdf`} onOpenInline={(title, url) => void inline.open(title, url)}>Ouvrir</OpenPdfButton>}</td>
             </tr>
           ))}
         </tbody>
       </table>
+      <div style={{ padding: "0 16px 14px" }}>{inline.frame}</div>
     </section>
   );
 }

@@ -8,7 +8,7 @@ import type { ImportedDevis } from "@/components/estimates/ImportedDevisTable";
 import { confirmDeletion } from "@/components/deletion/confirmDeletion";
 import { fetchDevisPdfUrl, openDevisPdf } from "@/components/estimates/openPdf";
 import { isPhoneDevice } from "@/lib/is-phone-device";
-import { usePdfViewer } from "@/components/PdfViewerProvider";
+import { EstimatePdfFrame } from "@/components/estimates/EstimatePdfFrame";
 
 type Estimate = { id: string; label: string; createdAt: string | null; internalTotal: number; externalBase: number; markupBase: number; margin: number };
 
@@ -24,9 +24,17 @@ export function EstimateList({ estimates, imported = [] }: { estimates: Estimate
   const router = useRouter();
   const [rows, setRows] = useState(estimates);
   const [message, setMessage] = useState("");
-  // Lecteur PDF commun à toute l'appli (même fenêtre, mêmes boutons Imprimer / Fermer) : jamais de nouvelle fenêtre sur ordinateur.
-  const { showPdf } = usePdfViewer();
+  // PDF affiché DANS la carte du devis (ordinateur), avec « Fermer » ; téléphone : comme avant (plein écran).
+  const [openPdfs, setOpenPdfs] = useState<Record<string, { url: string; title: string }>>({});
   const [pdfBusy, setPdfBusy] = useState(false);
+  function closePdf(id: string) {
+    setOpenPdfs((current) => {
+      const next = { ...current };
+      if (next[id]) URL.revokeObjectURL(next[id].url);
+      delete next[id];
+      return next;
+    });
+  }
   useEffect(() => setRows(estimates), [estimates]);
   useEffect(() => {
     if (!pdfBusy) return;
@@ -56,7 +64,10 @@ export function EstimateList({ estimates, imported = [] }: { estimates: Estimate
     if ("error" in result) { setMessage(result.error); return; }
     setMessage("");
     const label = entry.kind === "dao" ? entry.row.label : entry.row.name;
-    showPdf(`${mode === "internal" ? "Devis interne" : "Devis externe"} — ${label}`, result.url, true);
+    setOpenPdfs((current) => {
+      if (current[entry.id]) URL.revokeObjectURL(current[entry.id].url);
+      return { ...current, [entry.id]: { url: result.url, title: `${mode === "internal" ? "Devis interne" : "Devis externe"} — ${label}` } };
+    });
   }
   async function deleteEntry(entry: Entry) {
     // Supprime le devis ET, en chaîne, son chantier (dépenses, factures non payées) ; les factures payées sont gardées.
@@ -90,9 +101,9 @@ export function EstimateList({ estimates, imported = [] }: { estimates: Estimate
   const metricStrong: React.CSSProperties = { fontSize: ".9rem", wordBreak: "break-word" };
   const actionsStyle: React.CSSProperties = { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", margin: "14px 0" };
   const metricsStyle: React.CSSProperties = { gridTemplateColumns: "repeat(2,minmax(0,1fr))" };
-  const cardProps = (href: string) => ({
+  const cardProps = (href: string, id: string) => ({
     className: "projectDirectoryCard",
-    style: { cursor: "pointer" } as React.CSSProperties,
+    style: { cursor: "pointer", gridColumn: openPdfs[id] ? "1 / -1" : undefined } as React.CSSProperties,
     role: "link",
     tabIndex: 0,
     onClick: () => router.push(href),
@@ -111,7 +122,7 @@ export function EstimateList({ estimates, imported = [] }: { estimates: Estimate
             const row = entry.row;
             const profit = row.markupBase * row.margin / 100;
             const externalTotal = row.externalBase + profit;
-            return <div key={`dao-${row.id}`} {...cardProps(`/estimates/${row.id}`)}>
+            return <div key={`dao-${row.id}`} {...cardProps(`/estimates/${row.id}`, row.id)}>
               <span className="projectCardLabel">DEVIS · DAO</span>
               <h2 style={{ fontSize: "1.25rem" }}>{row.label}</h2>
               <p className="projectCardLocation" style={{ minHeight: 0 }}>{row.createdAt ? new Date(row.createdAt).toLocaleDateString("fr-FR") : ""}</p>
@@ -127,12 +138,13 @@ export function EstimateList({ estimates, imported = [] }: { estimates: Estimate
                 <button type="button" className="tenderButton" onClick={() => void openPdf(entry, "internal")}>PDF interne</button>
                 <button type="button" className="tenderButton tenderButtonPrimary" onClick={() => void openPdf(entry, "external")}>PDF externe</button>
                 <button type="button" className="text-red-700 underline" onClick={() => void deleteEntry(entry)}>Supprimer</button>
+              {openPdfs[entry.id] && <EstimatePdfFrame title={openPdfs[entry.id].title} url={openPdfs[entry.id].url} onClose={() => closePdf(entry.id)} />}
               </div>
               <span className="projectOpenButton">Gérer les deux versions →</span>
             </div>;
           }
           const row = entry.row;
-          return <div key={`pdf-${row.id}`} {...cardProps(`/estimates/imported/${row.id}`)}>
+          return <div key={`pdf-${row.id}`} {...cardProps(`/estimates/imported/${row.id}`, row.id)}>
             <span className="projectCardLabel">DEVIS · PDF</span>
             <h2 style={{ fontSize: "1.25rem" }}>{row.name}</h2>
             <p className="projectCardLocation" style={{ minHeight: 0 }}>{row.createdAt ? new Date(row.createdAt).toLocaleDateString("fr-FR") : ""} · {row.lines} lignes</p>
@@ -146,6 +158,7 @@ export function EstimateList({ estimates, imported = [] }: { estimates: Estimate
               <button type="button" className="tenderButton" onClick={() => void openPdf(entry, "internal")}>PDF interne</button>
               <button type="button" className="tenderButton tenderButtonPrimary" onClick={() => void openPdf(entry, "external")}>PDF externe</button>
               <button type="button" className="text-red-700 underline" onClick={() => void deleteEntry(entry)}>Supprimer</button>
+              {openPdfs[entry.id] && <EstimatePdfFrame title={openPdfs[entry.id].title} url={openPdfs[entry.id].url} onClose={() => closePdf(entry.id)} />}
             </div>
             <span className="projectOpenButton">Gérer les deux versions →</span>
           </div>;

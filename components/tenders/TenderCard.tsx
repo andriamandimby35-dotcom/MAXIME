@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import DeleteTenderButton from "@/components/tenders/DeleteTenderButton";
 import { OpenPdfButton } from "@/components/OpenPdfButton";
+import { useInlinePdf } from "@/components/InlinePdf";
 
 export type TenderCardData = {
   id: string;
@@ -22,12 +23,13 @@ export type TenderCardData = {
 // sans ouvrir la carte.
 export function TenderCard({ tender }: { tender: TenderCardData }) {
   const router = useRouter();
+  const inline = useInlinePdf();
   const open = () => router.push(`/tenders/${tender.id}/analyze`);
   const amount = Number(tender.amount);
   return (
     <div
       className="projectDirectoryCard"
-      style={{ cursor: "pointer" }}
+      style={{ cursor: "pointer", gridColumn: inline.isOpen ? "1 / -1" : undefined }}
       role="link"
       tabIndex={0}
       onClick={open}
@@ -47,12 +49,13 @@ export function TenderCard({ tender }: { tender: TenderCardData }) {
         onKeyDown={(event) => event.stopPropagation()}
       >
         {tender.hasDocument ? (
-          <OpenPdfButton title={`DAO — ${tender.title ?? ""}`} url={`/api/tenders/${tender.id}/document`} className="tenderButton">Ouvrir le DAO</OpenPdfButton>
+          <OpenPdfButton title={`DAO — ${tender.title ?? ""}`} url={`/api/tenders/${tender.id}/document`} className="tenderButton" onOpenInline={(title, url) => void inline.open(title, url)}>Ouvrir le DAO</OpenPdfButton>
         ) : (
           <button type="button" disabled className="tenderButton submissionPdfDisabled">DAO indisponible</button>
         )}
         <Link href={`/tenders/${tender.id}/analyze`} className="tenderAnalyzeLink">{tender.hasAnalysis ? "Ré-analyser" : "Analyser"}</Link>
         <DeleteTenderButton tenderId={tender.id} tenderName={tender.title || tender.reference || ""} />
+        {inline.frame}
       </div>
       <span className="projectOpenButton">Ouvrir l’appel d’offres →</span>
     </div>
