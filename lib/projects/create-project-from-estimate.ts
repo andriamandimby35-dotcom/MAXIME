@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { daoTasksFromAnalysis } from "@/lib/projects/dao-tasks";
 import { computeExternalUnitPrices, targetBeforeTax } from "@/lib/estimates/external-pricing";
@@ -90,20 +91,23 @@ export async function createOrSyncProjectFromEstimate(
   let projectId = existingProject?.id as string | undefined;
 
   if (!projectId) {
-    const { data: created, error: createError } = await supabase
+    // L'identifiant est choisi ICI avant l'insertion, sans « .select() » juste après : la base bloquait la relecture
+    // immédiate de la nouvelle ligne (erreur « new row violates row-level security policy for table projects »),
+    // même quand la création elle-même était autorisée. Même méthode que la création manuelle d'un chantier.
+    const newProjectId = randomUUID();
+    const { error: createError } = await supabase
       .from("projects")
       .insert({
+        id: newProjectId,
         organization_id: organizationId,
         source_tender_id: estimate.source_tender_id,
         source_estimate_id: estimateId,
         name: tender?.title || estimate.client_name || `Chantier ${estimateId.slice(0, 8)}`,
         location,
         status: "planned",
-      })
-      .select("id")
-      .single();
+      });
     if (createError) return { error: createError.message };
-    projectId = created.id as string;
+    projectId = newProjectId;
   } else if (location) {
     const { error: updateError } = await supabase.from("projects").update({ location }).eq("id", projectId);
     if (updateError) return { error: updateError.message };
