@@ -279,29 +279,7 @@ async function generateOfficialPdfResponse(
 
   const version = 1;
   const fileName = fixedFileName;
-  const storagePath = `${member.organization_id}/${estimateId}/${mode}-pdf/${fileName}`;
-  const upload = await supabase.storage.from("estimate-pdfs").upload(storagePath, pdf, {
-    contentType: "application/pdf",
-    cacheControl: "3600",
-    upsert: true,
-  });
-  if (upload.error) return NextResponse.json({ error: `Enregistrement du PDF impossible : ${upload.error.message}` }, { status: 400 });
-
-  const documentInsert = await supabase.from("estimate_documents").upsert({
-    organization_id: member.organization_id,
-    estimate_id: estimateId,
-    document_type: mode === "internal" ? "internal_estimate" : "dao_official",
-    version,
-    storage_path: storagePath,
-    file_name: fileName,
-    file_size: pdf.byteLength,
-    created_by: user.id,
-    created_at: new Date().toISOString(),
-  }, { onConflict: "estimate_id,document_type" });
-  if (documentInsert.error) return NextResponse.json({ error: `Historique du PDF non enregistré : ${documentInsert.error.message}` }, { status: 400 });
-
-  const signed = await supabase.storage.from("estimate-pdfs").createSignedUrl(storagePath, 300, { download: fileName });
-  if (signed.error) return NextResponse.json({ error: `Lien privé indisponible : ${signed.error.message}` }, { status: 400 });
+  // ÉTAPE 1 — le chantier d'abord : même si l'enregistrement du fichier PDF échoue ensuite, le chantier existe.
   // À l'enregistrement du PDF (interne OU externe) : le chantier du devis est créé s'il n'existe pas encore, sinon rafraîchi
   // (localisation, planning, bordereau de prix), et chaque ligne est reliée à une tâche du planning. Dépenses et facturation
   // partent de ce chantier. Le client termine en recalculant la dernière facture non payée.
@@ -324,8 +302,34 @@ async function generateOfficialPdfResponse(
     projectError = error instanceof Error ? error.message : "Création du chantier impossible.";
     console.error("Automatic project creation crashed", error);
   }
+
+  // ÉTAPE 2 — le fichier PDF et son historique.
+  const storagePath = `${member.organization_id}/${estimateId}/${mode}-pdf/${fileName}`;
+  const upload = await supabase.storage.from("estimate-pdfs").upload(storagePath, pdf, {
+    contentType: "application/pdf",
+    cacheControl: "3600",
+    upsert: true,
+  });
+  if (upload.error) return NextResponse.json({ error: `Enregistrement du PDF impossible : ${upload.error.message}${projectId ? " (le chantier, lui, a bien été créé/mis à jour)." : ""}`, projectId, projectError }, { status: 400 });
+
+  const documentInsert = await supabase.from("estimate_documents").upsert({
+    organization_id: member.organization_id,
+    estimate_id: estimateId,
+    document_type: mode === "internal" ? "internal_estimate" : "dao_official",
+    version,
+    storage_path: storagePath,
+    file_name: fileName,
+    file_size: pdf.byteLength,
+    created_by: user.id,
+    created_at: new Date().toISOString(),
+  }, { onConflict: "estimate_id,document_type" });
+  // L'historique du PDF est secondaire : s'il échoue, le chantier et le PDF restent valables (l'erreur est affichée à l'écran).
+  const documentWarning = documentInsert.error ? `Historique du PDF non enregistré : ${documentInsert.error.message}` : null;
+
+  const signed = await supabase.storage.from("estimate-pdfs").createSignedUrl(storagePath, 300, { download: fileName });
+  if (signed.error) return NextResponse.json({ error: `Lien privé indisponible : ${signed.error.message}` }, { status: 400 });
   if (returnPdfPayload) {
-    return NextResponse.json({ ok: true, version, fileName, projectId, projectError, pdfBase64: Buffer.from(pdf).toString("base64") });
+    return NextResponse.json({ ok: true, version, fileName, projectId, projectError, documentWarning, pdfBase64: Buffer.from(pdf).toString("base64") });
   }
   return NextResponse.json({ ok: true, version, fileName, downloadUrl: signed.data.signedUrl });
 }
