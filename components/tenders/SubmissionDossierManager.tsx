@@ -228,12 +228,111 @@ function mergeItems(saved: Item[], detected: TemplateDetectedItem[]) {
   });
 }
 
+// Un contrat individuel de travail (UN seul personnel) avec son lecteur PDF remplissable et ses boutons.
+// Le bouton rouge « Ouvrir » en empile autant que de personnes ; le bouton vert « Ouvrir le contrat PDF » n'en montre qu'un.
+// Les deux lisent et enregistrent AU MÊME ENDROIT : ce qui est modifié d'un côté se retrouve de l'autre.
+type ContractEditorProps = {
+  workerIndex: number;
+  label: string;
+  showTitle: boolean;
+  viewerHeight: string;
+  hasSaved: boolean;
+  savedName: string | null;
+  loadBytes: (workerIndex: number, regenerate: boolean) => Promise<Uint8Array>;
+  onSave: (workerIndex: number, bytes: Uint8Array) => Promise<void>;
+  onPrint: (workerIndex: number, bytes: Uint8Array) => void;
+  onRegenerate: (workerIndex: number) => void;
+  register: (workerIndex: number, save: (() => Promise<boolean>) | null) => void;
+};
+
+function WorkerContractEditor(props: ContractEditorProps) {
+  const propsRef = useRef(props);
+  propsRef.current = props;
+  const { workerIndex } = props;
+  const [bytes, setBytes] = useState<Uint8Array | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"save" | "regenerate" | "print" | null>(null);
+  const [note, setNote] = useState("");
+  const [reload, setReload] = useState(0);
+  const regenerateNext = useRef(false);
+  const viewerRef = useRef<FillablePdfViewerHandle>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const regenerate = regenerateNext.current;
+    regenerateNext.current = false;
+    setBytes(null);
+    setFailure(null);
+    propsRef.current.loadBytes(workerIndex, regenerate).then((loaded) => { if (!cancelled) setBytes(loaded); }).catch((error) => { if (!cancelled) setFailure(error instanceof Error ? error.message : "Le contrat n’a pas pu être préparé."); });
+    return () => { cancelled = true; };
+  }, [workerIndex, reload]);
+
+  async function readBytes() {
+    const filled = await viewerRef.current?.getFilledPdfBytes();
+    if (!filled) throw new Error("Le contrat n’est pas encore prêt, réessayez dans un instant.");
+    return filled;
+  }
+  async function saveNow() {
+    setBusy("save");
+    setNote("Enregistrement…");
+    try {
+      await propsRef.current.onSave(workerIndex, await readBytes());
+      setNote("Enregistré.");
+      return true;
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Enregistrement impossible.");
+      return false;
+    } finally { setBusy(null); }
+  }
+  const saveRef = useRef(saveNow);
+  saveRef.current = saveNow;
+  useEffect(() => {
+    propsRef.current.register(workerIndex, () => saveRef.current());
+    return () => propsRef.current.register(workerIndex, null);
+  }, [workerIndex]);
+
+  async function printNow() {
+    setBusy("print");
+    try { propsRef.current.onPrint(workerIndex, await readBytes()); setNote(""); }
+    catch (error) { setNote(error instanceof Error ? error.message : "Impression impossible."); }
+    finally { setBusy(null); }
+  }
+  function regenerateNow() {
+    regenerateNext.current = true;
+    setBusy("regenerate");
+    propsRef.current.onRegenerate(workerIndex);
+    setReload((value) => value + 1);
+    window.setTimeout(() => setBusy(null), 600);
+  }
+
+  return <div style={{ marginTop: 10 }}>
+    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
+      <strong style={{ minWidth: 0, overflowWrap: "anywhere" }}>{props.showTitle ? props.label : ""}</strong>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {props.showTitle && <button type="button" className="tenderButton tenderButtonPrimary" disabled={busy !== null || !bytes} onClick={() => void saveNow()}><ButtonLabel loading={busy === "save"} label="Enregistrer ce contrat" loadingLabel="Envoi…" /></button>}
+        <button type="button" className="tenderButton" disabled={busy !== null || !bytes} onClick={() => void printNow()}><ButtonLabel loading={busy === "print"} label="Imprimer" /></button>
+        <button type="button" className="tenderButton" disabled={busy !== null} title="Refabrique ce contrat depuis le modèle, en ignorant la version déjà enregistrée." onClick={regenerateNow}><ButtonLabel loading={busy === "regenerate"} label="Régénérer" loadingLabel="Régénération…" /></button>
+      </div>
+    </div>
+    <p className="text-xs text-gray-600" style={{ margin: "0 0 6px" }}>{note || (props.hasSaved ? `Version remplie déjà enregistrée : ${props.savedName || "contrat.pdf"}` : "Remplissez les cases directement ci-dessous, puis enregistrez.")}</p>
+    <div style={{ height: props.viewerHeight, minHeight: 0 }}>
+      {!failure && bytes && <FillablePdfViewer key={`${workerIndex}-${reload}`} ref={viewerRef} pdfBytes={bytes} restoreSavedStyle={props.hasSaved && reload === 0} onError={(message) => setFailure(message)} />}
+      {!failure && !bytes && <p style={{ cursor: "progress" }}>Préparation du contrat…</p>}
+      {failure && <div className="simpleCardMuted"><p className="text-sm">Ce contrat n’a pas pu être affiché : {failure}</p></div>}
+    </div>
+  </div>;
+}
+
 export default function SubmissionDossierManager({ tenderId, tenderReference, tenderLocation, tenderClientName, tenderExecutionPeriodDays, tenderEstimatedAmount, estimateId, organizationId, daoUrl, detectedItems }: { tenderId: string; tenderReference: string; tenderLocation: string; tenderClientName: string; tenderExecutionPeriodDays: number | null; tenderEstimatedAmount: number | null; estimateId: string | null; organizationId: string; daoUrl: string | null; detectedItems: TemplateDetectedItem[] }) {
   const scope = estimateId ? `?estimateId=${encodeURIComponent(estimateId)}` : "";
   const storageKey = `submission-dossier:${tenderId}:${estimateId ?? "master"}`;
   // The first browser render must match SSR. Restore local data only after hydration.
   const [profile, setProfile] = useState<Record<string, string>>({});
   const [items, setItems] = useState<Item[]>(() => deduplicate(detectedItems));
+  // Dernière liste connue, mise à jour tout de suite à chaque modification : plusieurs enregistrements de contrats de
+  // suite ne s'écrasent pas entre eux.
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
   const [message, setMessage] = useState("Chargement du dossier…");
   const [linkedDocuments, setLinkedDocuments] = useState<Array<{ estimateId: string; fileName: string | null; updatedAt: string | null; url: string | null }>>([]);
   const [today, setToday] = useState("");
@@ -252,7 +351,16 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   // remplir dans l'appli — l'utilisateur les remplit désormais lui-même
   // dans sa propre application PDF. Un index d'item (pas l'item lui-même)
   // pour toujours lire la version la plus à jour de items[] au moment du clic.
-  const [actionsForIndex, setActionsForIndex] = useState<number | null>(null);
+  const [actionsForIndexState, setActionsForIndexState] = useState<number | null>(null);
+  // Contrats individuels : only = null → TOUS les contrats (bouton rouge) ; only = n → le contrat de la personne n (bouton vert).
+  const [contractPanel, setContractPanel] = useState<{ itemIndex: number; only: number | null } | null>(null);
+  const actionsForIndex = actionsForIndexState;
+  // Une seule fenêtre ouverte à la fois : en ouvrir une referme l'autre.
+  const setActionsForIndex = (value: number | null | ((current: number | null) => number | null)) => {
+    if (typeof value === "number") setContractPanel(null);
+    setActionsForIndexState(value);
+  };
+  const contractSavers = useRef<Map<number, () => Promise<boolean>>>(new Map());
   // Octets du PDF, DÉJÀ téléchargés par fetchAndValidatePdf (la même fonction
   // déjà utilisée ailleurs dans ce fichier), donnés tels quels au lecteur
   // intégré (FillablePdfViewer) : celui-ci n'a alors plus AUCUNE requête
@@ -388,6 +496,11 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     const timer = window.setTimeout(() => document.getElementById(`dossier-panel-${actionsForIndex}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 150);
     return () => window.clearTimeout(timer);
   }, [actionsForIndex, isPhone]);
+  useEffect(() => {
+    if (isPhone || !contractPanel) return;
+    const timer = window.setTimeout(() => document.getElementById(`dossier-contracts-${contractPanel.itemIndex}-${contractPanel.only ?? "all"}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 150);
+    return () => window.clearTimeout(timer);
+  }, [contractPanel, isPhone]);
 
   function scheduleSave(nextProfile: Record<string, string>, nextItems: Item[]) {
     window.localStorage.setItem(storageKey, JSON.stringify({ profile: nextProfile, items: nextItems }));
@@ -637,13 +750,6 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     void openPdfDirectly(`pdf:${item.title}`, item.title, documentUrl, items.indexOf(item), true);
   }
 
-  function openWorkerContract(item: Item, workerIndex: number) {
-    const query = new URLSearchParams({ title: item.title, kind: item.kind, workerIndex: String(workerIndex), sourceReference: item.source_reference || "" });
-    if (estimateId) query.set("estimateId", estimateId);
-    const documentUrl = `/api/tenders/${tenderId}/printable-submission-document?${query}`;
-    void openPdfDirectly(`pdf:${item.title}:${workerIndex}`, item.title, documentUrl, items.indexOf(item), false);
-  }
-
   // Même construction d'URL utilisée partout où on va chercher LE PDF d'une
   // pièce précise (fenêtre de remplissage intégrée, solution de secours par
   // onglet/téléchargement) : un seul endroit à corriger si jamais un
@@ -823,6 +929,141 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     } finally {
       setPendingAction((current) => current === key ? null : current);
     }
+  }
+
+  // ---- Contrats individuels de travail (un PDF par personnel) ----
+  function patchItem(index: number, patch: (current: Item) => Partial<Item>) {
+    const base = itemsRef.current;
+    const current = base[index];
+    if (!current) return;
+    const next = base.map((entry, entryIndex) => entryIndex === index ? { ...entry, ...patch(current) } : entry);
+    itemsRef.current = next;
+    setItems(next);
+    scheduleSave(profile, next);
+  }
+
+  function contractWorkers() {
+    const source = itemsRef.current.find((candidate) => isPersonnelList(candidate));
+    return source ? rosterFor(source, "__personnel") : [];
+  }
+
+  function contractSavedPath(item: Item, workerIndex: number) {
+    return item.form_data[`__filledPdfPath:${workerIndex}`] || (workerIndex === 0 ? item.form_data.__filledPdfPath : "") || "";
+  }
+
+  function contractStoragePath(item: Item, workerIndex: number) {
+    return `${organizationId}/submission/${tenderId}/filled/${estimateId ?? "master"}/${normalize(item.title) || "contrat"}-${workerIndex + 1}.pdf`;
+  }
+
+  async function loadContractBytes(itemIndex: number, workerIndex: number, regenerate: boolean) {
+    const item = itemsRef.current[itemIndex];
+    if (!item) throw new Error("Pièce introuvable.");
+    const savedPath = regenerate ? "" : contractSavedPath(item, workerIndex);
+    if (savedPath) {
+      const result = await supabase.storage.from("btp-documents").download(savedPath);
+      if (result.error || !result.data) throw result.error instanceof Error ? result.error : new Error("La version déjà enregistrée est introuvable dans le stockage.");
+      return new Uint8Array(await result.data.arrayBuffer());
+    }
+    const query = new URLSearchParams({ title: item.title, kind: item.kind, workerIndex: String(workerIndex), sourceReference: item.source_reference || "" });
+    if (estimateId) query.set("estimateId", estimateId);
+    if (regenerate) query.set("regenerate", "1");
+    const pdf = await fetchAndValidatePdf(`/api/tenders/${tenderId}/printable-submission-document?${query}`);
+    return new Uint8Array(await pdf.arrayBuffer());
+  }
+
+  async function saveContractBytes(itemIndex: number, workerIndex: number, bytes: Uint8Array) {
+    const item = itemsRef.current[itemIndex];
+    if (!item) throw new Error("Pièce introuvable.");
+    const path = contractStoragePath(item, workerIndex);
+    const fileName = `${normalize(item.title) || "contrat"}-${workerIndex + 1}.pdf`;
+    // Même chemin fixe pour le bouton rouge et le bouton vert : chaque enregistrement remplace le précédent.
+    const upload = await supabase.storage.from("btp-documents").upload(path, new Blob([new Uint8Array(bytes)], { type: "application/pdf" }), { upsert: true, contentType: "application/pdf", cacheControl: "0" });
+    if (upload.error) throw new Error(`Envoi impossible : ${upload.error.message}`);
+    const workerCount = contractWorkers().length;
+    patchItem(itemIndex, (current) => {
+      const formData = { ...current.form_data, [`__filledPdfPath:${workerIndex}`]: path, [`__filledPdfName:${workerIndex}`]: fileName };
+      const everyoneSaved = workerCount > 0 && Array.from({ length: workerCount }, (_, index) => index).every((index) => Boolean(formData[`__filledPdfPath:${index}`] || (index === 0 && formData.__filledPdfPath)));
+      if (everyoneSaved) formData.__readyAt = new Date().toISOString();
+      return everyoneSaved ? { form_data: formData, status: "ready" } : { form_data: formData };
+    });
+  }
+
+  function regenerateContract(itemIndex: number, workerIndex: number) {
+    patchItem(itemIndex, (current) => {
+      const formData = { ...current.form_data };
+      delete formData[`__filledPdfPath:${workerIndex}`];
+      delete formData[`__filledPdfName:${workerIndex}`];
+      if (workerIndex === 0) { delete formData.__filledPdfPath; delete formData.__filledPdfName; }
+      return { form_data: formData };
+    });
+  }
+
+  function printContract(itemIndex: number, workerIndex: number, bytes: Uint8Array) {
+    const item = itemsRef.current[itemIndex];
+    const worker = contractWorkers()[workerIndex];
+    showPdfInModal(`${item?.title ?? "Contrat"} — ${worker?.name || `Personnel ${workerIndex + 1}`}`, new Blob([new Uint8Array(bytes)], { type: "application/pdf" }), itemIndex, false);
+  }
+
+  async function saveContracts(workerIndexes: number[]) {
+    const key = "contracts-save";
+    setPendingAction(key);
+    setMessage("Enregistrement des contrats…");
+    try {
+      let saved = 0;
+      for (const workerIndex of workerIndexes) {
+        const save = contractSavers.current.get(workerIndex);
+        if (save && await save()) saved += 1;
+      }
+      if (saved === workerIndexes.length) {
+        setMessage(saved > 1 ? "Tous les contrats sont enregistrés." : "Contrat enregistré.");
+        setContractPanel(null);
+      } else {
+        setMessage(`${saved} contrat(s) enregistré(s) sur ${workerIndexes.length} : vérifiez les messages sous chaque contrat.`);
+      }
+    } finally {
+      setPendingAction((current) => current === key ? null : current);
+    }
+  }
+
+  // Fenêtre des contrats : toutes les personnes (only = null, bouton rouge) ou une seule (bouton vert).
+  // Ordinateur : sous le bouton ; téléphone : fenêtre comme avant.
+  function renderContractPanel(itemIndex: number, only: number | null, inline: boolean) {
+    const item = items[itemIndex];
+    if (!item) return null;
+    const workers = contractWorkers();
+    const indexes = only !== null ? [only] : workers.map((_, index) => index);
+    const saving = pendingAction === "contracts-save";
+    const multiple = indexes.length > 1;
+    const title = only !== null ? `${item.title} — ${workers[only]?.name || `Personnel ${only + 1}`}` : `${item.title} (${indexes.length} contrat${indexes.length > 1 ? "s" : ""})`;
+    const content = <>
+      <div style={{ flex: "0 0 auto", display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+        <h2 style={{ margin: 0, fontWeight: 800, fontSize: "1.125rem", minWidth: 0, overflowWrap: "anywhere", flex: "1 1 220px" }}>{title}</h2>
+        <div style={{ display: "flex", gap: 8, flex: "0 0 auto", flexWrap: "wrap" }}>
+          {indexes.length > 0 && <button type="button" className="tenderButton tenderButtonPrimary" disabled={saving} onClick={() => void saveContracts(indexes)}><ButtonLabel loading={saving} label={multiple ? "Enregistrer tout" : "Enregistrer"} loadingLabel="Envoi…" /></button>}
+          <button type="button" className="tenderButton" onClick={() => setContractPanel(null)}>Fermer</button>
+        </div>
+      </div>
+      {indexes.length === 0 && <p className="text-sm text-amber-700">Ajoutez d’abord le personnel affecté au chantier dans la liste ci-dessus.</p>}
+      <div style={inline ? undefined : { flex: "1 1 auto", minHeight: 0, overflowY: "auto" }}>
+        {indexes.map((workerIndex) => <div key={workerIndex} style={multiple ? { borderTop: "1px solid #e1ece4", paddingTop: 6, marginTop: 14 } : undefined}>
+          <WorkerContractEditor
+            workerIndex={workerIndex}
+            label={workers[workerIndex]?.name ? `${workers[workerIndex].name}${workers[workerIndex].role ? ` — ${workers[workerIndex].role}` : ""}` : `Personnel ${workerIndex + 1}`}
+            showTitle={multiple}
+            viewerHeight={inline ? "min(80vh, 950px)" : "68vh"}
+            hasSaved={Boolean(contractSavedPath(item, workerIndex))}
+            savedName={item.form_data[`__filledPdfName:${workerIndex}`] || null}
+            loadBytes={(index, regenerate) => loadContractBytes(itemIndex, index, regenerate)}
+            onSave={(index, bytes) => saveContractBytes(itemIndex, index, bytes)}
+            onPrint={(index, bytes) => printContract(itemIndex, index, bytes)}
+            onRegenerate={(index) => regenerateContract(itemIndex, index)}
+            register={(index, save) => { if (save) contractSavers.current.set(index, save); else contractSavers.current.delete(index); }}
+          />
+        </div>)}
+      </div>
+    </>;
+    if (inline) return <div id={`dossier-contracts-${itemIndex}-${only ?? "all"}`} style={{ marginTop: 12, border: "1px solid #e1ece4", borderRadius: 12, padding: 10, background: "#fff" }}>{content}</div>;
+    return createPortal(<div className="modalBackdrop" onClick={() => setContractPanel(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(900px,95vw)", height: "88vh", display: "flex", flexDirection: "column" }}>{content}</div></div>, document.body);
   }
 
   async function openReadingDocument(anchor: number | null = null) {
@@ -1182,6 +1423,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     if (isPhone) return null;
     return <>
       {actionsForIndex === index && renderActionsPanel(index, true)}
+      {contractPanel?.itemIndex === index && contractPanel.only === null && renderContractPanel(index, null, true)}
       {viewingPdf && viewingPdf.anchor === index && renderPreview(true)}
     </>;
   }
@@ -1197,7 +1439,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     // Imprimer, demandé par Maxime pour remplacer les différents boutons
     // "Ouvrir le PDF..." dispersés dans chaque carte — voir le modal
     // actionsForIndex plus bas, tout en bas du fichier.
-    const openButton = <button type="button" className={`tenderButton ${ready ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => setActionsForIndex(index)}>Ouvrir{ready ? " ✓" : ""}</button>;
+    const openButton = <button type="button" className={`tenderButton ${ready ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => { if (isWorkerContract(item)) { setActionsForIndexState(null); setContractPanel({ itemIndex: index, only: null }); } else setActionsForIndex(index); }}>Ouvrir{ready ? " ✓" : ""}</button>;
     if (isAiGenerated(item)) {
       return <article key={`${item.kind}-${normalize(item.title)}-${index}`} className="simpleCard">
         <strong>{item.title}</strong>
@@ -1292,7 +1534,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
           </div>}
           <button type="button" className="tenderButton mt-2" onClick={() => updateRoster(index, rosterKey, roster.filter((_, currentIndex) => currentIndex !== rosterIndex))}>Retirer cette ligne</button>
         </div>)}<button type="button" className="tenderButton tenderButtonPrimary" style={{ justifySelf: "start" }} onClick={() => updateRoster(index, rosterKey, [...roster, { name: "", role: "", qualification: "", experience: "", identity: "", address: "", salary: "" }])}>+ Ajouter {personnel ? "un personnel" : "un matériel"}</button></div>}
-        {workerContract && <div className="mt-3 grid gap-3">{!personnelRoster.length && <p className="text-sm text-amber-700">Ajoutez d’abord le personnel affecté au chantier dans la liste ci-dessus.</p>}{personnelRoster.map((worker, workerIndex) => <div key={workerIndex} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-gray-50 p-3"><span><strong>{worker.name || "Personnel sans nom"}</strong>{worker.role ? ` — ${worker.role}` : ""}</span><button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `pdf:${item.title}:${workerIndex}`} onClick={() => openWorkerContract(item, workerIndex)}><ButtonLabel loading={pendingAction === `pdf:${item.title}:${workerIndex}`} label="Ouvrir le contrat PDF" /></button></div>)}</div>}
+        {workerContract && <div className="mt-3 grid gap-3">{!personnelRoster.length && <p className="text-sm text-amber-700">Ajoutez d’abord le personnel affecté au chantier dans la liste ci-dessus.</p>}{personnelRoster.map((worker, workerIndex) => <div key={workerIndex}><div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-gray-50 p-3"><span><strong>{worker.name || "Personnel sans nom"}</strong>{worker.role ? ` — ${worker.role}` : ""}</span><button type="button" className="tenderButton tenderButtonPrimary" onClick={() => { setActionsForIndexState(null); setContractPanel({ itemIndex: index, only: workerIndex }); }}>Ouvrir le contrat PDF</button></div>{!isPhone && contractPanel?.itemIndex === index && contractPanel.only === workerIndex && renderContractPanel(index, workerIndex, true)}</div>)}</div>}
         {!item.fields.length && !personnel && !material && !workerContract && <p className="mt-3 text-sm text-amber-700">Aucune valeur n’a été identifiée à préremplir. Le PDF à imprimer reprend néanmoins le document demandé et doit être vérifié avant signature.</p>}
       </>}
       <div className="buttonRow" style={{ marginBottom: 0, marginTop: 12 }}>
@@ -1436,7 +1678,8 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   </main>
   {/* Téléphone : mêmes fenêtres qu'avant (rien ne change). Ordinateur : tout
       s'affiche sous le bouton de la pièce (voir cardExtras). */}
-  {isPhone && viewingPdf && typeof document !== "undefined" && renderPreview(false)}
   {isPhone && actionsForIndex !== null && items[actionsForIndex] && typeof document !== "undefined" && renderActionsPanel(actionsForIndex, false)}
+  {isPhone && contractPanel && items[contractPanel.itemIndex] && typeof document !== "undefined" && renderContractPanel(contractPanel.itemIndex, contractPanel.only, false)}
+  {isPhone && viewingPdf && typeof document !== "undefined" && renderPreview(false)}
   </>;
 }
