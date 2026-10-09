@@ -3,9 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { isPhoneDevice } from "@/lib/is-phone-device";
+import ConfirmSaveDialog from "@/components/ConfirmSaveDialog";
+import { findSavedEstimatePdf, openSavedEstimatePdf, rememberSavedEstimatePdf, type SavedPdfInfo } from "@/components/estimates/savedPdf";
 
 export default function OfficialPdfButton({ estimateId, mode = "external" }: { estimateId: string; mode?: "external" | "internal" }) {
-  const [working, setWorking] = useState<"preview" | "save" | null>(null);
+  const [working, setWorking] = useState<"preview" | "save" | "open" | null>(null);
   const [previewReady, setPreviewReady] = useState(false);
   const [message, setMessage] = useState("");
   // Ordinateur : l'aperçu s'affiche DANS la carte, juste sous les boutons (aucune nouvelle fenêtre) ; bouton « Fermer » pour le masquer.
@@ -13,6 +15,23 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
   const [showInline, setShowInline] = useState(false);
   const [phone, setPhone] = useState(false);
   useEffect(() => { setPhone(isPhoneDevice() || window.matchMedia("(max-width: 640px)").matches); }, []);
+  // PDF déjà enregistré pour ce devis (une toute petite requête, aucun fichier téléchargé) : « Ouvrir » le rouvre directement,
+  // sans « Prévisualiser » et sans refabrication.
+  const [saved, setSaved] = useState<SavedPdfInfo | null>(null);
+  // Le PDF affiché est la version ENREGISTRÉE (et non un nouvel aperçu pas encore enregistré).
+  const [shownIsSaved, setShownIsSaved] = useState(false);
+  const [closePrompt, setClosePrompt] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    findSavedEstimatePdf(estimateId, mode).then((info) => { if (!cancelled) setSaved(info); }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [estimateId, mode]);
+  useEffect(() => {
+    if (!working) return;
+    const previous = document.body.style.cursor;
+    document.body.style.cursor = "wait";
+    return () => { document.body.style.cursor = previous; };
+  }, [working]);
 
   async function authenticatedHeaders(): Promise<Record<string, string>> {
     const { data: { session } } = await createClient().auth.getSession();
@@ -93,6 +112,7 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
       previewUrlRef.current = url;
       setPreviewUrl(url);
       setPreviewReady(true);
+      setShownIsSaved(false);
       setShowInline(!phone);
       setMessage(phone
         ? "Aperçu prêt. Touchez « Ouvrir l’aperçu PDF » pour l’afficher en plein écran."
@@ -105,21 +125,52 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
     }
   }
 
-  function openPreviewPdf() {
-    if (!previewReady || !previewUrl) {
-      setMessage("Préparez d’abord l’aperçu PDF.");
+  async function openPreviewPdf() {
+    if (working) return;
+    // 1) Un nouvel aperçu (pas encore enregistré) ou le PDF enregistré déjà chargé : on le réaffiche, rien n'est refait.
+    if (previewUrl && (previewReady || shownIsSaved)) {
+      if (!phone) { setShowInline(true); return; }
+      const opened = window.open(previewUrl, "_blank");
+      if (!opened) setMessage("Le navigateur a bloqué la fenêtre PDF. Autorisez les fenêtres surgissantes puis réessayez.");
+      else setMessage("PDF ouvert dans le lecteur PDF du téléphone.");
       return;
     }
-    // Aucune nouvelle fabrication : on réaffiche le PDF déjà créé, dans la carte (ordinateur) ou plein écran (téléphone).
-    if (!phone) { setShowInline(true); return; }
-    const opened = window.open(previewUrl, "_blank");
-    if (!opened) setMessage("Le navigateur a bloqué la fenêtre PDF. Autorisez les fenêtres surgissantes puis réessayez.");
-    else setMessage("Aperçu ouvert dans le lecteur PDF du téléphone.");
+    // 2) Un PDF est déjà enregistré : on l'ouvre tel quel (téléchargé une seule fois par visite).
+    if (!saved) { setMessage("Préparez d’abord l’aperçu PDF."); return; }
+    const phoneWindow = phone ? openPreviewWindow() : null;
+    if (phone && !phoneWindow) return;
+    setWorking("open");
+    setMessage("Ouverture du PDF enregistré…");
+    const result = await openSavedEstimatePdf(estimateId, mode, saved);
+    setWorking(null);
+    if ("error" in result) {
+      phoneWindow?.close();
+      setMessage(result.error);
+      return;
+    }
+    if (phoneWindow) {
+      phoneWindow.location.replace(result.url);
+      window.setTimeout(() => URL.revokeObjectURL(result.url), 60 * 60 * 1000);
+      setMessage("PDF enregistré ouvert dans le lecteur PDF du téléphone.");
+      return;
+    }
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    previewUrlRef.current = result.url;
+    setPreviewUrl(result.url);
+    setShownIsSaved(true);
+    setShowInline(true);
+    setMessage(`PDF enregistré${saved.createdAt ? ` le ${new Date(saved.createdAt).toLocaleDateString("fr-FR")}` : ""}. Pour le mettre à jour : « Prévisualiser », puis « Confirmer et enregistrer ».`);
   }
 
-  async function savePdf() {
+  // « Fermer » : si un nouvel aperçu n'a pas encore été enregistré, on demande d'abord (Enregistrer / Ne pas enregistrer / Continuer).
+  function closeInline() {
+    if (previewReady && !shownIsSaved) { setClosePrompt(true); return; }
+    setShowInline(false);
+  }
+
+  async function savePdf(skipConfirm = false, closeAfter = false) {
     if (working || !previewReady) return;
-    const confirmed = window.confirm(
+    const confirmed = skipConfirm || window.confirm(
       `Enregistrer ce ${mode === "internal" ? "PDF interne" : "PDF de soumission"} ? L’ancienne version sera remplacée.`,
     );
     if (!confirmed) {
@@ -134,7 +185,9 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
         const preview = openPreviewWindow();
         if (!preview) return;
         try {
-          showPdf(preview, await requestPdf(true));
+          const savedBase64 = await requestPdf(true);
+          showPdf(preview, savedBase64);
+          void rememberSavedEstimatePdf(estimateId, mode, new Blob([Uint8Array.from(atob(savedBase64), (character) => character.charCodeAt(0))], { type: "application/pdf" })).then((info) => { if (info) setSaved(info); });
         } catch (error) {
           const detail = error instanceof Error ? error.message : "Ouverture du PDF impossible.";
           preview.document.title = "PDF indisponible";
@@ -144,12 +197,15 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
         setPreviewReady(false);
       } else {
         // Ordinateur : le PDF enregistré remplace l'aperçu, dans la carte (pas de nouvelle fenêtre).
-        const url = blobUrlFrom(await requestPdf(true));
+        const savedBase64 = await requestPdf(true);
+        const url = blobUrlFrom(savedBase64);
         if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
         previewUrlRef.current = url;
         setPreviewUrl(url);
-        setShowInline(true);
+        setShowInline(!closeAfter);
         setPreviewReady(false);
+        setShownIsSaved(true);
+        void rememberSavedEstimatePdf(estimateId, mode, new Blob([Uint8Array.from(atob(savedBase64), (character) => character.charCodeAt(0))], { type: "application/pdf" })).then((info) => { if (info) setSaved(info); });
       }
       setMessage(`PDF enregistré. Il remplace l’ancienne version de ce type de devis.${await finishProjectUpdate()}`);
     } catch (error) {
@@ -179,21 +235,22 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
       </button>
       <button
         type="button"
-        onClick={openPreviewPdf}
-        disabled={!previewReady || Boolean(working)}
+        onClick={() => void openPreviewPdf()}
+        disabled={(!previewReady && !saved && !shownIsSaved) || Boolean(working)}
+        aria-busy={working === "open"}
         style={{
           border: "1px solid #0f766e", borderRadius: 6, padding: "9px 14px",
-          background: previewReady && !working ? "#0f766e" : "#ccfbf1",
-          color: previewReady && !working ? "white" : "#115e59",
-          cursor: previewReady && !working ? "pointer" : "not-allowed", fontWeight: 700,
+          background: (previewReady || saved || shownIsSaved) && !working ? "#0f766e" : "#ccfbf1",
+          color: (previewReady || saved || shownIsSaved) && !working ? "white" : "#115e59",
+          cursor: working ? "wait" : (previewReady || saved || shownIsSaved) ? "pointer" : "not-allowed", fontWeight: 700,
         }}
       >
-        Ouvrir l’aperçu PDF
+        {working === "open" ? "Ouverture…" : !previewReady && (saved || shownIsSaved) ? "Ouvrir le PDF enregistré" : "Ouvrir l’aperçu PDF"}
       </button>
       {previewReady && (
         <button
           type="button"
-          onClick={savePdf}
+          onClick={() => void savePdf()}
           disabled={Boolean(working)}
           aria-busy={working === "save"}
           style={{
@@ -207,7 +264,7 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
         </button>
       )}
       {!phone && showInline && previewUrl && (
-        <button type="button" onClick={() => setShowInline(false)} style={{ border: "1px solid #6b7280", borderRadius: 6, padding: "9px 14px", background: "#fff", color: "#374151", cursor: "pointer", fontWeight: 700 }}>
+        <button type="button" onClick={closeInline} style={{ border: "1px solid #6b7280", borderRadius: 6, padding: "9px 14px", background: "#fff", color: "#374151", cursor: "pointer", fontWeight: 700 }}>
           Fermer
         </button>
       )}
@@ -222,6 +279,13 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
         </div>
       )}
       {message && <small role="status" style={{ flexBasis: "100%", color: hasError ? "#b91c1c" : "#166534", maxWidth: "min(720px, 100%)", overflowWrap: "anywhere" }}>{message}</small>}
+      {closePrompt && <ConfirmSaveDialog
+        message={`Ce ${mode === "internal" ? "PDF interne" : "PDF de soumission"} vient d’être prévisualisé mais n’est pas encore enregistré. Voulez-vous l’enregistrer avant de fermer ?`}
+        busy={working === "save"}
+        onSave={() => { setClosePrompt(false); void savePdf(true, true); }}
+        onDiscard={() => { setClosePrompt(false); setShowInline(false); }}
+        onCancel={() => setClosePrompt(false)}
+      />}
       {!phone && showInline && previewUrl && (
         <div style={{ flexBasis: "100%", minWidth: 0 }}>
           <iframe src={previewUrl} title={mode === "internal" ? "Aperçu du devis interne" : "Aperçu du devis externe"} style={{ width: "100%", height: "70vh", minHeight: 420, border: "1px solid #b8d7c0", borderRadius: 8, background: "#fff" }} />

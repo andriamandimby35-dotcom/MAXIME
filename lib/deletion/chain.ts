@@ -150,6 +150,8 @@ export async function deleteProjectChain(ctx: DeletionContext, projectId: string
   //    fonction dédiée qui neutralise le verrou "modification le jour même".
   const { error } = await ctx.supabase.rpc("admin_delete_project", { p_project_id: projectId });
   if (error) return fail(`Suppression du chantier impossible : ${error.message}`);
+  // PDF enregistrés de ce devis importé (interne et externe) : supprimés avec lui (au mieux, sans bloquer).
+  await admin.storage.from("estimate-pdfs").remove([`${org}/${projectId}/internal-pdf/devis.pdf`, `${org}/${projectId}/external-pdf/devis.pdf`]).catch(() => undefined);
   return { ok: true, archived: paidIds.length };
 }
 

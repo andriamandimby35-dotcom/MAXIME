@@ -8,6 +8,8 @@ import { parsePageNumbersFromReference } from "@/lib/submission/parse-page-refer
 import { buildDossierRecordsForInsert, type TemplateTable } from "@/lib/submission/build-dossier-items";
 import { toFriendlyPdfError } from "@/lib/submission/friendly-pdf-error";
 import { isPhoneDevice } from "@/lib/is-phone-device";
+import ConfirmSaveDialog from "@/components/ConfirmSaveDialog";
+import { openSavedEstimatePdf } from "@/components/estimates/savedPdf";
 import FillablePdfViewer, { type FillablePdfViewerHandle } from "@/components/tenders/FillablePdfViewer";
 import { resolveKnownFieldValue, isGuaranteeBankIdentityTitle } from "@/lib/submission/resolve-known-field-value";
 
@@ -242,7 +244,7 @@ type ContractEditorProps = {
   onSave: (workerIndex: number, bytes: Uint8Array) => Promise<void>;
   onPrint: (workerIndex: number, bytes: Uint8Array) => void;
   onRegenerate: (workerIndex: number) => void;
-  register: (workerIndex: number, save: (() => Promise<boolean>) | null) => void;
+  register: (workerIndex: number, handle: { save: () => Promise<boolean>; modified: () => boolean } | null) => void;
 };
 
 function WorkerContractEditor(props: ContractEditorProps) {
@@ -292,7 +294,7 @@ function WorkerContractEditor(props: ContractEditorProps) {
   const saveRef = useRef(saveNow);
   saveRef.current = saveNow;
   useEffect(() => {
-    propsRef.current.register(workerIndex, () => saveRef.current());
+    propsRef.current.register(workerIndex, { save: () => saveRef.current(), modified: () => Boolean(viewerRef.current?.isModified()) });
     return () => propsRef.current.register(workerIndex, null);
   }, [workerIndex]);
 
@@ -365,7 +367,9 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     if (typeof value === "number") setContractPanel(null);
     setActionsForIndexState(value);
   };
-  const contractSavers = useRef<Map<number, () => Promise<boolean>>>(new Map());
+  const contractSavers = useRef<Map<number, { save: () => Promise<boolean>; modified: () => boolean }>>(new Map());
+  // Fermeture d'un PDF modifié : demande « Enregistrer ? » (Enregistrer / Ne pas enregistrer / Continuer à modifier).
+  const [closePrompt, setClosePrompt] = useState<{ kind: "actions"; index: number } | { kind: "contracts"; indexes: number[] } | null>(null);
   // Octets du PDF, DÉJÀ téléchargés par fetchAndValidatePdf (la même fonction
   // déjà utilisée ailleurs dans ce fichier), donnés tels quels au lecteur
   // intégré (FillablePdfViewer) : celui-ci n'a alors plus AUCUNE requête
@@ -707,6 +711,15 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     setMessage("Préparation du BDQE…");
     const nativeTab = isPhoneDevice() ? window.open("", "_blank") : null;
     try {
+      // BDQE déjà enregistré avec le devis : on l'ouvre tel quel (téléchargé une seule fois par visite), sans le refaire.
+      const savedPdf = await openSavedEstimatePdf(officialEstimateId, "external");
+      if (!("error" in savedPdf)) {
+        const savedBlob = await (await fetch(savedPdf.url)).blob();
+        URL.revokeObjectURL(savedPdf.url);
+        openPdfPreferringNativeTab(nativeTab, "BDQE", savedBlob, "bdqe");
+        setMessage("");
+        return;
+      }
       const { data: { session } } = await supabase.auth.getSession();
       const response = await fetch(`/api/estimates/${officialEstimateId}/official-pdf`, {
         method: "POST",
@@ -1113,6 +1126,15 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     showPdfInModal(`${item?.title ?? "Contrat"} — ${worker?.name || `Personnel ${workerIndex + 1}`}`, new Blob([new Uint8Array(bytes)], { type: "application/pdf" }), itemIndex, false);
   }
 
+  function requestCloseActions(index: number) {
+    if (fillablePdfViewerRef.current?.isModified()) setClosePrompt({ kind: "actions", index });
+    else setActionsForIndex(null);
+  }
+  function requestCloseContracts(indexes: number[]) {
+    if (indexes.some((workerIndex) => contractSavers.current.get(workerIndex)?.modified())) setClosePrompt({ kind: "contracts", indexes });
+    else setContractPanel(null);
+  }
+
   async function saveContracts(workerIndexes: number[]) {
     const key = "contracts-save";
     setPendingAction(key);
@@ -1120,7 +1142,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     try {
       let saved = 0;
       for (const workerIndex of workerIndexes) {
-        const save = contractSavers.current.get(workerIndex);
+        const save = contractSavers.current.get(workerIndex)?.save;
         if (save && await save()) saved += 1;
       }
       if (saved === workerIndexes.length) {
@@ -1149,7 +1171,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
         <h2 style={{ margin: 0, fontWeight: 800, fontSize: "1.125rem", minWidth: 0, overflowWrap: "anywhere", flex: "1 1 220px" }}>{title}</h2>
         <div style={{ display: "flex", gap: 8, flex: "0 0 auto", flexWrap: "wrap" }}>
           {indexes.length > 0 && <button type="button" className="tenderButton tenderButtonPrimary" disabled={saving} onClick={() => void saveContracts(indexes)}><ButtonLabel loading={saving} label={multiple ? "Enregistrer tout" : "Enregistrer"} loadingLabel="Envoi…" /></button>}
-          <button type="button" className="tenderButton" onClick={() => setContractPanel(null)}>Fermer</button>
+          <button type="button" className="tenderButton" onClick={() => requestCloseContracts(indexes)}>Fermer</button>
         </div>
       </div>
       {indexes.length === 0 && <p className="text-sm text-amber-700">Ajoutez d’abord le personnel affecté au chantier dans la liste ci-dessus.</p>}
@@ -1166,13 +1188,13 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
             onSave={(index, bytes) => saveContractBytes(itemIndex, index, bytes)}
             onPrint={(index, bytes) => printContract(itemIndex, index, bytes)}
             onRegenerate={(index) => regenerateContract(itemIndex, index)}
-            register={(index, save) => { if (save) contractSavers.current.set(index, save); else contractSavers.current.delete(index); }}
+            register={(index, handle) => { if (handle) contractSavers.current.set(index, handle); else contractSavers.current.delete(index); }}
           />
         </div>)}
       </div>
     </>;
     if (inline) return <div id={`dossier-contracts-${itemIndex}-${only ?? "all"}`} style={{ marginTop: 12, border: "1px solid #e1ece4", borderRadius: 12, padding: 10, background: "#fff" }}>{content}</div>;
-    return createPortal(<div className="modalBackdrop" onClick={() => setContractPanel(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(900px,95vw)", height: "88vh", display: "flex", flexDirection: "column" }}>{content}</div></div>, document.body);
+    return createPortal(<div className="modalBackdrop" onClick={() => requestCloseContracts(indexes)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(900px,95vw)", height: "88vh", display: "flex", flexDirection: "column" }}>{content}</div></div>, document.body);
   }
 
   async function openReadingDocument(anchor: number | null = null) {
@@ -1489,7 +1511,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
           {!fillableViewerFailed && <button type="button" className="tenderButton tenderButtonPrimary" disabled={saving} onClick={() => void saveFilledPdfFromViewer(index, item)}><ButtonLabel loading={saving} label="Enregistrer" loadingLabel="Envoi…" /></button>}
           {showPrint && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Imprimer" /></button>}
           <button type="button" className="tenderButton" disabled={regenerating} title="Refabrique ce document depuis le DAO, en ignorant toute version déjà enregistrée (utile si le contenu affiché semble périmé)." onClick={() => void regenerateFilledPdf(index, item)}><ButtonLabel loading={regenerating} label="Régénérer" loadingLabel="Régénération…" /></button>
-          <button type="button" className="tenderButton" onClick={() => setActionsForIndex(null)}>Fermer</button>
+          <button type="button" className="tenderButton" onClick={() => requestCloseActions(index)}>Fermer</button>
         </div>
       </div>
       <p className="text-sm text-gray-600" style={{ flex: "0 0 auto", marginTop: 0 }}>{hasFilledVersion(item) ? `Version remplie déjà enregistrée : ${filledName || "document.pdf"}` : "Remplissez les cases directement ci-dessous, puis cliquez sur « Enregistrer »."}</p>
@@ -1522,7 +1544,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       </div>
     </>;
     if (inline) return <div id={`dossier-panel-${index}`} style={{ marginTop: 12, height: "min(88vh, 1100px)", display: "flex", flexDirection: "column", border: "1px solid #e1ece4", borderRadius: 12, padding: 10, background: "#fff" }}>{content}</div>;
-    return createPortal(<div className="modalBackdrop" onClick={() => setActionsForIndex(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(900px,95vw)", height: "88vh", display: "flex", flexDirection: "column" }}>{content}</div></div>, document.body);
+    return createPortal(<div className="modalBackdrop" onClick={() => requestCloseActions(index)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(900px,95vw)", height: "88vh", display: "flex", flexDirection: "column" }}>{content}</div></div>, document.body);
   }
 
   // Ce qui s'affiche SOUS les boutons d'une carte sur ordinateur : la fenêtre
@@ -1793,6 +1815,18 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
           <div className="mt-3 grid gap-3">{dossierItems.map((item) => renderDossierCard(item))}</div>
         </section>}
   </main>
+  {closePrompt && <ConfirmSaveDialog
+    message={closePrompt.kind === "actions" ? "Ce PDF a été modifié mais pas encore enregistré. Voulez-vous l’enregistrer avant de fermer ?" : "Un ou plusieurs contrats ont été modifiés mais pas encore enregistrés. Voulez-vous les enregistrer avant de fermer ?"}
+    busy={pendingAction === "contracts-save" || (closePrompt.kind === "actions" && pendingAction === `save:${closePrompt.index}`)}
+    onSave={() => {
+      const prompt = closePrompt;
+      setClosePrompt(null);
+      if (prompt.kind === "actions") { const item = itemsRef.current[prompt.index]; if (item) void saveFilledPdfFromViewer(prompt.index, item); }
+      else void saveContracts(prompt.indexes);
+    }}
+    onDiscard={() => { const prompt = closePrompt; setClosePrompt(null); if (prompt.kind === "actions") setActionsForIndex(null); else setContractPanel(null); }}
+    onCancel={() => setClosePrompt(null)}
+  />}
   {/* Téléphone : mêmes fenêtres qu'avant (rien ne change). Ordinateur : tout
       s'affiche sous le bouton de la pièce (voir cardExtras). */}
   {isPhone && actionsForIndex !== null && items[actionsForIndex] && typeof document !== "undefined" && renderActionsPanel(actionsForIndex, false)}

@@ -7,6 +7,7 @@ import { AddEstimateChooser } from "@/components/estimates/AddEstimateChooser";
 import type { ImportedDevis } from "@/components/estimates/ImportedDevisTable";
 import { confirmDeletion } from "@/components/deletion/confirmDeletion";
 import { fetchDevisPdfUrl, openDevisPdf } from "@/components/estimates/openPdf";
+import { openSavedEstimatePdf, openSavedProjectPdf } from "@/components/estimates/savedPdf";
 import { isPhoneDevice } from "@/lib/is-phone-device";
 import { EstimatePdfFrame } from "@/components/estimates/EstimatePdfFrame";
 
@@ -58,12 +59,27 @@ export function EstimateList({ estimates, imported = [] }: { estimates: Estimate
       return;
     }
     if (pdfBusy) return;
-    setPdfBusy(true); setMessage("Création de l’aperçu PDF…");
+    const label = entry.kind === "dao" ? entry.row.label : entry.row.name;
+    setPdfBusy(true);
+    // Devis déjà enregistré (DAO ou PDF importé) : on ouvre l'enregistrement tel quel (sans le refaire, téléchargé une seule fois par visite).
+    {
+      setMessage("Ouverture du PDF enregistré…");
+      const savedPdf = entry.kind === "dao" ? await openSavedEstimatePdf(entry.id, mode) : await openSavedProjectPdf(entry.id, mode);
+      if (!("error" in savedPdf)) {
+        setPdfBusy(false);
+        setMessage("");
+        setOpenPdfs((current) => {
+          if (current[entry.id]) URL.revokeObjectURL(current[entry.id].url);
+          return { ...current, [entry.id]: { url: savedPdf.url, title: `${mode === "internal" ? "Devis interne" : "Devis externe"} enregistré — ${label}` } };
+        });
+        return;
+      }
+    }
+    setMessage("Création de l’aperçu PDF…");
     const result = await fetchDevisPdfUrl(endpoint, body);
     setPdfBusy(false);
     if ("error" in result) { setMessage(result.error); return; }
     setMessage("");
-    const label = entry.kind === "dao" ? entry.row.label : entry.row.name;
     setOpenPdfs((current) => {
       if (current[entry.id]) URL.revokeObjectURL(current[entry.id].url);
       return { ...current, [entry.id]: { url: result.url, title: `${mode === "internal" ? "Devis interne" : "Devis externe"} — ${label}` } };
