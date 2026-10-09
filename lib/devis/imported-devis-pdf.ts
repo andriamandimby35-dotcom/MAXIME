@@ -353,14 +353,17 @@ export function generateImportedDevisPdf(input: ImportedPdfInput) {
     const SIZE = 8.2;
     const strongLines = block.strong.map((text) => wrap(text, TABLE_WIDTH, SIZE, true));
     const smallLines = block.small.flatMap((text) => wrap(text, TABLE_WIDTH, 7));
-    const needed = 30 + strongLines.reduce((sum, parts) => sum + parts.length * 12 + 6, 0) + 44 + smallLines.length * 9.5 + 10;
-    if (y - needed < BOTTOM + 14) newPage(false, false);
+    // Les petites notes (NB, loi) sont TOUJOURS collées tout en bas de la dernière page (comme l'en-tête, mais en bas).
+    const FOOT_LOW = BOTTOM + 4;
+    const footerTop = FOOT_LOW + smallLines.length * 9.5 + 8;
+    const needed = 30 + strongLines.reduce((sum, parts) => sum + parts.length * 12 + 6, 0) + 44;
+    if (y - needed < footerTop) newPage(false, false);
     y -= 14;
     strongLines.forEach((parts, index) => {
       parts.forEach((part) => { addText(part, LEFT, y - 8, SIZE, true); y -= 12; });
       y -= index === block.strong.length - 2 ? 18 : index === block.strong.length - 1 ? 40 : 6;
     });
-    smallLines.forEach((part) => { addText(part, LEFT, y - 8, 7); y -= 9.5; });
+    smallLines.forEach((part, lineIndex) => addText(part, LEFT, FOOT_LOW + (smallLines.length - 1 - lineIndex) * 9.5, 7));
   }
 
   // Numéros de page « Page X de Y ».

@@ -323,14 +323,14 @@ export function generateProgressClaimPdf(input: SituationPdfInput) {
     y -= 6;
   }
 
+  // Mentions légales : TOUJOURS tout en bas de la dernière page (comme l'en-tête, mais en bas).
   if (input.legalMentions && input.legalMentions.length > 0) {
     const mentionLines = input.legalMentions.flatMap((mention) => wrapText(mention, TABLE_WIDTH, 7));
-    ensureSpace(mentionLines.length * 10 + 16);
-    horizontalLine(y, 0.3); y -= 12;
-    for (const mention of mentionLines) {
-      addText(mention, LEFT, y, 7, false);
-      y -= 10;
-    }
+    const footLow = BOTTOM + 2;
+    const footerTop = footLow + mentionLines.length * 10 + 6;
+    if (y - 4 < footerTop) newPage();
+    horizontalLine(footerTop, 0.3);
+    mentionLines.forEach((mention, lineIndex) => addText(mention, LEFT, footLow + (mentionLines.length - 1 - lineIndex) * 10, 7, false));
   }
 
   const objects: string[] = ["<< /Type /Catalog /Pages 2 0 R >>"];
