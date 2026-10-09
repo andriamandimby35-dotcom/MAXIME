@@ -276,6 +276,11 @@ function WorkerContractEditor(props: ContractEditorProps) {
     setBusy("save");
     setNote("Enregistrement…");
     try {
+      // Déjà enregistré et rien changé : on garde l'ancien (aucun envoi).
+      if (propsRef.current.hasSaved && viewerRef.current && !viewerRef.current.isModified()) {
+        setNote("Aucune modification : version enregistrée conservée.");
+        return true;
+      }
       await propsRef.current.onSave(workerIndex, await readBytes());
       setNote("Enregistré.");
       return true;
@@ -469,15 +474,10 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     // stockage (le message "Version remplie déjà enregistrée" au-dessus du
     // lecteur le prouvait), mais n'était jamais rechargé à l'écran — tout ce
     // qui avait été tapé semblait avoir disparu en rouvrant.
-    const loadPdf: Promise<Blob> = filledPath
-      ? supabase.storage.from("btp-documents").download(filledPath).then((result: { data: Blob | null; error: Error | null }) => {
-        if (result.error || !result.data) throw result.error instanceof Error ? result.error : new Error("La version déjà enregistrée est introuvable dans le stockage.");
-        return result.data;
-      })
-      : fetchAndValidatePdf(printableDocumentUrl(item));
-    loadPdf.then(async (pdf) => {
+    const loadPdf: Promise<Uint8Array> = filledPath ? downloadSavedPdf(filledPath) : fetchGeneratedPdf(printableDocumentUrl(item));
+    loadPdf.then((pdfBytes) => {
       if (cancelled) return;
-      setFillablePdfBytes(new Uint8Array(await pdf.arrayBuffer()));
+      setFillablePdfBytes(pdfBytes);
     }).catch((error) => {
       if (cancelled) return;
       const message = error instanceof Error ? error.message : "Le PDF n’a pas pu être téléchargé.";
@@ -854,6 +854,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       // l'étaient bien (juste pas encore visibles à cause du cache).
       const upload = await supabase.storage.from("btp-documents").upload(path, data, { upsert: true, contentType: "application/pdf", cacheControl: "0" });
       if (upload.error) { setMessage(`Envoi impossible : ${upload.error.message}`); return; }
+      cachePut(`saved:${path}`, new Uint8Array(await data.arrayBuffer()));
       // On repart de la version la plus à jour de cet item (items[index]),
       // pas de "item" capturé avant l'envoi : une modification faite pendant
       // l'upload ne doit jamais être perdue.
@@ -882,6 +883,13 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     setPendingAction(key);
     setMessage("Lecture des cases remplies…");
     try {
+      // Déjà enregistré et rien changé : on garde l'ancien tel quel (aucun envoi) et on referme, comme « Fermer ».
+      if (hasFilledVersion(item) && fillablePdfViewerRef.current && !fillablePdfViewerRef.current.isModified()) {
+        setMessage("Aucune modification : le PDF déjà enregistré est conservé.");
+        setActionsForIndex((current) => current === index ? null : current);
+        setPendingAction((current) => current === key ? null : current);
+        return;
+      }
       const bytes = await fillablePdfViewerRef.current?.getFilledPdfBytes();
       if (!bytes) throw new Error("Le PDF n’est pas encore prêt, réessayez dans un instant.");
       const blob = new Blob([new Uint8Array(bytes)], { type: "application/pdf" });
@@ -919,13 +927,112 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       }
       const query = new URLSearchParams({ title: item.title, kind: item.kind, sourceReference: item.source_reference || "", regenerate: "1" });
       if (estimateId) query.set("estimateId", estimateId);
+      const oldSaved = typeof item.form_data.__filledPdfPath === "string" ? item.form_data.__filledPdfPath : "";
+      if (oldSaved) cacheForget(`saved:${oldSaved}`);
+      cacheForget(`gen:${printableDocumentUrl(item)}`);
       const pdf = await fetchAndValidatePdf(`/api/tenders/${tenderId}/printable-submission-document?${query}`);
-      setFillablePdfBytes(new Uint8Array(await pdf.arrayBuffer()));
+      const regeneratedBytes = new Uint8Array(await pdf.arrayBuffer());
+      cachePut(`gen:${printableDocumentUrl(item)}`, regeneratedBytes);
+      setFillablePdfBytes(regeneratedBytes);
       setMessage("Document régénéré avec la dernière version du modèle.");
     } catch (error) {
       setFillableViewerFailed(true);
       setFillableViewerError(error instanceof Error ? error.message : "Régénération impossible.");
       setMessage(error instanceof Error ? error.message : "Régénération impossible.");
+    } finally {
+      setPendingAction((current) => current === key ? null : current);
+    }
+  }
+
+  // ---- Mémoire des PDF (évite de retélécharger : quota Supabase) ----
+  // Un PDF déjà téléchargé ou enregistré pendant cette visite est gardé en mémoire (80 Mo maximum) : rouvrir, imprimer
+  // ou rouvrir un contrat ne redemande RIEN à Supabase. Les plus anciens sont oubliés les premiers.
+  const pdfCache = useRef<Map<string, Uint8Array>>(new Map());
+  function cacheGet(key: string) { return pdfCache.current.get(key) ?? null; }
+  function cacheForget(key: string) { pdfCache.current.delete(key); }
+  function cachePut(key: string, bytes: Uint8Array) {
+    pdfCache.current.delete(key);
+    let total = bytes.length;
+    pdfCache.current.forEach((value) => { total += value.length; });
+    for (const oldKey of Array.from(pdfCache.current.keys())) {
+      if (total <= 80 * 1024 * 1024) break;
+      total -= pdfCache.current.get(oldKey)?.length ?? 0;
+      pdfCache.current.delete(oldKey);
+    }
+    pdfCache.current.set(key, bytes);
+  }
+  async function downloadSavedPdf(path: string) {
+    const cached = cacheGet(`saved:${path}`);
+    if (cached) return cached;
+    const result = await supabase.storage.from("btp-documents").download(path);
+    if (result.error || !result.data) throw result.error instanceof Error ? result.error : new Error("La version déjà enregistrée est introuvable dans le stockage.");
+    const bytes = new Uint8Array(await result.data.arrayBuffer());
+    cachePut(`saved:${path}`, bytes);
+    return bytes;
+  }
+  async function fetchGeneratedPdf(url: string) {
+    const cached = cacheGet(`gen:${url}`);
+    if (cached) return cached;
+    const pdf = await fetchAndValidatePdf(url);
+    const bytes = new Uint8Array(await pdf.arrayBuffer());
+    cachePut(`gen:${url}`, bytes);
+    return bytes;
+  }
+
+  async function mergePdfBytes(parts: Uint8Array[]) {
+    const { PDFDocument } = await import("pdf-lib");
+    const output = await PDFDocument.create();
+    for (const part of parts) {
+      const source = await PDFDocument.load(part, { ignoreEncryption: true });
+      const pages = await output.copyPages(source, source.getPageIndices());
+      pages.forEach((page) => output.addPage(page));
+    }
+    return await output.save();
+  }
+
+  // Impression directe, sans ouvrir le PDF : lance l'impression du PDF (version enregistrée si elle existe, sinon le document
+  // généré). Plusieurs contrats = un seul document. Téléphone : le PDF s'ouvre dans le lecteur du téléphone (comme avant).
+  async function printItemDirectly(index: number) {
+    const item = itemsRef.current[index];
+    if (!item) return;
+    const key = `print:${index}`;
+    const nativeTab = isPhone || isPhoneDevice() ? window.open("", "_blank") : null;
+    setPendingAction(key);
+    setMessage("Préparation de l’impression…");
+    try {
+      let bytes: Uint8Array;
+      if (isWorkerContract(item)) {
+        const count = contractWorkers().length;
+        if (count === 0) throw new Error("Ajoutez d’abord le personnel affecté au chantier.");
+        const parts: Uint8Array[] = [];
+        for (let workerIndex = 0; workerIndex < count; workerIndex += 1) parts.push(await loadContractBytes(index, workerIndex, false));
+        bytes = parts.length === 1 ? parts[0] : await mergePdfBytes(parts);
+      } else {
+        const savedPath = typeof item.form_data.__filledPdfPath === "string" ? item.form_data.__filledPdfPath : "";
+        bytes = savedPath ? await downloadSavedPdf(savedPath) : await fetchGeneratedPdf(printableDocumentUrl(item));
+      }
+      const blob = new Blob([new Uint8Array(bytes)], { type: "application/pdf" });
+      if (nativeTab) {
+        nativeTab.location.href = URL.createObjectURL(blob);
+      } else {
+        const url = URL.createObjectURL(blob);
+        const frame = document.createElement("iframe");
+        frame.setAttribute("aria-hidden", "true");
+        frame.style.cssText = "position:fixed;right:0;bottom:0;width:1px;height:1px;border:0;opacity:0;pointer-events:none";
+        frame.onload = () => {
+          window.setTimeout(() => {
+            try { frame.contentWindow?.focus(); frame.contentWindow?.print(); }
+            catch { showPdfInModal(item.title, blob, index, false); setMessage("L’impression directe n’a pas démarré : utilisez le bouton Imprimer de l’aperçu ci-dessous."); }
+          }, 700);
+          window.setTimeout(() => { frame.remove(); URL.revokeObjectURL(url); }, 120000);
+        };
+        frame.src = url;
+        document.body.appendChild(frame);
+      }
+      setMessage("");
+    } catch (error) {
+      nativeTab?.close();
+      setMessage(toFriendlyPdfError(error instanceof Error ? error.message : "Le PDF n’a pas pu être préparé."));
     } finally {
       setPendingAction((current) => current === key ? null : current);
     }
@@ -959,16 +1066,17 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     const item = itemsRef.current[itemIndex];
     if (!item) throw new Error("Pièce introuvable.");
     const savedPath = regenerate ? "" : contractSavedPath(item, workerIndex);
-    if (savedPath) {
-      const result = await supabase.storage.from("btp-documents").download(savedPath);
-      if (result.error || !result.data) throw result.error instanceof Error ? result.error : new Error("La version déjà enregistrée est introuvable dans le stockage.");
-      return new Uint8Array(await result.data.arrayBuffer());
-    }
+    if (savedPath) return downloadSavedPdf(savedPath);
     const query = new URLSearchParams({ title: item.title, kind: item.kind, workerIndex: String(workerIndex), sourceReference: item.source_reference || "" });
     if (estimateId) query.set("estimateId", estimateId);
-    if (regenerate) query.set("regenerate", "1");
+    const cacheKey = `/api/tenders/${tenderId}/printable-submission-document?${query}`;
+    if (!regenerate) return fetchGeneratedPdf(cacheKey);
+    cacheForget(`gen:${cacheKey}`);
+    query.set("regenerate", "1");
     const pdf = await fetchAndValidatePdf(`/api/tenders/${tenderId}/printable-submission-document?${query}`);
-    return new Uint8Array(await pdf.arrayBuffer());
+    const regeneratedBytes = new Uint8Array(await pdf.arrayBuffer());
+    cachePut(`gen:${cacheKey}`, regeneratedBytes);
+    return regeneratedBytes;
   }
 
   async function saveContractBytes(itemIndex: number, workerIndex: number, bytes: Uint8Array) {
@@ -979,6 +1087,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     // Même chemin fixe pour le bouton rouge et le bouton vert : chaque enregistrement remplace le précédent.
     const upload = await supabase.storage.from("btp-documents").upload(path, new Blob([new Uint8Array(bytes)], { type: "application/pdf" }), { upsert: true, contentType: "application/pdf", cacheControl: "0" });
     if (upload.error) throw new Error(`Envoi impossible : ${upload.error.message}`);
+    cachePut(`saved:${path}`, new Uint8Array(bytes));
     const workerCount = contractWorkers().length;
     patchItem(itemIndex, (current) => {
       const formData = { ...current.form_data, [`__filledPdfPath:${workerIndex}`]: path, [`__filledPdfName:${workerIndex}`]: fileName };
@@ -1439,7 +1548,15 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     // Imprimer, demandé par Maxime pour remplacer les différents boutons
     // "Ouvrir le PDF..." dispersés dans chaque carte — voir le modal
     // actionsForIndex plus bas, tout en bas du fichier.
-    const openButton = <button type="button" className={`tenderButton ${ready ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => { if (isWorkerContract(item)) { setActionsForIndexState(null); setContractPanel({ itemIndex: index, only: null }); } else setActionsForIndex(index); }}>Ouvrir{ready ? " ✓" : ""}</button>;
+    const openAction = () => { if (isWorkerContract(item)) { setActionsForIndexState(null); setContractPanel({ itemIndex: index, only: null }); } else setActionsForIndex(index); };
+    // Pas encore rempli : bouton rouge « Ouvrir ». Rempli et enregistré (prêt) : bouton bleu « Prêt ✓ » (rouvre le PDF pour modifier)
+    // + raccourci « Imprimer » qui imprime sans rouvrir le PDF.
+    const openButton = ready
+      ? <>
+        <button type="button" className="tenderButton" title="Rouvrir le PDF pour le modifier" style={{ background: "linear-gradient(135deg,#0ea5e9,#0f766e)", borderColor: "transparent", color: "#fff", fontWeight: 700 }} onClick={openAction}>Prêt ✓</button>
+        <button type="button" className="tenderButton" title="Imprimer directement, sans rouvrir le PDF" disabled={pendingAction === `print:${index}`} style={pendingAction === `print:${index}` ? { cursor: "progress" } : undefined} onClick={() => void printItemDirectly(index)}><ButtonLabel loading={pendingAction === `print:${index}`} label="Imprimer" loadingLabel="Préparation…" /></button>
+      </>
+      : <button type="button" className="tenderButton acknowledgeButton" onClick={openAction}>Ouvrir</button>;
     if (isAiGenerated(item)) {
       return <article key={`${item.kind}-${normalize(item.title)}-${index}`} className="simpleCard">
         <strong>{item.title}</strong>

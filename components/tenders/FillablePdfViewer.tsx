@@ -76,6 +76,8 @@ export type FillablePdfViewerHandle = {
    * redimensionnées et ajoutées à l'instant. Lève une erreur si rien n'est
    * encore chargé. */
   getFilledPdfBytes: () => Promise<Uint8Array>;
+  /** Vrai si quelque chose a pu être modifié depuis l'ouverture (saisie, case cochée, ajustement…). Prudent : en cas de doute, vrai. */
+  isModified: () => boolean;
 };
 
 type Props = {
@@ -269,6 +271,23 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
   // React) doublées d'un state (pour redessiner la barre d'outils).
   const editModeRef = useRef(false);
   const [editModeOn, setEditModeOn] = useState(false);
+  // Suivi des modifications (voir isModified) : toute saisie / case cochée, et tout clic en mode « Ajuster ».
+  const dirtyRef = useRef(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const markDirty = () => { dirtyRef.current = true; };
+    const markIfAdjusting = () => { if (editModeRef.current) dirtyRef.current = true; };
+    root.addEventListener("input", markDirty, true);
+    root.addEventListener("change", markDirty, true);
+    root.addEventListener("pointerdown", markIfAdjusting, true);
+    return () => {
+      root.removeEventListener("input", markDirty, true);
+      root.removeEventListener("change", markDirty, true);
+      root.removeEventListener("pointerdown", markIfAdjusting, true);
+    };
+  }, []);
   const [selectedField, setSelectedField] = useState<string | null>(null);
   // Juste pour AFFICHER dans la barre d'outils la police/taille/couleur
   // actuelle de la case sélectionnée (fieldOverridesRef, lui, reste la seule
@@ -1061,6 +1080,10 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
   }
 
   useImperativeHandle(ref, () => ({
+    isModified() {
+      const stored = (pdfDocumentRef.current as unknown as { annotationStorage?: { size?: number } } | null)?.annotationStorage?.size ?? 0;
+      return dirtyRef.current || stored > 0 || customFieldNamesRef.current.size > 0;
+    },
     async getFilledPdfBytes() {
       if (!pdfDocumentRef.current) throw new Error("Le PDF n’est pas encore chargé.");
       const baseBytes = await pdfDocumentRef.current.saveDocument();
@@ -1208,7 +1231,7 @@ const FillablePdfViewer = forwardRef<FillablePdfViewerHandle, Props>(function Fi
     },
   }), []);
 
-  return <div style={{ position: "relative", width: "100%", height: "100%" }}>
+  return <div ref={rootRef} style={{ position: "relative", width: "100%", height: "100%" }}>
     {/* pdf.js teinte par défaut (en bleu clair, via une image de fond CSS)
         toute case encore vide, pour aider à les repérer dans son propre
         lecteur complet — un réglage qu'il n'expose nulle part pour notre
