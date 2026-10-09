@@ -238,7 +238,13 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   const [linkedDocuments, setLinkedDocuments] = useState<Array<{ estimateId: string; fileName: string | null; updatedAt: string | null; url: string | null }>>([]);
   const [today, setToday] = useState("");
   const [loaded, setLoaded] = useState(false);
-  const [viewingPdf, setViewingPdf] = useState<{ title: string; objectUrl: string } | null>(null);
+  // anchor = où afficher l'aperçu sur ordinateur : sous la carte n° X, ou sous
+  // le bouton du BDQE ("bdqe"). editable = on peut repasser en mode « Modifier ».
+  const [viewingPdf, setViewingPdf] = useState<{ title: string; objectUrl: string; anchor: number | "bdqe" | null; editable: boolean } | null>(null);
+  // Ordinateur : les PDF s'affichent sous leur bouton, avec « Fermer ».
+  // Téléphone : rien ne change (fenêtre d'avant / plein écran).
+  const [isPhone, setIsPhone] = useState(false);
+  useEffect(() => { setIsPhone(isPhoneDevice() || window.matchMedia("(max-width: 640px)").matches); }, []);
   // Nouvelle approche (vraie page + cases cliquables, voir printable-
   // submission-document/route.ts) : chaque pièce n'affiche plus qu'un seul
   // bouton rouge "Ouvrir", qui ouvre CETTE petite fenêtre avec Modifier/
@@ -375,6 +381,14 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [actionsForIndex]);
 
+  // Ordinateur : la fenêtre « Ouvrir » s'affiche sous son bouton ; on la
+  // ramène à l'écran si elle est hors de vue.
+  useEffect(() => {
+    if (isPhone || actionsForIndex === null) return;
+    const timer = window.setTimeout(() => document.getElementById(`dossier-panel-${actionsForIndex}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 150);
+    return () => window.clearTimeout(timer);
+  }, [actionsForIndex, isPhone]);
+
   function scheduleSave(nextProfile: Record<string, string>, nextItems: Item[]) {
     window.localStorage.setItem(storageKey, JSON.stringify({ profile: nextProfile, items: nextItems }));
     if (!loaded) return;
@@ -422,19 +436,20 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
   // s'ouvrent dans cette même carte au lieu d'une nouvelle fenêtre : défilement
   // continu, sans la barre d'outils du lecteur natif (donc sans le numéro de
   // page à côté), et un bouton Imprimer qui n'imprime que ce PDF.
-  function showPdfInModal(title: string, blob: Blob) {
+  function showPdfInModal(title: string, blob: Blob, anchor: number | "bdqe" | null = null, editable = false) {
     const objectUrl = URL.createObjectURL(new Blob([blob], { type: "application/pdf" }));
-    setViewingPdf({ title, objectUrl });
+    // Un seul aperçu à la fois : l'ancien est fermé (et libéré) avant d'afficher le nouveau.
+    setViewingPdf((current) => { if (current) URL.revokeObjectURL(current.objectUrl); return { title, objectUrl, anchor, editable }; });
   }
 
   // Si un onglet natif a été ouvert à l'avance (voir openPdfDirectly plus
   // bas pour l'explication complète du pourquoi), on y affiche le PDF en
   // plein écran ; sinon on garde notre fenêtre habituelle avec ses boutons.
-  function openPdfPreferringNativeTab(nativeTab: Window | null, title: string, blob: Blob) {
+  function openPdfPreferringNativeTab(nativeTab: Window | null, title: string, blob: Blob, anchor: number | "bdqe" | null = null, editable = false) {
     if (nativeTab) {
       nativeTab.location.href = URL.createObjectURL(new Blob([blob], { type: "application/pdf" }));
     } else {
-      showPdfInModal(title, blob);
+      showPdfInModal(title, blob, anchor, editable);
     }
   }
 
@@ -527,7 +542,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     return pdf;
   }
 
-  async function openPdfDirectly(key: string, title: string, documentUrl: string) {
+  async function openPdfDirectly(key: string, title: string, documentUrl: string, anchor: number | "bdqe" | null = null, editable = false) {
     setPendingAction(key);
     setMessage("Préparation du PDF…");
     // Sur téléphone, un PDF affiché dans notre fenêtre (iframe) n'a ni zoom
@@ -561,7 +576,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
         }
       }
       if (!pdf) throw lastError instanceof Error ? lastError : new Error("Le PDF n’a pas pu être préparé.");
-      openPdfPreferringNativeTab(nativeTab, title, pdf);
+      openPdfPreferringNativeTab(nativeTab, title, pdf, anchor, editable);
       setMessage("");
     } catch (error) {
       nativeTab?.close();
@@ -595,7 +610,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       const payload = await response.json().catch(() => ({})) as { pdfBase64?: string; error?: string };
       if (!response.ok || !payload.pdfBase64) throw new Error(payload.error || "Le BDQE n’a pas pu être préparé.");
       const bytes = Uint8Array.from(atob(payload.pdfBase64), (character) => character.charCodeAt(0));
-      openPdfPreferringNativeTab(nativeTab, "BDQE", new Blob([bytes], { type: "application/pdf" }));
+      openPdfPreferringNativeTab(nativeTab, "BDQE", new Blob([bytes], { type: "application/pdf" }), "bdqe");
       setMessage("");
     } catch (error) {
       nativeTab?.close();
@@ -619,14 +634,14 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     const query = new URLSearchParams({ title: item.title, kind: item.kind, sourceReference: item.source_reference || "" });
     if (estimateId) query.set("estimateId", estimateId);
     const documentUrl = `/api/tenders/${tenderId}/printable-submission-document?${query}`;
-    void openPdfDirectly(`pdf:${item.title}`, item.title, documentUrl);
+    void openPdfDirectly(`pdf:${item.title}`, item.title, documentUrl, items.indexOf(item), true);
   }
 
   function openWorkerContract(item: Item, workerIndex: number) {
     const query = new URLSearchParams({ title: item.title, kind: item.kind, workerIndex: String(workerIndex), sourceReference: item.source_reference || "" });
     if (estimateId) query.set("estimateId", estimateId);
     const documentUrl = `/api/tenders/${tenderId}/printable-submission-document?${query}`;
-    void openPdfDirectly(`pdf:${item.title}:${workerIndex}`, item.title, documentUrl);
+    void openPdfDirectly(`pdf:${item.title}:${workerIndex}`, item.title, documentUrl, items.indexOf(item), false);
   }
 
   // Même construction d'URL utilisée partout où on va chercher LE PDF d'une
@@ -810,7 +825,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     }
   }
 
-  async function openReadingDocument() {
+  async function openReadingDocument(anchor: number | null = null) {
     if (!daoUrl) return;
     const key = "read";
     setPendingAction(key);
@@ -819,7 +834,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     try {
       const response = await fetch(daoUrl);
       if (!response.ok) throw new Error(`Le serveur a répondu avec le statut ${response.status}.`);
-      openPdfPreferringNativeTab(nativeTab, "Document à lire", await response.blob());
+      openPdfPreferringNativeTab(nativeTab, "Document à lire", await response.blob(), anchor);
       setMessage("");
     } catch (error) {
       nativeTab?.close();
@@ -1082,6 +1097,95 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
     updateItem(index, { form_data: nextFormData, status: ready ? "needs_information" : "ready" });
   }
 
+  // Aperçu en lecture seule (Imprimer / BDQE / document à lire). Ordinateur :
+  // affiché SOUS son bouton avec « Fermer » (inline=true). Téléphone : fenêtre
+  // comme avant. Les boutons de remplissage/modification restent ceux de la
+  // fenêtre « Ouvrir » ; ici « Modifier » y renvoie en un clic.
+  function renderPreview(inline: boolean) {
+    if (!viewingPdf) return null;
+    const editIndex = viewingPdf.editable && typeof viewingPdf.anchor === "number" ? viewingPdf.anchor : null;
+    const toolbar = <div style={{ flex: "0 0 auto", display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "12px", marginBottom: "10px" }}>
+      <h2 style={{ margin: 0, fontWeight: 800, fontSize: "1.125rem", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "1 1 auto" }}>{viewingPdf.title}</h2>
+      <div style={{ display: "flex", gap: "8px", flex: "0 0 auto", flexWrap: "wrap" }}>
+        {editIndex !== null && <button type="button" className="tenderButton" onClick={() => { closePdfModal(); setActionsForIndex(editIndex); }}>Modifier / remplir</button>}
+        <button type="button" className="tenderButton tenderButtonPrimary" onClick={printViewingPdf}>Imprimer</button>
+        <button type="button" className="tenderButton" onClick={closePdfModal}>Fermer</button>
+      </div>
+    </div>;
+    const frame = <iframe ref={pdfIframeRef} title={viewingPdf.title} src={`${viewingPdf.objectUrl}#toolbar=0&navpanes=0`} style={{ flex: "1 1 auto", minHeight: 0, width: "100%", border: "1px solid #e1ece4", borderRadius: "10px" }} />;
+    if (inline) return <div style={{ marginTop: 12, height: "min(85vh, 1000px)", display: "flex", flexDirection: "column", border: "1px solid #e1ece4", borderRadius: 12, padding: 10, background: "#fff" }}>{toolbar}{frame}</div>;
+    return createPortal(<div className="modalBackdrop" onClick={closePdfModal}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(1000px,95vw)", height: "90vh", display: "flex", flexDirection: "column" }}>{toolbar}{frame}</div></div>, document.body);
+  }
+
+  // La fenêtre du bouton rouge « Ouvrir » (PDF remplissable avec tous ses
+  // boutons : cases, Enregistrer, Imprimer, Régénérer, Prêt…). Ordinateur :
+  // sous le bouton « Ouvrir » de la pièce, avec « Fermer » ; téléphone : fenêtre
+  // comme avant. Mêmes fonctions dans les deux cas.
+  function renderActionsPanel(index: number, inline: boolean) {
+    const item = items[index];
+    if (!item) return null;
+    const ready = isItemReady(item);
+    const personnel = isPersonnelList(item);
+    const material = isMaterialList(item) && !personnel;
+    const showPrint = needsPrintableVersion(item) || personnel || material;
+    const filledName = typeof item.form_data.__filledPdfName === "string" ? item.form_data.__filledPdfName : null;
+    const readingOnly = item.kind === "document_to_provide" && isReadingOnly(item);
+    const saving = pendingAction === `save:${index}`;
+    const regenerating = pendingAction === `regenerate:${index}`;
+    const content = <>
+      <div style={{ flex: "0 0 auto", display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+        <h2 style={{ margin: 0, fontWeight: 800, fontSize: "1.125rem", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "1 1 auto" }}>{item.title}</h2>
+        <div style={{ display: "flex", gap: 8, flex: "0 0 auto", flexWrap: "wrap" }}>
+          {!fillableViewerFailed && <button type="button" className="tenderButton tenderButtonPrimary" disabled={saving} onClick={() => void saveFilledPdfFromViewer(index, item)}><ButtonLabel loading={saving} label="Enregistrer" loadingLabel="Envoi…" /></button>}
+          {showPrint && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Imprimer" /></button>}
+          <button type="button" className="tenderButton" disabled={regenerating} title="Refabrique ce document depuis le DAO, en ignorant toute version déjà enregistrée (utile si le contenu affiché semble périmé)." onClick={() => void regenerateFilledPdf(index, item)}><ButtonLabel loading={regenerating} label="Régénérer" loadingLabel="Régénération…" /></button>
+          <button type="button" className="tenderButton" onClick={() => setActionsForIndex(null)}>Fermer</button>
+        </div>
+      </div>
+      <p className="text-sm text-gray-600" style={{ flex: "0 0 auto", marginTop: 0 }}>{hasFilledVersion(item) ? `Version remplie déjà enregistrée : ${filledName || "document.pdf"}` : "Remplissez les cases directement ci-dessous, puis cliquez sur « Enregistrer »."}</p>
+      <div style={{ flex: "1 1 auto", minHeight: 0 }}>
+        {!fillableViewerFailed && fillablePdfBytes && <FillablePdfViewer
+          key={index}
+          ref={fillablePdfViewerRef}
+          pdfBytes={fillablePdfBytes}
+          // true seulement quand fillablePdfBytes vient de la version DÉJÀ
+          // remplie et enregistrée : le lecteur repart alors de ce qui est
+          // VRAIMENT enregistré (taille/couleur/gras de chaque case).
+          restoreSavedStyle={hasFilledVersion(item)}
+          onError={(message) => { setFillableViewerFailed(true); setFillableViewerError(message); console.error("FillablePdfViewer a échoué :", message); }}
+        />}
+        {!fillableViewerFailed && !fillablePdfBytes && <p style={{ cursor: "progress" }}>Préparation…</p>}
+        {fillableViewerFailed && <div className="simpleCardMuted">
+          <p className="text-sm">L’affichage direct n’a pas fonctionné sur cet appareil/navigateur. Solution de secours : téléchargez le PDF, remplissez-le avec votre application PDF, puis renvoyez-le ici.</p>
+          {fillableViewerError && <p className="text-xs text-gray-500" style={{ fontFamily: "monospace", wordBreak: "break-word" }}>Détail technique (à envoyer à Maxime si besoin) : {fillableViewerError}</p>}
+          <div className="buttonRow" style={{ marginBottom: 0, marginTop: 10 }}>
+            <button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `edit:${item.title}`} onClick={() => void downloadPdfForEditingFallback(item)}><ButtonLabel loading={pendingAction === `edit:${item.title}`} label="Modifier (télécharger)" loadingLabel="Préparation…" /></button>
+            <label className="tenderButton" style={{ cursor: saving ? "wait" : "pointer" }}>
+              {saving ? <ButtonLabel loading label="" loadingLabel="Envoi…" /> : "Enregistrer un fichier"}
+              <input style={{ display: "none" }} type="file" accept="application/pdf" disabled={saving} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadFilledPdf(index, item, file, file.name); event.target.value = ""; }} />
+            </label>
+          </div>
+        </div>}
+      </div>
+      <div className="buttonRow" style={{ flex: "0 0 auto", marginTop: 10, marginBottom: 0 }}>
+        <button type="button" className={`tenderButton ${ready ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => (readingOnly ? toggleAcknowledged(index) : toggleReady(index))}>{readingOnly ? (ready ? "Pris connaissance ✓ (annuler)" : "Prendre connaissance") : (ready ? "Prêt ✓ (annuler)" : "Marquer comme prêt")}</button>
+      </div>
+    </>;
+    if (inline) return <div id={`dossier-panel-${index}`} style={{ marginTop: 12, height: "min(88vh, 1100px)", display: "flex", flexDirection: "column", border: "1px solid #e1ece4", borderRadius: 12, padding: 10, background: "#fff" }}>{content}</div>;
+    return createPortal(<div className="modalBackdrop" onClick={() => setActionsForIndex(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(900px,95vw)", height: "88vh", display: "flex", flexDirection: "column" }}>{content}</div></div>, document.body);
+  }
+
+  // Ce qui s'affiche SOUS les boutons d'une carte sur ordinateur : la fenêtre
+  // « Ouvrir » de cette pièce et/ou son aperçu PDF. Une seule pièce ouverte à
+  // la fois (ouvrir une autre referme la précédente).
+  function cardExtras(index: number) {
+    if (isPhone) return null;
+    return <>
+      {actionsForIndex === index && renderActionsPanel(index, true)}
+      {viewingPdf && viewingPdf.anchor === index && renderPreview(true)}
+    </>;
+  }
+
   // Une seule fonction de rendu de carte, quel que soit le type de pièce
   // (document déjà préparé par l'appli, document à joindre, ou formulaire à
   // compléter) — pour que dossierItems puisse toutes les afficher dans une
@@ -1101,6 +1205,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
         <div className="buttonRow" style={{ marginBottom: 0, marginTop: 12 }}>
           {openButton}
         </div>
+        {cardExtras(index)}
         {item.source_reference && <p className="mt-2 text-xs text-gray-500">Source : {item.source_reference}</p>}
       </article>;
     }
@@ -1125,9 +1230,10 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
               Enregistrer) ne reste utile que pour une pièce "à lire"
               (charte, politique de fraude...) sans page DAO précise
               repérée : le PDF à imprimer, lui, extrait déjà ce texte. */}
-          {readingOnly && !printable && <button type="button" className="tenderButton" disabled={!daoUrl || pendingAction === "read"} onClick={() => void openReadingDocument()}><ButtonLabel loading={pendingAction === "read"} label="Ouvrir le document à lire" /></button>}
+          {readingOnly && !printable && <button type="button" className="tenderButton" disabled={!daoUrl || pendingAction === "read"} onClick={() => void openReadingDocument(index)}><ButtonLabel loading={pendingAction === "read"} label="Ouvrir le document à lire" /></button>}
           {printable ? openButton : readyToggleButton}
         </div>
+        {cardExtras(index)}
         {item.source_reference && <p className="mt-1 text-xs text-gray-500">Source : {item.source_reference}</p>}
       </article>;
     }
@@ -1192,6 +1298,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
       <div className="buttonRow" style={{ marginBottom: 0, marginTop: 12 }}>
         {openButton}
       </div>
+      {cardExtras(index)}
       {item.source_reference && <p className="mt-2 text-xs text-gray-500">Source : {item.source_reference}</p>}
     </article>;
   }
@@ -1304,6 +1411,7 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
         {!linkedDocuments.some((document) => document.url) && <p className="text-sm text-gray-600">Le BDQE apparaîtra ici dès que le devis officiel associé aura été enregistré.</p>}
         {bdqeItem && bdqeIndex >= 0 && <button type="button" className={`tenderButton ${isItemReady(bdqeItem) ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => toggleReady(bdqeIndex)}>{isItemReady(bdqeItem) ? "Prêt ✓ (annuler)" : "Marquer comme prêt"}</button>}
       </div>
+      {!isPhone && viewingPdf?.anchor === "bdqe" && renderPreview(true)}
     </section>
 
     {!dossierItems.length && <section className="rounded-xl border bg-white p-5"><h2 className="text-xl font-bold">Pièces du dossier</h2><p className="mt-3 text-gray-600">Aucune pièce distincte n’a été explicitement détectée. Contrôlez tout de même les annexes du DAO.</p></section>}
@@ -1326,80 +1434,9 @@ export default function SubmissionDossierManager({ tenderId, tenderReference, te
           <div className="mt-3 grid gap-3">{dossierItems.map((item) => renderDossierCard(item))}</div>
         </section>}
   </main>
-  {viewingPdf && typeof document !== "undefined" && createPortal(
-<div className="modalBackdrop" onClick={closePdfModal}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(1000px,95vw)", height: "90vh", display: "flex", flexDirection: "column" }}>
-    <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", marginBottom: "10px" }}>
-      <h2 style={{ margin: 0, fontWeight: 800, fontSize: "1.125rem", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{viewingPdf.title}</h2>
-      <div style={{ display: "flex", gap: "8px", flex: "0 0 auto" }}>
-        <button type="button" className="tenderButton tenderButtonPrimary" onClick={printViewingPdf}>Imprimer</button>
-        <button type="button" className="tenderButton" onClick={closePdfModal}>Fermer</button>
-      </div>
-    </div>
-    <iframe ref={pdfIframeRef} title={viewingPdf.title} src={`${viewingPdf.objectUrl}#toolbar=0&navpanes=0`} style={{ flex: "1 1 auto", minHeight: 0, width: "100%", border: "1px solid #e1ece4", borderRadius: "10px" }} />
-  </div></div>, document.body)}
-  {/* La fenêtre ouverte par le bouton rouge "Ouvrir" de chaque pièce (voir
-      openButton dans renderDossierCard) : le PDF s'affiche ICI, déjà
-      remplissable (de vraies cases cliquables par-dessus la vraie page du
-      DAO) — la personne tape directement dedans, puis Enregistrer récupère
-      ce qui vient d'être tapé et l'envoie tout seul, sans fichier à
-      télécharger ni à re-choisir. La fenêtre se referme d'elle-même une
-      fois l'envoi terminé (voir uploadFilledPdf). */}
-  {actionsForIndex !== null && items[actionsForIndex] && typeof document !== "undefined" && createPortal((() => {
-    const index = actionsForIndex;
-    const item = items[index];
-    const ready = isItemReady(item);
-    const personnel = isPersonnelList(item);
-    const material = isMaterialList(item) && !personnel;
-    const showPrint = needsPrintableVersion(item) || personnel || material;
-    const filledName = typeof item.form_data.__filledPdfName === "string" ? item.form_data.__filledPdfName : null;
-    // Une pièce "à lire" (charte, politique de fraude...) garde son propre
-    // libellé "Prendre connaissance" au lieu de "Marquer comme prêt", et
-    // marque en plus __acknowledgedAt (voir toggleAcknowledged) — même bouton
-    // rouge/vert, juste un texte différent pour rester clair pour Maxime.
-    const readingOnly = item.kind === "document_to_provide" && isReadingOnly(item);
-    const saving = pendingAction === `save:${index}`;
-    const regenerating = pendingAction === `regenerate:${index}`;
-    return <div className="modalBackdrop" onClick={() => setActionsForIndex(null)}><div className="modal" onClick={(event) => event.stopPropagation()} style={{ width: "min(900px,95vw)", height: "88vh", display: "flex", flexDirection: "column" }}>
-      <div style={{ flex: "0 0 auto", display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
-        <h2 style={{ margin: 0, fontWeight: 800, fontSize: "1.125rem", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "1 1 auto" }}>{item.title}</h2>
-        <div style={{ display: "flex", gap: 8, flex: "0 0 auto", flexWrap: "wrap" }}>
-          {!fillableViewerFailed && <button type="button" className="tenderButton tenderButtonPrimary" disabled={saving} onClick={() => void saveFilledPdfFromViewer(index, item)}><ButtonLabel loading={saving} label="Enregistrer" loadingLabel="Envoi…" /></button>}
-          {showPrint && <button type="button" className="tenderButton" disabled={pendingAction === `pdf:${item.title}`} onClick={() => openPrintableVersion(item)}><ButtonLabel loading={pendingAction === `pdf:${item.title}`} label="Imprimer" /></button>}
-          <button type="button" className="tenderButton" disabled={regenerating} title="Refabrique ce document depuis le DAO, en ignorant toute version déjà enregistrée (utile si le contenu affiché semble périmé)." onClick={() => void regenerateFilledPdf(index, item)}><ButtonLabel loading={regenerating} label="Régénérer" loadingLabel="Régénération…" /></button>
-          <button type="button" className="tenderButton" onClick={() => setActionsForIndex(null)}>Fermer</button>
-        </div>
-      </div>
-      <p className="text-sm text-gray-600" style={{ flex: "0 0 auto", marginTop: 0 }}>{hasFilledVersion(item) ? `Version remplie déjà enregistrée : ${filledName || "document.pdf"}` : "Remplissez les cases directement ci-dessous, puis cliquez sur « Enregistrer »."}</p>
-      <div style={{ flex: "1 1 auto", minHeight: 0 }}>
-        {!fillableViewerFailed && fillablePdfBytes && <FillablePdfViewer
-          key={index}
-          ref={fillablePdfViewerRef}
-          pdfBytes={fillablePdfBytes}
-          // true seulement quand fillablePdfBytes vient de la version DÉJÀ
-          // remplie et enregistrée (voir l'effet plus haut) : le lecteur sait
-          // alors qu'il doit repartir de ce qui est VRAIMENT enregistré
-          // (taille/couleur/gras de chaque case) plutôt que du réglage par
-          // défaut prévu pour une case jamais encore personnalisée.
-          restoreSavedStyle={hasFilledVersion(item)}
-          onError={(message) => { setFillableViewerFailed(true); setFillableViewerError(message); console.error("FillablePdfViewer a échoué :", message); }}
-        />}
-        {!fillableViewerFailed && !fillablePdfBytes && <p>Préparation…</p>}
-        {fillableViewerFailed && <div className="simpleCardMuted">
-          <p className="text-sm">L’affichage direct n’a pas fonctionné sur cet appareil/navigateur. Solution de secours : téléchargez le PDF, remplissez-le avec votre application PDF, puis renvoyez-le ici.</p>
-          {fillableViewerError && <p className="text-xs text-gray-500" style={{ fontFamily: "monospace", wordBreak: "break-word" }}>Détail technique (à envoyer à Maxime si besoin) : {fillableViewerError}</p>}
-          <div className="buttonRow" style={{ marginBottom: 0, marginTop: 10 }}>
-            <button type="button" className="tenderButton tenderButtonPrimary" disabled={pendingAction === `edit:${item.title}`} onClick={() => void downloadPdfForEditingFallback(item)}><ButtonLabel loading={pendingAction === `edit:${item.title}`} label="Modifier (télécharger)" loadingLabel="Préparation…" /></button>
-            <label className="tenderButton" style={{ cursor: saving ? "wait" : "pointer" }}>
-              {saving ? <ButtonLabel loading label="" loadingLabel="Envoi…" /> : "Enregistrer un fichier"}
-              <input style={{ display: "none" }} type="file" accept="application/pdf" disabled={saving} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadFilledPdf(index, item, file, file.name); event.target.value = ""; }} />
-            </label>
-          </div>
-        </div>}
-      </div>
-      <div className="buttonRow" style={{ flex: "0 0 auto", marginTop: 10, marginBottom: 0 }}>
-        <button type="button" className={`tenderButton ${ready ? "acknowledgedButton" : "acknowledgeButton"}`} onClick={() => (readingOnly ? toggleAcknowledged(index) : toggleReady(index))}>{readingOnly ? (ready ? "Pris connaissance ✓ (annuler)" : "Prendre connaissance") : (ready ? "Prêt ✓ (annuler)" : "Marquer comme prêt")}</button>
-      </div>
-    </div></div>;
-  })(), document.body)}
+  {/* Téléphone : mêmes fenêtres qu'avant (rien ne change). Ordinateur : tout
+      s'affiche sous le bouton de la pièce (voir cardExtras). */}
+  {isPhone && viewingPdf && typeof document !== "undefined" && renderPreview(false)}
+  {isPhone && actionsForIndex !== null && items[actionsForIndex] && typeof document !== "undefined" && renderActionsPanel(actionsForIndex, false)}
   </>;
 }

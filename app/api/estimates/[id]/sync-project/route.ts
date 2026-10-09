@@ -5,7 +5,7 @@ import { syncProjectTasks } from "@/lib/devis/sync-project-tasks";
 
 // Après un ajout, une modification ou une suppression de ligne d'un devis DAO : si le chantier de ce devis existe
 // déjà, ses lignes (bordereau de prix), son planning et — côté écran — sa facture non payée sont remis à jour.
-// Si le devis n'a pas encore de chantier, rien n'est créé (le chantier se crée au PDF externe, comme avant).
+// Si le devis n'a pas encore de chantier, il est créé maintenant (comme à l'enregistrement d'un PDF interne ou externe).
 export async function POST(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id: estimateId } = await params;
   const supabase = await createClient();
@@ -16,9 +16,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
   if (member.role !== "admin" && member.role !== "owner") return NextResponse.json({ synced: false });
   const organizationId = member.organization_id as string;
 
-  const { data: project } = await supabase.from("projects").select("id").eq("organization_id", organizationId).eq("source_estimate_id", estimateId).maybeSingle();
-  if (!project) return NextResponse.json({ synced: false });
-
+  // Pas encore de chantier : on le crée ici (un devis enregistré avec des lignes doit avoir son chantier, ses dépenses et sa facturation).
   const result = await createOrSyncProjectFromEstimate(supabase, { organizationId, estimateId });
   if ("error" in result) return NextResponse.json({ error: result.error }, { status: 400 });
   const tasks = await syncProjectTasks(supabase, organizationId, result.projectId);

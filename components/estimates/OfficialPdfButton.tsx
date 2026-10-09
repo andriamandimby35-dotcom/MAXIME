@@ -62,7 +62,19 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok || !result.pdfBase64) throw new Error(result.error || "Le PDF n’a pas pu être préparé.");
+    if (save) lastSaveRef.current = { projectId: (result.projectId as string | null) ?? null, projectError: (result.projectError as string | null) ?? null };
     return result.pdfBase64 as string;
+  }
+
+  // Après l'enregistrement : le chantier du devis (créé ou rafraîchi par le serveur) reçoit ses dépenses et sa facturation —
+  // la dernière facture non payée reprend les nouveaux prix.
+  const lastSaveRef = useRef<{ projectId: string | null; projectError: string | null }>({ projectId: null, projectError: null });
+  async function finishProjectUpdate(): Promise<string> {
+    const { projectId, projectError } = lastSaveRef.current;
+    if (projectError) return ` Attention : le chantier n'a pas pu être créé/mis à jour (${projectError}).`;
+    if (!projectId) return "";
+    const claim = await fetch(`/api/billing/projects/${projectId}/refresh-claim`, { method: "POST" }).then((response) => response.json().catch(() => ({}))).catch(() => ({})) as { updated?: boolean; claimNumber?: string };
+    return ` Chantier, dépenses et facturation mis à jour${claim.updated ? ` (facture ${claim.claimNumber ?? ""} non payée recalculée)` : ""}.`;
   }
 
   async function previewPdf() {
@@ -134,7 +146,7 @@ export default function OfficialPdfButton({ estimateId, mode = "external" }: { e
         setShowInline(true);
         setPreviewReady(false);
       }
-      setMessage("PDF enregistré. Il remplace l’ancienne version de ce type de devis.");
+      setMessage(`PDF enregistré. Il remplace l’ancienne version de ce type de devis.${await finishProjectUpdate()}`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Enregistrement impossible.");
     } finally {

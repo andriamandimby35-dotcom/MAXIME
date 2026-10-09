@@ -3,6 +3,7 @@ import { getCompanyProfileForPdf } from "@/lib/organization-profile";
 import { generateOfficialEstimatePdf, type OfficialPdfRow } from "@/lib/estimates/official-pdf";
 import { devisNumber } from "@/lib/devis/devis-number";
 import { createOrSyncProjectFromEstimate } from "@/lib/projects/create-project-from-estimate";
+import { syncProjectTasks } from "@/lib/devis/sync-project-tasks";
 import { createServerClient } from "@/lib/supabase/server";
 import { computeExternalUnitPrices, targetBeforeTax } from "@/lib/estimates/external-pricing";
 
@@ -301,18 +302,30 @@ async function generateOfficialPdfResponse(
 
   const signed = await supabase.storage.from("estimate-pdfs").createSignedUrl(storagePath, 300, { download: fileName });
   if (signed.error) return NextResponse.json({ error: `Lien privé indisponible : ${signed.error.message}` }, { status: 400 });
-  // Le chantier est créé (ou rafraîchi) une seule fois, sur la génération du
-  // PDF externe : c'est la copie complète (localisation, planning, bordereau
-  // de prix) qui rend ensuite le chantier indépendant du DAO.
-  if (mode === "external") {
+  // À l'enregistrement du PDF (interne OU externe) : le chantier du devis est créé s'il n'existe pas encore, sinon rafraîchi
+  // (localisation, planning, bordereau de prix), et chaque ligne est reliée à une tâche du planning. Dépenses et facturation
+  // partent de ce chantier. Le client termine en recalculant la dernière facture non payée.
+  let projectId: string | null = null;
+  let projectError: string | null = null;
+  try {
     const projectResult = await createOrSyncProjectFromEstimate(supabase, {
       organizationId: member.organization_id,
       estimateId,
     });
-    if ("error" in projectResult) console.error("Automatic project creation failed", projectResult.error);
+    if ("error" in projectResult) {
+      projectError = projectResult.error;
+      console.error("Automatic project creation failed", projectResult.error);
+    } else {
+      projectId = projectResult.projectId;
+      const tasks = await syncProjectTasks(supabase, member.organization_id, projectResult.projectId);
+      if (!tasks.ok) console.error("Project task sync failed", tasks.error);
+    }
+  } catch (error) {
+    projectError = error instanceof Error ? error.message : "Création du chantier impossible.";
+    console.error("Automatic project creation crashed", error);
   }
   if (returnPdfPayload) {
-    return NextResponse.json({ ok: true, version, fileName, pdfBase64: Buffer.from(pdf).toString("base64") });
+    return NextResponse.json({ ok: true, version, fileName, projectId, projectError, pdfBase64: Buffer.from(pdf).toString("base64") });
   }
   return NextResponse.json({ ok: true, version, fileName, downloadUrl: signed.data.signedUrl });
 }
