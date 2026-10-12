@@ -20,7 +20,7 @@ price.designation
 );
 
 const [prix,setPrix]=useState(
-price.prix_actuel
+price.prix_retenu || price.prix_actuel || price.prix_ia || ""
 );
 
 const [venduParPiece,setVenduParPiece]=useState(Boolean(price.unite_achat));

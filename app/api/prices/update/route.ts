@@ -114,7 +114,9 @@ throw oldPriceError;
 
 const ancienPrix = Number(oldPrice.prix_retenu) || Number(oldPrice.prix_actuel) || Number(oldPrice.prix_ia) || 0;
 
-const nouveauPrix = Number(prix);
+// Sans « prix » dans la requête (simple complément d'infos), le prix n'est pas touché.
+const priceProvided = prix !== undefined && prix !== null && prix !== "";
+const nouveauPrix = priceProvided ? Number(prix) : ancienPrix;
 
 
 const difference = nouveauPrix - ancienPrix;
@@ -153,17 +155,13 @@ const {data,error}=await supabase
 
 designation,
 
-prix_actuel:nouveauPrix,
+...(priceProvided ? { prix_actuel:nouveauPrix, prix_entreprise:nouveauPrix, prix_retenu:nouveauPrix, date_prix: new Date() } : {}),
 
-prix_entreprise:nouveauPrix,
+...(unite_achat !== undefined ? { unite_achat: unite_achat || null } : {}),
 
-prix_retenu:nouveauPrix,
+...(quantite_par_unite_achat !== undefined ? { quantite_par_unite_achat: quantite_par_unite_achat ? Number(quantite_par_unite_achat) : null } : {}),
 
-unite_achat: unite_achat || null,
-
-quantite_par_unite_achat: quantite_par_unite_achat ? Number(quantite_par_unite_achat) : null,
-
-prix_unite_achat: prix_unite_achat ? Number(prix_unite_achat) : null,
+...(prix_unite_achat !== undefined ? { prix_unite_achat: prix_unite_achat ? Number(prix_unite_achat) : null } : {}),
 
 ...(fournisseur !== undefined ? { fournisseur: String(fournisseur || "").trim() || null } : {}),
 
@@ -176,8 +174,6 @@ prix_unite_achat: prix_unite_achat ? Number(prix_unite_achat) : null,
 ...(livraison !== undefined ? { livraison: String(livraison || "").trim() || null } : {}),
 
 ...(cleanCaracteristiques !== undefined ? { caracteristiques: cleanCaracteristiques } : {}),
-
-date_prix: new Date(),
 
 updated_at:new Date()
 
