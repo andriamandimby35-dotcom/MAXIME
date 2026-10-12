@@ -2,9 +2,10 @@
 
 import { useMemo, useState } from "react";
 import PriceCard from "./PriceCard";
+import { packInfoMissing } from "@/lib/price-pack";
 import { supplierGroup, regionGroup } from "@/lib/material-normalization";
 
-type Mode = "nom" | "fournisseur" | "region";
+type Mode = "nom" | "fournisseur" | "region" | "completer";
 type Drill = { type: "fournisseur" | "region"; key: string; label: string } | null;
 
 function normalize(value: unknown) {
@@ -69,6 +70,9 @@ export default function PriceSearch({ prices }: { prices: any[] }) {
   const [mode, setMode] = useState<Mode>("nom");
   const [drill, setDrill] = useState<Drill>(null);
 
+  // Matériaux dont le conditionnement (sac de combien de kg, rouleau de combien de m…) reste à indiquer.
+  const toComplete = useMemo(() => prices.filter((price) => packInfoMissing(price)), [prices]);
+
   const activeQuery = query.trim();
   const isSearching = activeQuery.length > 0;
 
@@ -129,9 +133,9 @@ export default function PriceSearch({ prices }: { prices: any[] }) {
   const searchResults = useMemo(() => {
     if (!isSearching) return [];
     const tokens = normalize(activeQuery).split(/\s+/).filter(Boolean);
-    const pool = drill ? drillResults : prices;
+    const pool = drill ? drillResults : mode === "completer" ? toComplete : prices;
     return sortByDesignation(pool.filter((price) => matchesQuery(price, tokens)));
-  }, [prices, drillResults, drill, activeQuery, isSearching]);
+  }, [prices, toComplete, mode, drillResults, drill, activeQuery, isSearching]);
 
   // On garde ce qui est tapé quand on change d'onglet : l'utilisateur peut
   // taper d'abord, puis choisir la région/le fournisseur pour restreindre.
@@ -163,6 +167,7 @@ export default function PriceSearch({ prices }: { prices: any[] }) {
   else if (drill) resultsHead = `Matériaux — ${drill.label}`;
   else if (mode === "fournisseur") resultsHead = "Tous les fournisseurs disponibles";
   else if (mode === "region") resultsHead = "Toutes les régions disponibles";
+  else if (mode === "completer") resultsHead = `À compléter : ${toComplete.length} matériau(x) sans conditionnement connu — ouvre « Modifier » sur chaque fiche pour indiquer le sac, le rouleau ou la longueur`;
   else resultsHead = "Tous les matériaux, par nom";
 
   return (
@@ -199,6 +204,13 @@ export default function PriceSearch({ prices }: { prices: any[] }) {
           onClick={() => selectMode("nom")}
         >
           Nom
+        </button>
+        <button
+          type="button"
+          className={mode === "completer" ? "modeBtn active" : "modeBtn"}
+          onClick={() => selectMode("completer")}
+        >
+          À compléter ({toComplete.length})
         </button>
       </div>
 
@@ -289,12 +301,12 @@ export default function PriceSearch({ prices }: { prices: any[] }) {
             <p className="text-gray-500">Aucune région enregistrée.</p>
           )
         ) : (
-          sortByDesignation(prices).length > 0 ? (
+          sortByDesignation(mode === "completer" ? toComplete : prices).length > 0 ? (
             <div className="priceGrid">
-              {sortByDesignation(prices).map((price) => <PriceCard key={price.id} price={price} />)}
+              {sortByDesignation(mode === "completer" ? toComplete : prices).map((price) => <PriceCard key={price.id} price={price} />)}
             </div>
           ) : (
-            <p className="text-gray-500">Aucun prix enregistré.</p>
+            <p className="text-gray-500">{mode === "completer" ? "Tout est renseigné : aucun matériau à compléter." : "Aucun prix enregistré."}</p>
           )
         )}
       </div>

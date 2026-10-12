@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import EditPriceButton from "./EditPriceButton";
 import DeletePriceButton from "./DeletePriceButton";
 import { formatAr } from "@/lib/format-number";
+import { packFromName, packInfoMissing } from "@/lib/price-pack";
 
 type PriceHistoryEntry = {
   id: string;
@@ -40,22 +41,6 @@ function priceBasis(unite: unknown) {
   return known[key] ?? (raw ? `par ${raw}` : "unité non précisée");
 }
 
-// Quand la fiche n'a pas encore de « vendu par » enregistré, on le lit dans le NOM du matériau
-// (ex. « sac de 50 kg », « rouleau de 100 m », « barre de 6 m »). Affichage seulement : aucun calcul n'est modifié.
-function packFromName(designation: unknown, unite: unknown) {
-  const name = String(designation ?? "");
-  const m = name.match(/\b(sacs?|rouleaux?|couronnes?|barres?|tubes?|cartons?|bo[iî]tes?|seaux?|bidons?|pots?|f[uû]ts?|paquets?|bobines?|bottes?|cartouches?|flacons?)(?:\s+[A-Za-zÀ-ÿ]+){0,2}?\s+(?:de|d')\s*(\d+(?:[.,]\d+)?)\s*(kg|g|l|ml|m²|m2|m|cm|mm|pièces|pieces|pcs|pces)(?![A-Za-zÀ-ÿ])/i);
-  if (m) {
-    const word = m[1].toLowerCase().replace(/s$/, "").replace("boite", "boîte").replace("fut", "fût");
-    return `${word} de ${m[2]} ${m[3].replace(/^m2$/i, "m²")}`;
-  }
-  // « (50 kg) » dans le nom d'un matériau vendu au sac / seau / bidon…
-  const key = String(unite ?? "").trim().toLowerCase();
-  const m2 = name.match(/\(?\b(\d+(?:[.,]\d+)?)\s*(kg|l)\b\)?/i);
-  if (m2 && ["sac", "seau", "bidon", "pot", "fût", "fut"].includes(key)) return `${key === "fut" ? "fût" : key} de ${m2[1]} ${m2[2].toLowerCase()}`;
-  return "";
-}
-
 function offerLocation(offer: Offer) {
   return [offer.ville, offer.region].filter(Boolean).join(" — ");
 }
@@ -80,6 +65,7 @@ const packName = String(price.unite_achat || "").trim();
 const packQty = Number(price.quantite_par_unite_achat || 0);
 const packPrice = Number(price.prix_unite_achat || 0);
 const packFromTitle = packName ? "" : packFromName(price.designation, price.unite);
+const toComplete = packInfoMissing(price);
 const caracteristiques: Caracteristique[] = Array.isArray(price.caracteristiques) ? price.caracteristiques : [];
 
 // Un même matériau peut avoir plusieurs fournisseurs/régions (voir la
@@ -138,6 +124,7 @@ return (
 
 <div style={{fontSize:"12px",color:"#6b776f",fontWeight:600}}>
 {basis}{packName ? ` · vendu par ${packName}` : packFromTitle ? ` · ${packFromTitle}` : ""}
+{toComplete && <span style={{marginLeft:"6px",background:"#fff4e5",color:"#a35a00",border:"1px solid #f0c98a",borderRadius:"999px",padding:"1px 8px",fontSize:"11px",fontWeight:700,whiteSpace:"nowrap"}}>À compléter</span>}
 </div>
 
 <div className="priceTileMeta">
