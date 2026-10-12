@@ -29,6 +29,17 @@ type Offer = {
   date_prix?: string;
 };
 
+// Dit clairement À QUOI le prix affiché se rapporte (au mètre, au m², à l'unité, au rouleau…).
+function priceBasis(unite: unknown) {
+  const raw = String(unite ?? "").trim();
+  const key = raw.toLowerCase().replace(/[².³]/g, (c) => (c === "²" ? "2" : c === "³" ? "3" : "")).replace(/\s+/g, "");
+  const known: Record<string, string> = {
+    ml: "au mètre linéaire (ml)", m: "au mètre", m2: "au m²", m3: "au m³", u: "à l'unité", un: "à l'unité", unite: "à l'unité", piece: "à la pièce", pce: "à la pièce",
+    kg: "au kilo", t: "à la tonne", l: "au litre", sac: "au sac", barre: "à la barre", rouleau: "au rouleau", pack: "au pack", paquet: "au paquet", boite: "à la boîte", forfait: "au forfait", ens: "à l'ensemble", ft: "au forfait", jour: "par jour", h: "à l'heure",
+  };
+  return known[key] ?? (raw ? `par ${raw}` : "unité non précisée");
+}
+
 function offerLocation(offer: Offer) {
   return [offer.ville, offer.region].filter(Boolean).join(" — ");
 }
@@ -48,6 +59,10 @@ const [historyError,setHistoryError] = useState("");
 const currentPrice = Number(price.prix_retenu || price.prix_actuel || price.prix_ia || 0);
 const isIa = price.statut_prix === "ia";
 const confidencePercent = Math.round(Number(price.confiance_ia || 0) * 100);
+const basis = priceBasis(price.unite);
+const packName = String(price.unite_achat || "").trim();
+const packQty = Number(price.quantite_par_unite_achat || 0);
+const packPrice = Number(price.prix_unite_achat || 0);
 const caracteristiques: Caracteristique[] = Array.isArray(price.caracteristiques) ? price.caracteristiques : [];
 
 // Un même matériau peut avoir plusieurs fournisseurs/régions (voir la
@@ -102,6 +117,10 @@ return (
 
 <div className="priceTileValue">
 {formatAr(currentPrice)}
+</div>
+
+<div style={{fontSize:"12px",color:"#6b776f",fontWeight:600}}>
+{basis}{packName ? ` · vendu par ${packName}` : ""}
 </div>
 
 <div className="priceTileMeta">
@@ -203,10 +222,26 @@ Aucune caractéristique enregistrée.
 ))}
 
 <li>
-<span className="bLabel">Unité d'achat</span> : <span className="bValue">
-{price.unite || "—"}{price.unite_achat ? ` (vendu par ${price.unite_achat})` : ""}
+<span className="bLabel">Prix indiqué</span> : <span className="bValue">
+{formatAr(currentPrice)} {basis}
 </span>
 </li>
+
+<li>
+<span className="bLabel">Vendu par</span> : <span className="bValue">
+{packName
+  ? `${packName}${packQty > 0 ? ` — contient ${packQty.toLocaleString("fr-FR")} ${price.unite || ""}`.trimEnd() : ""}`
+  : "non précisé (ni rouleau, ni pack, ni longueur) — utilise « Modifier » pour l'indiquer"}
+</span>
+</li>
+
+{packName && packPrice > 0 && (
+<li>
+<span className="bLabel">Prix d'achat entier</span> : <span className="bValue">
+{packName} : {formatAr(packPrice)}{packQty > 0 ? ` (soit ${formatAr(packPrice / packQty)} ${basis})` : ""}
+</span>
+</li>
+)}
 
 <li>
 <span className="bLabel">Source</span> : <span className="bValue">{price.prix_source || "—"}</span>

@@ -285,21 +285,21 @@ onChange={(e)=>setPrix(e.target.value)}
 
 <label className="mt-3" style={{display:"flex",alignItems:"center",gap:"8px",fontWeight:600}}>
 <input type="checkbox" checked={venduParPiece} onChange={(e)=>setVenduParPiece(e.target.checked)} style={{width:"auto"}} />
-Vendu par pièce/barre/plaque entière, pas au {unite || "…"} (ex : bois carré en barres de 4 m, ou tôle en feuilles de 6 m²)
+Vendu par rouleau / pack / barre / plaque entière, pas au {unite || "…"} (ex : tube en rouleau de 50 m, bois en barres de 4 m, tôle en feuilles de 6 m²)
 </label>
 
 {venduParPiece && <div className="formGrid mt-2">
 <label>
 Nom de l’unité d’achat
 <input
-placeholder="Ex : barre de 4 m, feuille de 6 m²"
+placeholder="Ex : rouleau de 50 m, barre de 6 m, pack de 12"
 value={uniteAchat}
 onChange={(e)=>setUniteAchat(e.target.value)}
 />
 </label>
 
 <label>
-Quantité par pièce (en {unite || "…"})
+Contenu / longueur d'un rouleau, pack ou barre (en {unite || "…"})
 <input
 type="number"
 placeholder={unite === "m2" ? "Ex : 2.98 (surface d’une plaque)" : "Ex : 4"}
@@ -309,7 +309,7 @@ onChange={(e)=>setQuantiteParPiece(e.target.value)}
 </label>
 
 <label>
-Prix par pièce (Ar)
+Prix d'un rouleau / pack / barre entier (Ar)
 <input
 type="number"
 placeholder="Ex : 7000"

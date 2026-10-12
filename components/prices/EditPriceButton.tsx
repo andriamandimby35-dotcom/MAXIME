@@ -136,27 +136,27 @@ onChange={(e)=>setPrix(e.target.value)}
 
 <label style={{display:"flex",alignItems:"center",gap:"8px",fontWeight:600,marginBottom:"8px"}}>
 <input type="checkbox" checked={venduParPiece} onChange={(e)=>setVenduParPiece(e.target.checked)} style={{width:"auto"}} />
-Vendu par pièce/barre/plaque entière
+Vendu par rouleau / pack / barre / plaque entière (pas au {price.unite || "mètre"})
 </label>
 
 {venduParPiece && <>
 <input
 className="w-full border p-3 rounded-lg mb-2"
-placeholder="Nom de l’unité d’achat (ex : barre de 4 m, feuille de 6 m²)"
+placeholder="Nom (ex : rouleau de 50 m, pack de 12, barre de 6 m, feuille de 6 m²)"
 value={uniteAchat}
 onChange={(e)=>setUniteAchat(e.target.value)}
 />
 <input
 className="w-full border p-3 rounded-lg mb-2"
 type="number"
-placeholder={`Quantité par pièce (en ${price.unite || "unité DAO"})`}
+placeholder={`Contenu / longueur d'un rouleau, pack ou barre (en ${price.unite || "unité DAO"}, ex : 50)`}
 value={quantiteParPiece}
 onChange={(e)=>setQuantiteParPiece(e.target.value)}
 />
 <input
 className="w-full border p-3 rounded-lg mb-2"
 type="number"
-placeholder="Prix par pièce (Ar)"
+placeholder="Prix d’un rouleau / pack / barre entier (Ar)"
 value={prixParPiece}
 onChange={(e)=>setPrixParPiece(e.target.value)}
 />
@@ -258,4 +258,4 @@ document.body,
 
 );
 
-}
+}
