@@ -10,6 +10,7 @@ import { stripLineReference } from "@/lib/prices/synonyms";
 // Règles quand le devis ne précise rien :
 // - dosage : le plus bas (250 kg/m³) ;
 // - épaisseur d'un parpaing : standard 15 cm ; brique : standard 11 cm ;
+// - maçonnerie de briques (Madagascar) : mortier de TERRE (terre + eau, quasi gratuit), jamais de ciment ni de sable ;
 // - épaisseur d'un enduit / crépi / chape : 2 / 1,5 / 4 cm.
 
 export type MatchSpec = { all: string[]; any?: string[]; exclude?: string[] };
@@ -77,7 +78,7 @@ type Rule = {
   units: string[];
   keywords: string[];
   exclude?: string[];
-  build: (key: string, designation: string) => Omit<WorkComposition, "ruleId" | "title">;
+  build: (key: string, designation: string, unit: string) => Omit<WorkComposition, "ruleId" | "title">;
 };
 
 function dosageInfo(designation: string) {
@@ -161,20 +162,26 @@ const RULES: Rule[] = [
     },
   },
   {
-    id: "brique", title: "Maçonnerie de briques", units: ["m2"], keywords: ["brique"], exclude: ["refractaire"],
-    build: (_key, designation) => {
+    // Règle Madagascar : toute maçonnerie de briques est montée au mortier de TERRE (terre + eau, presque gratuit).
+    // Pas de ciment ni de sable : la brique (≈ 140 Ar la pièce) est le seul vrai coût de matériau.
+    id: "brique", title: "Maçonnerie de briques (mortier de terre)", units: ["m2", "m3"], keywords: ["brique"], exclude: ["refractaire"],
+    build: (_key, designation, unit) => {
       const picked = pickThickness(parseThicknessCm(designation) ?? bareThickness(designation, "brique", "11|22"), [11, 22], 11);
       const thickness = picked.value;
-      const count = thickness === 22 ? 130 : 65;
-      const volume = thickness === 22 ? 0.05 : 0.025;
+      // Par m² de mur : 65 briques (mur de 11 cm) ou 130 (22 cm). Par m³ de mur : 590 briques (65 / 0,11).
+      const cubic = unit === "m3";
+      const count = cubic ? 590 : thickness === 22 ? 130 : 65;
+      const earth = cubic ? 0.23 : thickness === 22 ? 0.05 : 0.025;
       return {
-        dosage: 250, thicknessCm: thickness,
-        notes: [picked.stated ? `Épaisseur du mur indiquée : ${thickness} cm.` : "Épaisseur non indiquée : brique standard, mur de 11 cm.", "Joints au mortier dosé à 250 kg/m³ (le plus bas)."],
+        dosage: null, thicknessCm: cubic ? null : thickness,
+        notes: [
+          cubic ? "Mur de briques au m³ : environ 590 briques par m³ (pertes comprises)." : picked.stated ? `Épaisseur du mur indiquée : ${thickness} cm.` : "Épaisseur non indiquée : brique standard, mur de 11 cm.",
+          "Madagascar : les briques sont montées au mortier de terre (terre + eau, presque gratuit) : pas de ciment ni de sable.",
+        ],
         components: [
-          { designation: "Brique pleine", search: "Brique pleine", unit: "u", quantity: count, note: `Environ ${count} briques par m² (pertes comprises).`, match: { all: ["brique"], exclude: ["refractaire"] } },
-          { designation: "Ciment pour mortier", search: "Ciment", unit: "kg", quantity: round(250 * volume), note: "Mortier des joints.", match: CEMENT },
-          { designation: "Sable pour mortier", search: "Sable", unit: "m3", quantity: round(volume), note: "Mortier des joints.", match: SAND },
-          { designation: "Eau", search: "Eau", unit: "L", quantity: round(250 * volume * 0.5, 2), note: "Environ 0,5 L d'eau par kg de ciment.", optional: true, match: WATER },
+          { designation: "Brique cuite pleine", search: "Brique cuite pleine", unit: "u", quantity: count, note: `Environ ${count} briques par ${cubic ? "m³" : "m²"} (pertes comprises).`, match: { all: ["brique"], exclude: ["refractaire", "maconnerie", "mur", "pose", "main", "creuse"] } },
+          { designation: "Terre pour mortier", search: "Terre argileuse", unit: "m3", quantity: earth, note: "Mortier de terre des joints (terre locale, quasi gratuite).", optional: true, match: { all: ["terre"], exclude: ["brique", "bloc", "vegetale", "cuite", "plein", "btc", "stabilisee", "armee", "terrassement", "mur"] } },
+          { designation: "Eau", search: "Eau", unit: "L", quantity: round(earth * 300, 2), note: "Environ 300 L d'eau par m³ de mortier de terre.", optional: true, match: WATER },
         ],
       };
     },
@@ -304,7 +311,7 @@ export function compositionFor(rawDesignation: string, unit: string): WorkCompos
     if (!best || index < best.index) best = { rule, index };
   }
   if (!best) return null;
-  const built = best.rule.build(key, designation);
+  const built = best.rule.build(key, designation, targetUnit);
   return { ruleId: best.rule.id, title: best.rule.title, ...built };
 }
 

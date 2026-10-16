@@ -588,6 +588,7 @@ export async function POST(request: Request) {
         "Un béton Q350 est une interprétation à confirmer: ne garantis jamais sa formulation sans le CCTP ou le BET.",
         "Pour une maçonnerie de parpaings au m², identifie les dimensions probables du bloc, calcule le nombre de blocs par m² avec pertes, puis le mortier, le ciment, le sable et l'eau au dosage minimal adapté.",
         "Si l'épaisseur du parpaing est absente, propose les dimensions compatibles dans equivalent_options et exige une validation avant remplacement.",
+        "RÈGLE MADAGASCAR (très importante) : toute maçonnerie de briques (au m² ou au m³) est montée au mortier de TERRE. Elle se compose uniquement de briques (environ 140 Ar la pièce : 65 briques par m² pour un mur de 11 cm, environ 590 par m³), de terre argileuse locale (quasi gratuite, ≈ 0,025 m³ par m² ou 0,23 m³ par m³) et d'eau. Ne mets JAMAIS de ciment, de sable ni de mortier de ciment dans la composition d'une maçonnerie de briques : le prix du m³ de maçonnerie de briques reste de l'ordre de la valeur des briques (≈ 85 000 à 95 000 Ar le m³ hors main-d'œuvre) et ne doit pas grimper au-delà.",
         "Pour un ouvrage composé, le prix proposé correspond aux matériaux de la composition; n'ajoute pas la main-d'œuvre déjà calculée séparément dans le devis interne.",
         "Explique dans equivalence_note les quantités de chaque composant ramenées à l'unité DAO et la formule du prix composé.",
         "Si aucun prix complet fiable n'est trouvé, remplis manual_price_inputs avec uniquement les composants dont l'utilisateur doit saisir le prix local.",
@@ -858,11 +859,9 @@ export async function POST(request: Request) {
 
   let priceId = existingPrice?.id as string | undefined;
   if (!priceId) {
-    const { data: created, error } = await supabase
-      .from("price_library")
-      .insert({
+    const buildLibraryRow = (designationText: string) => ({
         organization_id: organizationId,
-        designation: libraryDesignation,
+        designation: designationText,
         categorie,
         unite,
         prix_ia: calculatedInternetPrice,
@@ -880,42 +879,24 @@ export async function POST(request: Request) {
         delivery_cost: bestOffer.delivery_cost,
         landed_price: calculatedInternetPrice,
         last_checked_at: new Date().toISOString(),
-      })
-      .select("id")
-      .single();
-    if (error || !created) return NextResponse.json({ error: "Prix trouvé mais non enregistrable." }, { status: 500 });
-    priceId = created.id;
-
-    // La fiche porte le nom commercial trouvé (« Ciment Orimbato »). Pour que le prochain devis ou DAO qui écrit la ligne comme
-    // aujourd'hui retrouve CE prix gratuitement, on garde aussi la fiche sous l'écriture du devis (sans numéro de poste), si elle
-    // n'existe pas déjà. Seuls les résultats de la recherche IA sont enregistrés : un prix repris de la bibliothèque ne l'est jamais.
-    try {
-      const wording = designation.replace(/\s+/g, " ").trim().slice(0, 240);
-      const sameWording = (organizationPrices ?? []).some((row) => canonicalMaterialKey(String(row.designation ?? "")) === canonicalMaterialKey(wording) && sameUnit(row));
-      if (wording && canonicalMaterialKey(libraryDesignation) !== canonicalMaterialKey(wording) && !sameWording) {
-        await supabase.from("price_library").insert({
-          organization_id: organizationId,
-          designation: wording,
-          categorie,
-          unite,
-          prix_ia: calculatedInternetPrice,
-          prix_retenu: calculatedInternetPrice,
-          prix_source: bestOffer.source_url,
-          fournisseur: bestOffer.supplier_name,
-          ville: bestOffer.supplier_city,
-          region: bestOffer.supplier_region,
-          reference_source: bestOffer.source_url,
-          statut_prix: "ia",
-          origine_prix: "internet_ia",
-          distance_chantier_km: bestOffer.distance_km,
-          confiance_ia: bestOffer.confidence,
-          nom_chantier: worksiteName,
-          delivery_cost: bestOffer.delivery_cost,
-          landed_price: calculatedInternetPrice,
-          last_checked_at: new Date().toISOString(),
-        });
+    });
+    const insertLibraryRow = (designationText: string) => supabase.from("price_library").insert(buildLibraryRow(designationText)).select("id").single();
+    let { data: created, error } = await insertLibraryRow(libraryDesignation);
+    // La bibliothèque refuse deux fiches qui donnent le même nom « normalisé » (ex : même tuyau déjà enregistré dans une autre unité).
+    // Au lieu de perdre le prix trouvé, on l'enregistre sous un nom légèrement différent (avec l'unité), puis avec « - IA ».
+    if (error?.code === "23505") {
+      for (const variant of [`${libraryDesignation} (${unite})`, `${libraryDesignation} (${unite}) - IA`]) {
+        const retry = await insertLibraryRow(variant);
+        created = retry.data;
+        error = retry.error;
+        if (!error && created) break;
       }
-    } catch { /* la fiche principale est déjà enregistrée */ }
+    }
+    if (error || !created) {
+      console.error("price_library insert", error);
+      return NextResponse.json({ error: `Prix trouvé mais non enregistrable (${error?.message ?? "erreur inconnue"}).` }, { status: 500 });
+    }
+    priceId = created.id;
   }
 
   const historyRows = offers.map((offer, index) => ({

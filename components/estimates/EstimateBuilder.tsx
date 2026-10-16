@@ -489,6 +489,16 @@ function fallbackCompositeInputs(designation: string) {
     ];
   }
 
+  // Madagascar : maçonnerie de briques = briques + terre + eau (mortier de terre), jamais de ciment ni de sable.
+  if (normalized.includes("brique") && !normalized.includes("parpaing")) {
+    const cubic = /\bm3\b|m³/.test(normalized);
+    return [
+      { designation: "Brique cuite pleine", unit: "U", quantity_per_work_unit: cubic ? 590 : 65, note: `Environ ${cubic ? 590 : 65} briques par ${cubic ? "m³" : "m²"} (pertes comprises).`, ...emptyPrice },
+      { designation: "Terre pour mortier", unit: "m³", quantity_per_work_unit: cubic ? 0.23 : 0.025, note: "Mortier de terre : terre locale, quasi gratuite.", ...emptyPrice },
+      { designation: "Eau", unit: "L", quantity_per_work_unit: cubic ? 70 : 8, note: "Eau du mortier de terre.", ...emptyPrice },
+    ];
+  }
+
   if (normalized.includes("maconnerie") || normalized.includes("parpaing") || normalized.includes("brique")) {
     return [
       { designation: "Blocs ou briques", unit: "U", quantity_per_work_unit: 12.5, note: "Quantité indicative par m², à adapter aux dimensions prévues au DAO.", ...emptyPrice },

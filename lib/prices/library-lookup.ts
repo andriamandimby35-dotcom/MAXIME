@@ -107,7 +107,8 @@ const LOOSE_ACTIONS = ["reparation", "remplacement", "depose", "demolition", "cu
 const LOOSE_EXTRA: Record<string, string> = { ventail: "vantail", ventaux: "vantail", vantaux: "vantail", ventails: "vantail", metallique: "metal", metalliques: "metal", metalliq: "metal", bahu: "bahut", bahuts: "bahut", exterieure: "exterieur", exterieures: "exterieur", interieure: "interieur", interieures: "interieur" };
 
 function looseSignature(text: string) {
-  const words = btpTokens(text).map((word) => LOOSE_EXTRA[word] ?? word);
+  // « Ø25 » devient « 25mm » dans les synonymes : on compare le nombre seul, pour qu'un tuyau « PHED 25 » retrouve « PEHD Ø25 ».
+  const words = btpTokens(text).map((word) => LOOSE_EXTRA[word] ?? word).map((word) => (/^\d+mm$/.test(word) ? word.slice(0, -2) : word));
   const actions = new Set(words.filter((word) => LOOSE_ACTIONS.some((action) => word.startsWith(action.slice(0, 6)))));
   const digits = new Set(words.filter((word) => /\d/.test(word)));
   const content = new Set(words.filter((word) => !actions.has(word) && !/\d/.test(word)));
