@@ -308,11 +308,16 @@ export function generateOfficialEstimatePdf(input: OfficialPdfInput) {
     const designationLines = wrapText(row.designation, COLUMN_WIDTHS[1] - 10, 8);
     const concerneLines = cleanText(row.concerne) ? wrapText(`Concerne : ${cleanText(row.concerne)}`, COLUMN_WIDTHS[1] - 10, 8) : [];
     const textLines = [...designationLines, ...concerneLines];
-    const height = Math.max(22, textLines.length * 10 + 10 + (concerneLines.length ? 3 : 0)); ensureSpace(height);
+    // N° du DAO (ex. « B 254 - 2 - b ») : trop large pour la petite colonne, il passe sur 2 ou 3 lignes plus fines.
+    const numberText = cleanText(row.number);
+    const numberFits = textWidth(numberText, 7.6) <= COLUMN_WIDTHS[0] - 4;
+    const numberLines = numberFits ? [numberText] : wrapText(numberText, COLUMN_WIDTHS[0] - 4, 6.8).slice(0, 3);
+    const height = Math.max(22, textLines.length * 10 + 10 + (concerneLines.length ? 3 : 0), numberFits ? 0 : numberLines.length * 8.6 + 8); ensureSpace(height);
     const top = y + 5; const bottom = y - height + 5;
     // Numéro, unité, quantité, prix et montant : centrés ou alignés à droite, au milieu de la ligne.
     const middle = (top + bottom) / 2 - 2.6;
-    addColumnText(cleanText(row.number), 0, middle, "center");
+    if (numberFits) addColumnText(numberText, 0, middle, "center");
+    else numberLines.forEach((line, index) => addColumnText(line, 0, middle + (numberLines.length - 1) * 4.3 - index * 8.6, "center", 6.8));
     addColumnText(cleanText(row.unit), 2, middle, "center");
     addColumnText(quantity(row.quantity), 3, middle, "right");
     addColumnText(amountCell(row.unitPrice), 4, middle, "right");

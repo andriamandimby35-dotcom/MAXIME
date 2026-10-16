@@ -59,6 +59,10 @@ type TenderWorkItem = {
   source_basis?: string;
   safety_note?: string;
   requires_validation?: boolean;
+  /** N° du poste tel qu'imprimé dans le DAO (ex. « B 101 - h »). */
+  code?: string;
+  /** Ligne « TOTAL … × n » du DAO : nombre de répétitions de l'ouvrage (ex. 25 bornes fontaines). */
+  multiplier?: number | null;
 };
 
 type InternalCostRecommendation = {
@@ -928,6 +932,23 @@ export default function EstimateBuilder({
           const totalKey = daoColumnName(columns, ["Total"]);
           const positionKey = daoColumnName(columns, ["N°", "N"]);
 
+          // Ouvrages répétés (« TOTAL BORNE FONTAINE × 25 ») : les postes du bloc sont comptés n fois dans le devis
+          // (totaux, achats, chantier), alors que le PDF du BDQE garde les quantités du DAO (par unité d'ouvrage) puis
+          // imprime la ligne TOTAL multipliée, comme dans le DAO. Voir l'export PDF officiel.
+          const blockMultipliers = new Map<number, number>();
+          {
+            let blockStart = 0;
+            rowsToImport.forEach((candidate, candidateIndex) => {
+              const candidateType = candidate.row_type ?? "item";
+              if (candidateType === "section") blockStart = candidateIndex + 1;
+              else if (candidateType === "subtotal" && !candidate.internal_only && Number(candidate.multiplier) > 1) {
+                for (let k = blockStart; k < candidateIndex; k += 1) {
+                  if ((rowsToImport[k].row_type ?? "item") === "item" && !rowsToImport[k].internal_only) blockMultipliers.set(k, Number(candidate.multiplier));
+                }
+              }
+            });
+          }
+
           let itemPosition = 0;
           setSourceTenderTitle(sourceTender.title);
           setEstimateLines(
@@ -953,6 +974,9 @@ export default function EstimateBuilder({
                 importedQuantity = (daoTransport.totalKg / 1000) * daoTransport.distanceKm;
                 importedSourceBasis = `Transport repris du DAO : ${(daoTransport.totalKg / 1000).toLocaleString("fr-FR")} t × ${daoTransport.distanceKm.toLocaleString("fr-FR")} km${daoTransport.source ? ` (${daoTransport.source})` : ""}.`;
               }
+              const blockMultiplier = blockMultipliers.get(rowIndex) ?? 1;
+              const daoQuantityPerUnit = importedQuantity;
+              if (blockMultiplier > 1 && typeof importedQuantity === "number") importedQuantity = Math.round(importedQuantity * blockMultiplier * 1000) / 1000;
               if (rowType === "item") itemPosition += 1;
               return {
               [positionKey]: rowType === "item" ? itemPosition : "",
@@ -968,6 +992,9 @@ export default function EstimateBuilder({
               __daoCategory: item.category ?? item.categorie ?? "",
               __daoParentTitle: item.parent_title ?? "",
               __daoParentReference: item.parent_reference ?? "",
+              __daoCode: String(item.code ?? "").trim(),
+              __daoMultiplier: blockMultiplier > 1 ? blockMultiplier : rowType === "subtotal" && Number(item.multiplier) > 1 ? Number(item.multiplier) : 0,
+              __daoQuantityPerUnit: blockMultiplier > 1 && typeof daoQuantityPerUnit === "number" ? daoQuantityPerUnit : "",
               __daoRowType: rowType,
               __daoSectionTitle: item.section_title ?? "",
               __internalOnly: item.internal_only ?? false,

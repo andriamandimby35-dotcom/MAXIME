@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { readTransportWeightsFromPdf, type TransportWeights } from "@/lib/dao/transport-weights";
+import { describePageMap } from "@/lib/dao/lot-detection";
 
 // Un DAO peut contenir de nombreuses pages et des tableaux visuels détaillés.
 // La route ne doit pas être interrompue pendant cette lecture complète.
@@ -77,11 +78,16 @@ const daoSchema = {
           needs_review: { type: "boolean" },
           note: { type: "string" },
           pricing_context: { type: "string" },
+          // N° (code) du poste ou de la rubrique tel qu'imprimé dans la colonne « N° » du DAO (ex. « B 101 - h », « 301 »).
+          code: { type: "string" },
+          // Multiplicateur d'une ligne « TOTAL … × n » (ex. 8 forages, 25 bornes fontaines) ; null pour toute autre ligne.
+          multiplier: { type: ["number", "null"] },
         },
         required: [
           "row_type", "parent_title", "parent_reference", "section_title",
           "designation", "category", "unit", "quantity",
           "source_reference", "needs_review", "note", "pricing_context",
+          "code", "multiplier",
         ],
       },
     },
@@ -277,6 +283,22 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "DAO introuvable ou document non autorisé." }, { status: 404 });
     }
 
+    // DAO à plusieurs lots : ce PDF est alors le « mini-DAO » d'un seul lot. Lecture silencieuse : si le SQL des lots
+    // n'est pas encore lancé, la requête échoue et l'analyse se déroule exactement comme pour un DAO à lot unique.
+    const lotQuery = await supabase
+      .from("tenders")
+      .select("parent_tender_id,lot_number,lot_label,source_pages")
+      .eq("id", tender.id)
+      .maybeSingle();
+    const lotInfo = lotQuery.error ? null : lotQuery.data as { parent_tender_id: string | null; lot_number: number | null; lot_label: string | null; source_pages: number[] | null } | null;
+    const lotInstructions: string[] = lotInfo?.lot_number ? [
+      `ATTENTION — DAO À PLUSIEURS LOTS : le PDF fourni est un extrait du DAO complet qui ne concerne QUE le lot ${lotInfo.lot_number}${lotInfo.lot_label ? ` (${lotInfo.lot_label})` : ""}. Les tableaux de prix (bordereau de prix unitaire, détail quantitatif et estimatif) des autres lots ont été retirés. Analyse uniquement ce lot comme s'il s'agissait d'un DAO à lot unique : bordereau, quantités, localisation, délais et pièces du lot ${lotInfo.lot_number}.`,
+      `Le DAO cite encore les autres lots dans ses listes (objet du marché, consistance des travaux, qualifications, garanties) : ignore tout ce qui ne concerne pas le lot ${lotInfo.lot_number}. Pour toute valeur qui dépend du lot (montant de la garantie de soumission, qualifications et références techniques exigées, délai d'exécution, personnel et matériel minimum, chiffre d'affaires ou liquidités exigés), retiens UNIQUEMENT la valeur du lot ${lotInfo.lot_number} ; si le DAO ne donne qu'une valeur commune à tous les lots, utilise-la et précise « commune à tous les lots ». Le lieu du chantier (worksite_location) est celui du lot ${lotInfo.lot_number}. Les pièces de soumission sont à produire pour ce seul lot (une offre par lot, avec la mention « Lot ${lotInfo.lot_number} » quand le DAO le demande). Si le délai d'exécution est proposé par le candidat avec un maximum par lot, reprends ce maximum sans le cumuler avec les autres lots.`,
+      ...(lotInfo.source_pages?.length ? [
+        `Les pages du PDF fourni sont renumérotées après le retrait des pages inutiles. Dans TOUS les champs de pages (source_reference, template_page_numbers, page_numbers, worksite_location_source…), indique toujours le numéro de page du PDF FOURNI, jamais celui du DAO complet. Les numéros imprimés ou cités dans le DAO (sommaire, renvois « voir page X », numéros de pied de page) peuvent désigner le DAO complet : convertis-les avec cette correspondance (PDF fourni → DAO complet) : ${describePageMap(lotInfo.source_pages)}. Une page du DAO complet absente de cette liste a été retirée : n'invente jamais son contenu.`,
+      ] : []),
+    ] : [];
+
     const pdfResponse = await fetch(pdfUrl);
     if (!pdfResponse.ok) {
       return NextResponse.json({ error: "Le document PDF est inaccessible." }, { status: 502 });
@@ -343,6 +365,7 @@ export async function POST(request: Request) {
         max_output_tokens: 48_000,
         instructions: [
           "Tu analyses un DAO de travaux publics ou BTP à Madagascar.",
+          ...lotInstructions,
           "Extrais uniquement les postes explicitement présents dans le document.",
           "Reproduis l'ordre et la structure exacte du bordereau DAO.",
           "RÈGLE GÉNÉRALE SUR LES NUMÉROS DE PAGE, valable pour TOUT numéro de page que tu indiques dans ce schéma (source_reference, template_page_numbers, worksite_location_source, page_numbers, ou tout autre champ de page) : le sommaire, la table des matières ou une référence croisée imprimée dans le DAO indique parfois un numéro de page qui ne correspond PLUS exactement à la vraie page du fichier PDF fourni — c'est très souvent une erreur de numérotation de la personne qui a rédigé le DAO (décalage d'impression, pages ajoutées ou retirées après coup), mais la vraie page n'est presque jamais loin de celle annoncée. Utilise donc TOUJOURS le numéro donné par le DAO comme point de départ, mais vérifie-le avant de l'indiquer : ouvre et lis réellement cette page du PDF fourni, et confirme que son titre ou son contenu correspond bien à l'élément concerné. Si ce n'est pas le cas, élargis ta recherche PROGRESSIVEMENT, page par page, autour de ce numéro : regarde d'abord la page juste avant ET la page juste après (écart de 1 page). Si le titre ou le contenu n'y est toujours pas, élargis encore d'une page de chaque côté (écart de 2 pages), puis encore (écart de 3 pages), et ainsi de suite — n'abandonne jamais après un seul essai à une seule page avant/après, continue d'élargir tant que l'écart reste raisonnable (une quinzaine de pages de chaque côté suffit largement à couvrir un simple décalage d'impression) jusqu'à trouver la page où ce titre ou ce contenu apparaît vraiment, et indique cette page réelle à la place — ne recopie jamais aveuglément le numéro du sommaire, mais ne pars pas non plus à la recherche de ce titre dans tout le DAO au-delà de cet écart raisonnable : le numéro donné par le DAO reste le bon point de départ, cette correction locale progressive doit rester proportionnée. Si plus loin dans ces instructions un numéro de page précis est mentionné pour un barème, un tableau, une annexe ou toute autre pièce, ce numéro est un exemple donné pour un DAO déjà rencontré et sert uniquement à te signaler QUEL type de contenu chercher : il ne s'applique pas forcément au DAO que tu analyses maintenant, dont la pagination peut être totalement différente — retrouve toujours ce contenu par son titre ou sa nature, jamais en te fiant à ce numéro d'exemple. Si, malgré cette vérification dans les pages voisines, tu ne parviens toujours pas à confirmer avec certitude la bonne page : n'efface et n'omets JAMAIS pour autant l'élément concerné (annexe, pièce, tableau, barème...) de ta réponse — un élément réel du DAO avec une page seulement approximative reste toujours préférable à une pièce qui disparaît totalement de la soumission du candidat. Indique alors le numéro de page le plus probable que tu as trouvé (au pire, le numéro d'origine donné par le DAO si aucune meilleure piste n'apparaît), et signale cette incertitude dans warnings plutôt que de supprimer l'élément.",
@@ -354,6 +377,11 @@ export async function POST(request: Request) {
           "Pour section et subtotal, conserve le libellé exact dans designation, utilise une unité vide et quantity=null.",
           "Ne fusionne jamais deux ouvrages et ne supprime jamais un titre ou un sous-total présent dans le DAO.",
           "Respecte les désignations, unités, quantités et numérotations du document.",
+          "N° du DAO : pour chaque poste (row_type=item) renseigne code avec le numéro ou code imprimé dans la colonne « N° » du bordereau (par exemple « B 101 - h », « D 355 - 4 - a », « 1.2.3 », « 301 »), recopié EXACTEMENT, avec ses espaces et tirets, sans le corriger ni le renuméroter. Pour une rubrique (row_type=section) renseigne code avec son numéro de rubrique imprimé (par exemple « 100 »). Laisse code vide quand aucun numéro n'est imprimé : ne l'invente jamais.",
+          "Multiplicateurs : quand, après le sous-total d'un ouvrage, le DAO imprime une ligne « TOTAL … » suivie d'un nombre de répétitions (par exemple « TOTAL BORNE FONTAINE 25,00 », « TOTAL OUVRAGE DE CAPTAGE 2,00 », « TOTAL FORAGE × 8 »), ajoute APRÈS le sous-total normal une ligne row_type=subtotal dont designation reprend le libellé exact de cette ligne et multiplier le nombre de répétitions. Le sous-total normal garde multiplier=null. Les quantités des postes restent EXACTEMENT celles du DAO (par unité d'ouvrage) : ne les multiplie jamais toi-même. Dans tous les autres cas, multiplier=null.",
+          "Hiérarchie : une row_type=section n'est créée que pour une rubrique qui possède son propre sous-total dans le DAO. Un simple intertitre interne sans sous-total (par exemple « Equipement hydraulique ») ne devient PAS une section : indique-le au début de note de chaque poste concerné (« Intertitre : Equipement hydraulique »). Un poste dont la désignation s'étend sur plusieurs lignes reste UN seul poste ; une ligne recopiée à l'identique dans plusieurs rubriques (même code) reste présente dans chaque rubrique avec sa propre quantité.",
+          "Postes composés et prestations : pour un poste « Fourniture et pose de… » (conduite, vanne, raccord, borne fontaine, pompe, regard…), indique dans pricing_context les matériaux principaux à fournir avec leur dimension, diamètre, pression nominale (PN, série en bars) et matière (PEHD, PVC, acier galvanisé, fonte…), puis la main-d'œuvre et les engins de pose, tels que lus dans le DAO ou ses spécifications techniques. Pour une prestation qui n'est pas un matériau d'une bibliothèque de prix (forage, essais de pompage, analyses d'eau, études géophysiques ou topographiques, installation et repli de chantier, formation, sensibilisation, plans de recollement), écris au début de pricing_context « Prestation à chiffrer par composition ou devis » et résume ce que le DAO exige (méthode, durée, nombre d'essais, normes) sans inventer de prix.",
+          "Si le bordereau de prix unitaire (BPU) contient une colonne « prix en toutes lettres » ou une phrase « l'unité à … Ariary », ce texte n'est pas une quantité : garde-le dans note ; unités Fft/ff/forfait, U, Km, ml, m2, m3, kg, j sont à recopier telles quelles. Les nombres suivent le format français (« 1 250,50 » = 1250,5).",
           "N'invente jamais une quantité, un prix, un lot ou une exigence.",
           "Pour une quantité absente, utilise null et needs_review=true.",
           "source_reference indique la page, section, lot ou bordereau justificatif.",
@@ -483,6 +511,8 @@ export async function POST(request: Request) {
         needs_review: boolean;
         note: string;
         pricing_context: string;
+        code: string;
+        multiplier: number | null;
       }>;
       warnings: string[];
       submission_checklist: Array<{ title: string; sequence: number; source_reference: string; level: number }>;
@@ -546,6 +576,8 @@ export async function POST(request: Request) {
         needs_review: item.needs_review,
         note: item.note,
         pricing_context: item.pricing_context,
+        code: item.code,
+        multiplier: item.multiplier,
       })),
     };
 

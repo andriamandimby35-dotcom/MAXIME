@@ -66,6 +66,10 @@ export default function NewTenderPage() {
         form.get("document") as File;
 
 
+      const hasSeveralLots =
+        form.get("several_lots") === "on";
+
+
 
       let documentUrl = null;
 
@@ -219,6 +223,7 @@ export default function NewTenderPage() {
 
 
       const {
+        data:createdTender,
         error
       }
       =
@@ -248,7 +253,9 @@ export default function NewTenderPage() {
         status:
           "draft"
 
-      });
+      })
+      .select("id")
+      .single();
 
 
 
@@ -270,6 +277,22 @@ export default function NewTenderPage() {
 
       }
 
+
+
+      /*
+      DAO à plusieurs lots : on passe directement à l'écran de choix des lots
+      (le PDF complet reste conservé, un mini-DAO est créé par lot choisi).
+      */
+
+      if (hasSeveralLots && createdTender?.id && documentUrl) {
+
+        router.push(
+          `/tenders/${createdTender.id}/lots`
+        );
+
+        return;
+
+      }
 
 
       alert(
@@ -412,6 +435,22 @@ export default function NewTenderPage() {
           />
 
         </div>
+
+
+
+        <label className="flex items-start gap-3">
+
+          <input
+            type="checkbox"
+            name="several_lots"
+            style={{ width: "auto", marginTop: 4 }}
+          />
+
+          <span>
+            Ce DAO est divisé en plusieurs lots : choisir les lots après l&apos;envoi du PDF
+          </span>
+
+        </label>
 
 
 

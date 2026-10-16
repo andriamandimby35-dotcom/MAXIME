@@ -62,6 +62,27 @@ export const SYNONYM_GROUPS: string[][] = [
   ["tuyau", "canalisation", "conduite"],
   ["eaux usees", "eau usee", "e u", "eu"],
   ["robinet puisage", "robinet de puisage", "robinet de jardin", "robinet de lavage"],
+  // Adduction d'eau potable (AEP) : un DAO écrit « PHED », « PEHD » ou « polyéthylène haute densité » pour la même conduite.
+  ["pehd", "phed", "pe hd", "polyethylene haute densite", "polyethylene hd", "tube polyethylene", "tuyau polyethylene"],
+  ["galva", "galvanise", "galvanisee", "acier galvanise", "fer galvanise", "tube galva", "tube galvanise"],
+  ["vanne quart de tour", "vanne 1sur4 de tour", "vanne 1sur4 tour", "robinet 1sur4 de tour", "robinet quart de tour", "vanne a boisseau", "vanne boule", "robinet a tournant spherique"],
+  ["collier de prise", "collier prise en charge", "collier de prise en charge", "collier de piquage"],
+  ["compteur", "compteur d eau", "compteur eau", "compteur volumetrique", "compteur d eau volumetrique"],
+  ["borne fontaine", "bornes fontaines", "borne fontaine monument", "bf"],
+  ["forage", "foration", "puits fore", "puits tube"],
+  ["regard", "regard de visite", "regard de vanne", "regard vanne"],
+  ["reduction", "reduit", "reduite", "reducteur", "cone de reduction"],
+  ["clapet", "clapet anti retour", "clapet de retenue", "clapet non retour"],
+  ["pompe manuelle", "pompe a motricite humaine", "pompe india mark iii", "pompe india mark 3", "india mark iii", "india mark 3", "pompe a main"],
+  ["pompe solaire", "pompe immergee solaire", "groupe motopompe solaire", "pompe a energie solaire", "pompe immergee a energie solaire"],
+  ["analyse eau", "analyse d eau", "analyses d eau", "analyse de l eau", "analyse physico chimique de l eau", "analyse bacteriologique de l eau"],
+  ["topographie", "leve topographique", "leves topographiques", "etude topographique", "travaux topographiques"],
+  // Pression nominale des conduites : « PN10 », « PN 10 », « 10 bars » sont la même exigence.
+  ["pn6", "pn 6", "pn6 bars", "pn6 bar", "pn 6 bars", "pn 6 bar", "6 bars", "6 bar"],
+  ["pn8", "pn 8", "pn8 bars", "pn8 bar", "pn 8 bars", "pn 8 bar", "8 bars", "8 bar"],
+  ["pn10", "pn 10", "pn10 bars", "pn10 bar", "pn 10 bars", "pn 10 bar", "10 bars", "10 bar"],
+  ["pn12p5", "pn 12p5", "pn12p5 bars", "pn12p5 bar", "pn 12p5 bars", "pn 12p5 bar", "12p5 bars", "12p5 bar", "serie 12p5"],
+  ["pn16", "pn 16", "pn16 bars", "pn16 bar", "pn 16 bars", "pn 16 bar", "16 bars", "16 bar"],
 ];
 
 // 2) Mots « de remplissage » qui ne changent pas le matériau (verbes de mise en œuvre, unités écrites dans le texte…).
@@ -88,6 +109,7 @@ const UNIT_GROUPS: string[][] = [
   ["kg", "kilo", "kilos", "kilogramme", "kilogrammes"],
   ["l", "litre", "litres", "lt"],
   ["sac", "sacs"],
+  ["km", "kilometre", "kilometres", "kilometre lineaire", "kilometres lineaires"],
   ["j", "jour", "jours", "jour personne", "jour-personne", "j pers", "j-pers", "hj", "homme jour"],
 ];
 

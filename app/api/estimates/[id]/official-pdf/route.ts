@@ -117,13 +117,20 @@ async function generateOfficialPdfResponse(
   let currentSectionParentReference = "";
   let currentSubtotal = 0;
   let grandTotal = 0;
+  // Numéro de la rubrique imprimé dans le DAO (ex. « 100 ») : repris comme référence dans le récapitulatif.
+  let currentSectionCode = "";
+  // Dernier sous-total imprimé : sert à la ligne « TOTAL … × n » des ouvrages répétés (ex. 25 bornes fontaines).
+  let lastSubtotalTotal: number | null = null;
+  let lastRecapEntry = null as { reference: string; title: string; total: number } | null;
   const addSectionToRecap = () => {
     if (!currentSection) return;
     const groupTitle = currentSectionParentTitle || "Bordereau détail quantitatif et estimatif";
     const groupReference = currentSectionParentReference || "";
     const groupKey = `${groupReference}|${groupTitle}`;
     const group = recapGroups.get(groupKey) ?? { reference: groupReference, title: groupTitle, entries: [] };
-    group.entries.push({ reference: "", title: currentSection, total: currentSubtotal });
+    const entry = { reference: currentSectionCode, title: currentSection, total: currentSubtotal };
+    group.entries.push(entry);
+    lastRecapEntry = entry;
     recapGroups.set(groupKey, group);
   };
   // Prix du devis externe : même coefficient pour tous les postes, arrondi à
@@ -150,12 +157,29 @@ async function generateOfficialPdfResponse(
       currentSectionParentTitle = String(line.__daoParentTitle ?? "").trim();
       currentSectionParentReference = String(line.__daoParentReference ?? "").trim();
       currentSubtotal = 0;
-      if (currentSection) pdfRows.push({ kind: "section", title: currentSection });
+      currentSectionCode = String(line.__daoCode ?? "").trim();
+      lastSubtotalTotal = null;
+      if (currentSection) pdfRows.push({ kind: "section", title: currentSection, ...(currentSectionCode ? { number: currentSectionCode } : {}) });
       continue;
     }
     if (type === "subtotal") {
+      const multiplier = Number(line.__daoMultiplier) || 0;
+      if (multiplier > 1 && lastSubtotalTotal !== null) {
+        // Ouvrage répété : « TOTAL BORNE FONTAINE × 25 » = dernier sous-total (par unité d'ouvrage) × n. Le total
+        // général n'est pas touché : les postes du bloc sont déjà comptés n fois dans le devis.
+        const label = designation.replace(/^\s*(?:sous[- ]?)?total\s+/i, "").trim() || "OUVRAGE";
+        const title = /[×x]\s*\d/i.test(label) ? label : `${label} × ${multiplier.toLocaleString("fr-FR")}`;
+        const multiplied = lastSubtotalTotal * multiplier;
+        pdfRows.push({ kind: "subtotal", title, total: multiplied });
+        // Le récapitulatif du DAO reprend le montant multiplié de la rubrique.
+        if (lastRecapEntry) lastRecapEntry.total = multiplied;
+        lastSubtotalTotal = null;
+        lastRecapEntry = null;
+        continue;
+      }
       const title = String(line.__daoSectionTitle ?? currentSection ?? designation).trim();
       pdfRows.push({ kind: "subtotal", title, total: currentSubtotal });
+      lastSubtotalTotal = currentSubtotal;
       addSectionToRecap();
       currentSubtotal = 0;
       currentSection = "";
@@ -171,16 +195,22 @@ async function generateOfficialPdfResponse(
       : baseUnitPrice;
     const storedTotal = numberFrom(line, ["Total", "total"]);
     const total = mode === "external" ? quantity * unitPrice : (storedTotal || quantity * unitPrice);
-    currentSubtotal += total;
+    // Ouvrage répété (« × n ») : le devis compte les postes n fois, mais le BDQE garde les quantités et montants du DAO
+    // (par unité d'ouvrage) ; la ligne « TOTAL … × n » qui suit porte la multiplication.
+    const blockMultiplier = Number(line.__daoMultiplier) > 1 ? Number(line.__daoMultiplier) : 1;
+    const shownQuantity = blockMultiplier > 1 ? Math.round((quantity / blockMultiplier) * 1000) / 1000 : quantity;
+    const shownTotal = blockMultiplier > 1 ? total / blockMultiplier : total;
+    currentSubtotal += shownTotal;
     grandTotal += total;
     pdfRows.push({
       kind: "item",
-      number: textFrom(line, ["N°", "NÂ°", "NÃ‚Â°", "N", "numero"]),
+      // N° imprimé dans le DAO (ex. « B 101 - h ») ; à défaut, la numérotation du devis.
+      number: String(line.__daoCode ?? "").trim() || textFrom(line, ["N°", "NÂ°", "NÃ‚Â°", "N", "numero"]),
       designation,
       unit: textFrom(line, ["Unité", "UnitÃ©", "UnitÃƒÂ©", "Unite", "unite"]),
-      quantity,
+      quantity: shownQuantity,
       unitPrice,
-      total,
+      total: shownTotal,
     });
   }
   addSectionToRecap();
