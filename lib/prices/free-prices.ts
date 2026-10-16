@@ -26,10 +26,10 @@ export async function freePrices(supabase: SupabaseClient, organizationId: strin
     if (salary) { hits.push({ id: item.id, price: salary.price, source: `Salaire de la bibliothèque : ${salary.matched}` }); continue; }
     const composition = computeLineFromComposition(library, item.designation, item.unit);
     if (composition && composition.price !== null && composition.price > 0) { hits.push({ id: item.id, price: composition.price, source: `Composition de matériaux : ${composition.title ?? item.designation}` }); continue; }
-    const loose = composition ? null : looseLibraryMatch(library, { designation: item.designation, unit: item.unit });
+    const loose = composition ? null : looseLibraryMatch(library, { designation: item.designation, unit: item.unit, quantity: item.quantity });
     if (loose) { hits.push({ id: item.id, price: loose.price, source: `Bibliothèque (titre voisin) : ${loose.matched}` }); continue; }
     // 3e niveau : fiche la plus proche, prix rempli mais marqué « à vérifier ».
-    const near = approxLibraryMatch(library, { designation: item.designation, unit: item.unit });
+    const near = approxLibraryMatch(library, { designation: item.designation, unit: item.unit, quantity: item.quantity });
     if (near) { hits.push({ id: item.id, price: near.price, source: `À vérifier — prix de la fiche voisine « ${near.matched} »`, approximate: true }); continue; }
     misses.push({ id: item.id, reason: whyNoMatch(library, { designation: item.designation, unit: item.unit }) });
   }

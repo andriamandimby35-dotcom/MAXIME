@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { canonicalMaterialKey, canonicalUnit, materialFamily } from "@/lib/material-normalization";
 import { cheapestOf, priceSearchableText, usefulTokens } from "@/lib/price-engine/search-price";
 import { btpTokens, stripLineReference, unitGroup } from "@/lib/prices/synonyms";
+import { expandPackRows } from "@/lib/prices/pack-rows";
 
 // Recherche GRATUITE de prix dans la bibliothèque (aucun appel à l'IA, aucun
 // internet) pour plusieurs lignes d'un coup : la bibliothèque de l'entreprise
@@ -27,6 +28,22 @@ function savedPrice(row: PriceRow) {
 
 export type PriceLibraryRow = PriceRow;
 
+// Matériau vendu par pièce entière (rouleau de 50 ou 100 m, barre de 6 m…) : on n'achète que des pièces ENTIÈRES, donc le prix
+// d'une ligne de devis = nombre de pièces arrondi au-dessus × prix d'une pièce, ramené à l'unité du devis. Sans quantité connue,
+// on retombe sur le prix à l'unité.
+function effectivePrice(row: PriceRow, quantity: number | undefined) {
+  const packQty = positive(row.quantite_par_unite_achat);
+  const packPrice = positive(row.prix_unite_achat);
+  if (packQty && packPrice && quantity && quantity > 0) return (Math.ceil(quantity / packQty) * packPrice) / quantity;
+  return savedPrice(row);
+}
+
+// Entre plusieurs fiches possibles on prend la moins chère POUR LA QUANTITÉ DU DEVIS (rouleaux entiers compris).
+function cheapestFor(rows: PriceRow[], quantity: number) {
+  if (!rows.some((row) => positive(row.quantite_par_unite_achat) && positive(row.prix_unite_achat))) return cheapestOf(rows);
+  return rows.reduce((best, row) => ((effectivePrice(row, quantity) ?? Infinity) < (effectivePrice(best, quantity) ?? Infinity) ? row : best));
+}
+
 // Bibliothèque lue UNE seule fois, page par page (Supabase ne renvoie jamais
 // plus de 1000 lignes d'un coup), avec seulement les colonnes utiles.
 export async function loadPriceLibrary(supabase: SupabaseClient, organizationId: string): Promise<PriceLibraryRow[]> {
@@ -41,7 +58,8 @@ export async function loadPriceLibrary(supabase: SupabaseClient, organizationId:
     library.push(...(page.data as PriceRow[]));
     if (page.data.length < 1000) break;
   }
-  return library;
+  // Rouleaux, couronnes, barres : fiches « au mètre » ajoutées en mémoire (la bibliothèque n'est pas modifiée).
+  return expandPackRows(library);
 }
 
 export async function lookupLibraryPrices(supabase: SupabaseClient, organizationId: string, items: LookupItem[], preloaded?: PriceLibraryRow[]): Promise<LookupHit[]> {
@@ -74,7 +92,7 @@ export async function lookupLibraryPrices(supabase: SupabaseClient, organization
     const detail = tokens.length > 0
       ? library.filter((row) => sameUnit(row) && tokens.every((word) => priceSearchableText(row).includes(word)))
       : [];
-    const found = exact.length > 0 ? cheapestOf(exact) : familyAndDetail.length > 0 ? cheapestOf(familyAndDetail) : detail.length > 0 ? cheapestOf(detail) : null;
+    const found = exact.length > 0 ? cheapestFor(exact, item.quantity) : familyAndDetail.length > 0 ? cheapestFor(familyAndDetail, item.quantity) : detail.length > 0 ? cheapestFor(detail, item.quantity) : null;
 
     if (found) {
       // Matériau vendu par pièce entière : prix ramené à l'unité du devis.
@@ -135,14 +153,14 @@ const sameUnitLoose = (left: string, right: string) => {
 export type LooseHit = { price: number; matched: string; score: number };
 
 /** Meilleur prix de la bibliothèque pour une ligne, par comparaison souple des mots. null = rien de sûr. */
-export function looseLibraryMatch(library: PriceLibraryRow[], item: { designation: string; unit: string }): LooseHit | null {
+export function looseLibraryMatch(library: PriceLibraryRow[], item: { designation: string; unit: string; quantity?: number }): LooseHit | null {
   if (!item.unit.trim() || !item.designation.trim()) return null;
   const target = looseSignature(stripLineReference(item.designation));
   if (target.content.size === 0) return null;
   let best: (LooseHit & { shared: number }) | null = null;
   for (const row of library) {
     if (!sameUnitLoose(item.unit, String(row.unite ?? ""))) continue;
-    const price = savedPrice(row);
+    const price = effectivePrice(row, item.quantity);
     if (!price) continue;
     const other = looseSignature(String(row.designation ?? ""));
     if (other.content.size === 0 || !sameLooseSet(target.actions, other.actions)) continue;
@@ -177,7 +195,7 @@ export function looseLibraryMatch(library: PriceLibraryRow[], item: { designatio
 // Quand ni le nom, ni la composition, ni la comparaison prudente ne trouvent un prix, on prend la fiche la plus proche
 // de la bibliothèque (même unité, même objet principal, au moins la moitié des mots en commun). Le prix est rempli
 // pour ne pas laisser de trou, mais marqué « à vérifier » dans le devis. Rien n'est enregistré dans la bibliothèque.
-export function approxLibraryMatch(library: PriceLibraryRow[], item: { designation: string; unit: string }): LooseHit | null {
+export function approxLibraryMatch(library: PriceLibraryRow[], item: { designation: string; unit: string; quantity?: number }): LooseHit | null {
   if (!item.unit.trim() || !item.designation.trim()) return null;
   const target = looseSignature(stripLineReference(item.designation));
   if (target.content.size === 0) return null;
@@ -185,7 +203,7 @@ export function approxLibraryMatch(library: PriceLibraryRow[], item: { designati
   let best: LooseHit | null = null;
   for (const row of library) {
     if (!sameUnitLoose(item.unit, String(row.unite ?? ""))) continue;
-    const price = savedPrice(row);
+    const price = effectivePrice(row, item.quantity);
     if (!price) continue;
     const other = looseSignature(String(row.designation ?? ""));
     if (other.content.size === 0 || !sameLooseSet(target.actions, other.actions)) continue;

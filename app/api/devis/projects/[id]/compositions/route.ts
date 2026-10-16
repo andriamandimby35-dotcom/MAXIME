@@ -77,7 +77,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     const line = computeLineFromComposition(library, searchText, unit);
     if (!line) {
       // Dernier recours gratuit : un prix de la bibliothèque rangé sous un titre voisin (mêmes mots, mêmes dimensions, même verbe).
-      const loose = looseLibraryMatch(library, { designation: searchText, unit });
+      const loose = looseLibraryMatch(library, { designation: searchText, unit, quantity: Number(row.quantity) || undefined });
       if (loose) {
         updates.push({ id: lineId, unit_price: loose.price });
         fromLibrary += 1;
@@ -85,7 +85,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
         continue;
       }
       // 3e niveau : fiche voisine la plus proche, prix rempli mais « à vérifier ».
-      const near = approxLibraryMatch(library, { designation: searchText, unit });
+      const near = approxLibraryMatch(library, { designation: searchText, unit, quantity: Number(row.quantity) || undefined });
       if (near) {
         updates.push({ id: lineId, unit_price: near.price });
         fromLibrary += 1;
