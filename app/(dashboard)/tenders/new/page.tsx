@@ -86,7 +86,7 @@ export default function NewTenderPage() {
 
 
         const fileName =
-          `${Date.now()}-${file.name}`;
+          `${Date.now()}-${(file.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "")) || "dao.pdf"}`;
 
 
 
