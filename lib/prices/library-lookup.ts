@@ -3,6 +3,7 @@ import { canonicalMaterialKey, canonicalUnit, materialFamily } from "@/lib/mater
 import { cheapestOf, priceSearchableText, usefulTokens } from "@/lib/price-engine/search-price";
 import { btpTokens, stripLineReference, unitGroup } from "@/lib/prices/synonyms";
 import { expandPackRows } from "@/lib/prices/pack-rows";
+import { withoutLowPriceOutliers } from "@/lib/compositions/prices";
 
 // Recherche GRATUITE de prix dans la bibliothèque (aucun appel à l'IA, aucun
 // internet) pour plusieurs lignes d'un coup : la bibliothèque de l'entreprise
@@ -28,6 +29,13 @@ function savedPrice(row: PriceRow) {
 
 export type PriceLibraryRow = PriceRow;
 
+// Produit « fini » (béton prêt à l'emploi, préfabriqué, prémélangé) : une fiche qui le dit ne sert jamais à une ligne qui ne le dit pas
+// (un « béton dosé à 350 » du DAO est fabriqué sur place : son prix vient de la composition ciment + sable + gravillon).
+const FINISHED_PRODUCT = /pret a l ?emploi|prefabri|preforme|premelange|pre melange/;
+const plainText = (value: unknown) => String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/['’]/g, " ");
+export const qualifiersCompatible = (lineDesignation: string, rowDesignation: unknown) =>
+  !FINISHED_PRODUCT.test(plainText(rowDesignation)) || FINISHED_PRODUCT.test(plainText(lineDesignation));
+
 // Matériau vendu par pièce entière (rouleau de 50 ou 100 m, barre de 6 m…) : on n'achète que des pièces ENTIÈRES, donc le prix
 // d'une ligne de devis = nombre de pièces arrondi au-dessus × prix d'une pièce, ramené à l'unité du devis. Sans quantité connue,
 // on retombe sur le prix à l'unité.
@@ -41,7 +49,8 @@ function effectivePrice(row: PriceRow, quantity: number | undefined) {
 // Entre plusieurs fiches possibles on prend la moins chère POUR LA QUANTITÉ DU DEVIS (rouleaux entiers compris).
 function cheapestFor(rows: PriceRow[], quantity: number) {
   if (!rows.some((row) => positive(row.quantite_par_unite_achat) && positive(row.prix_unite_achat))) return cheapestOf(rows);
-  return rows.reduce((best, row) => ((effectivePrice(row, quantity) ?? Infinity) < (effectivePrice(best, quantity) ?? Infinity) ? row : best));
+  const sane = withoutLowPriceOutliers(rows, (row) => effectivePrice(row, quantity) ?? 0);
+  return sane.reduce((best, row) => ((effectivePrice(row, quantity) ?? Infinity) < (effectivePrice(best, quantity) ?? Infinity) ? row : best));
 }
 
 // Bibliothèque lue UNE seule fois, page par page (Supabase ne renvoie jamais
@@ -87,10 +96,10 @@ export async function lookupLibraryPrices(supabase: SupabaseClient, organization
 
     const exact = library.filter((row) => canonicalMaterialKey(String(row.designation ?? "")) === key && sameUnit(row));
     const familyAndDetail = tokens.length > 0
-      ? library.filter((row) => sameUnit(row) && materialFamily(String(row.designation ?? "")) === family && tokens.every((word) => priceSearchableText(row).includes(word)))
+      ? library.filter((row) => sameUnit(row) && qualifiersCompatible(item.designation, row.designation) && materialFamily(String(row.designation ?? "")) === family && tokens.every((word) => priceSearchableText(row).includes(word)))
       : [];
     const detail = tokens.length > 0
-      ? library.filter((row) => sameUnit(row) && tokens.every((word) => priceSearchableText(row).includes(word)))
+      ? library.filter((row) => sameUnit(row) && qualifiersCompatible(item.designation, row.designation) && tokens.every((word) => priceSearchableText(row).includes(word)))
       : [];
     const found = exact.length > 0 ? cheapestFor(exact, item.quantity) : familyAndDetail.length > 0 ? cheapestFor(familyAndDetail, item.quantity) : detail.length > 0 ? cheapestFor(detail, item.quantity) : null;
 
@@ -169,6 +178,7 @@ export function looseLibraryMatch(library: PriceLibraryRow[], item: { designatio
     if (!sameUnitLoose(item.unit, String(row.unite ?? ""))) continue;
     const price = effectivePrice(row, item.quantity);
     if (!price) continue;
+    if (!qualifiersCompatible(item.designation, row.designation)) continue;
     const other = looseSignature(String(row.designation ?? ""));
     if (other.content.size === 0 || !sameLooseSet(target.actions, other.actions)) continue;
     if (isLabourText(String(row.designation ?? "")) !== isLabourText(item.designation)) continue;
@@ -212,6 +222,7 @@ export function approxLibraryMatch(library: PriceLibraryRow[], item: { designati
     if (!sameUnitLoose(item.unit, String(row.unite ?? ""))) continue;
     const price = effectivePrice(row, item.quantity);
     if (!price) continue;
+    if (!qualifiersCompatible(item.designation, row.designation)) continue;
     const other = looseSignature(String(row.designation ?? ""));
     if (other.content.size === 0 || !sameLooseSet(target.actions, other.actions)) continue;
     if (isLabourText(String(row.designation ?? "")) !== isLabourText(item.designation)) continue;

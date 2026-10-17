@@ -107,6 +107,9 @@ function externalBaseTotal(line: EstimateLineData) {
   return override > 0 ? numberFrom(line, QUANTITY_KEYS) * override : lineTotal(line);
 }
 
+/** Prix remplis automatiquement (gratuit) : fiche de la bibliothèque, fiche au titre voisin ou composition de matériaux. */
+const AUTO_PRICE_SOURCE = /^(Biblioth[eè]que( \(titre voisin\))? :|Composition de mat[eé]riaux :)/;
+
 function daoRowType(line: EstimateLineData) {
   const value = String(line.__daoRowType ?? "item");
   return value === "section" || value === "subtotal" ? value : "item";
@@ -139,12 +142,26 @@ function masonryChoiceOption(line: EstimateLineData) {
   return parpaing < brique ? "parpaing" : "brique";
 }
 
-function sectionSubtotal(lines: EstimateLineData[], subtotalIndex: number) {
+/** Ouvrage répété (« TOTAL BORNE FONTAINE × 25 ») : nombre de fois que ce poste est compté (1 si ouvrage unique). */
+function lineBlockMultiplier(line: EstimateLineData) {
+  return daoRowType(line) === "item" && Number(line.__daoMultiplier) > 1 ? Number(line.__daoMultiplier) : 1;
+}
+
+/** Quantité d'UN ouvrage (comme dans le DAO) : la quantité enregistrée est déjà multipliée par le nombre d'ouvrages. */
+function perUnitQuantity(line: EstimateLineData) {
+  return Math.round(numberFrom(line, QUANTITY_KEYS) / lineBlockMultiplier(line) * 1000) / 1000;
+}
+
+/**
+ * Somme d'une rubrique jusqu'à la ligne de sous-total. `perUnit` = montant pour UN seul ouvrage répété
+ * (ligne « SOUS-TOTAL … (1) ») ; sinon montant complet (ligne « TOTAL … × n »).
+ */
+function sectionSubtotal(lines: EstimateLineData[], subtotalIndex: number, perUnit = false, amount: (line: EstimateLineData) => number = lineTotal) {
   let total = 0;
   for (let index = subtotalIndex - 1; index >= 0; index -= 1) {
     const rowType = daoRowType(lines[index]);
     if (rowType === "section") break;
-    if (rowType === "item" && lines[index].__excludedByChoice !== true) total += lineTotal(lines[index]);
+    if (rowType === "item" && lines[index].__excludedByChoice !== true) total += amount(lines[index]) / (perUnit ? lineBlockMultiplier(lines[index]) : 1);
   }
   return total;
 }
@@ -611,6 +628,7 @@ export default function EstimateBuilder({
   const weightsAskedRef = useRef(false);
   const [freeBusy, setFreeBusy] = useState(false);
   const [editingLine, setEditingLine] = useState<number | null>(null);
+  const [blockQtyDraft, setBlockQtyDraft] = useState<{ index: number; text: string } | null>(null);
   const [estimateId, setEstimateId] = useState<string | null>(null);
   const [profitMarginPercent, setProfitMarginPercent] = useState(0);
   const [externalPricingMode, setExternalPricingMode] = useState<"percentage" | "target_total">("percentage");
@@ -2788,6 +2806,27 @@ export default function EstimateBuilder({
     }
     if (insertionIndex < 0) insertionIndex = estimateLines.length;
 
+    // Ouvrage répété (« TOTAL BORNE FONTAINE × 25 ») : on tape la quantité d'UN ouvrage ; la ligne est comptée n fois comme les autres postes du bloc.
+    let addedBlockMultiplier = 1;
+    if (newLineScope === "dao") {
+      for (let k = insertionIndex; k < estimateLines.length; k += 1) {
+        const row = estimateLines[k];
+        if (daoRowType(row) === "section") break;
+        if (daoRowType(row) === "subtotal" && Number(row.__daoMultiplier) > 1) { addedBlockMultiplier = Number(row.__daoMultiplier); break; }
+      }
+    }
+    if (addedBlockMultiplier > 1) {
+      const perUnitQty = Number.isFinite(quantity) ? quantity : 0;
+      const multipliedQty = Math.round(perUnitQty * addedBlockMultiplier * 1000) / 1000;
+      newLine = {
+        ...newLine,
+        [quantityKey]: multipliedQty,
+        [totalKey]: multipliedQty * (Number.isFinite(unitPrice) ? unitPrice : 0),
+        __daoMultiplier: addedBlockMultiplier,
+        __daoQuantityPerUnit: perUnitQty,
+      };
+    }
+
     if (estimateId) {
       const supabase = createClient();
       const { data, error } = await supabase
@@ -2825,7 +2864,7 @@ export default function EstimateBuilder({
     setCurrentLine({});
     setMessage(newLineScope === "internal"
       ? "Ligne ajoutée au calcul interne; elle sera exclue du PDF de soumission."
-      : `Ligne ajoutée dans la catégorie DAO « ${newLineCategory} ».`);
+      : `Ligne ajoutée dans la catégorie DAO « ${newLineCategory} »${addedBlockMultiplier > 1 ? ` (quantité pour 1 ouvrage, comptée ${addedBlockMultiplier} fois dans le TOTAL)` : ""}.`);
     await persistEstimateTotal(nextLines);
     await syncProjectAfterChange("Ligne ajoutée");
   }
@@ -2978,7 +3017,7 @@ export default function EstimateBuilder({
   const libraryPricedIndexes = () => estimateLines
     .map((line, index) => ({ line, index }))
     .filter(({ line }) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && line.__laborOnly !== true
-      && numberFrom(line, UNIT_PRICE_KEYS) > 0 && /^Biblioth[eè]que :/.test(String(line.__priceProvenance ?? "")));
+      && numberFrom(line, UNIT_PRICE_KEYS) > 0 && AUTO_PRICE_SOURCE.test(String(line.__priceProvenance ?? "")));
   const libraryPricedCount = libraryPricedIndexes().length;
 
   // Quand la bibliothèque change (nouveaux prix, nouveau tarif fournisseur), les devis déjà calculés gardent l'ancien prix.
@@ -2987,7 +3026,7 @@ export default function EstimateBuilder({
     if (freeBusy) return;
     const targets = libraryPricedIndexes();
     if (targets.length === 0) { setMessage("Aucune ligne n'a de prix repris de la bibliothèque."); return; }
-    if (!window.confirm(`${targets.length} ligne(s) ont un prix repris de la bibliothèque. Les recalculer avec les prix actuels de la bibliothèque ? (gratuit, aucun crédit IA). Un prix que tu as modifié à la main sur une de ces lignes serait remplacé.`)) return;
+    if (!window.confirm(`${targets.length} ligne(s) ont un prix calculé automatiquement (bibliothèque ou composition de matériaux). Les recalculer avec les prix actuels de la bibliothèque ? (gratuit, aucun crédit IA). Un prix que tu as modifié à la main sur une de ces lignes serait remplacé.`)) return;
     const designationKey = columnName(daoColumns, ["Désignation", "Designation"]);
     const unitKey = columnName(daoColumns, ["Unité", "Unite", "unite"]);
     const quantityKey = columnName(daoColumns, QUANTITY_KEYS);
@@ -3005,7 +3044,7 @@ export default function EstimateBuilder({
       });
       const result = await response.json().catch(() => ({})) as { error?: string; results?: Array<{ id: string; price: number; source: string; approximate?: boolean }> };
       if (!response.ok) { setMessage(result.error ?? "Recalcul impossible."); return; }
-      const hits = new Map((result.results ?? []).filter((hit) => !hit.approximate && /^Biblioth[eè]que :/.test(hit.source)).map((hit) => [Number(hit.id), hit]));
+      const hits = new Map((result.results ?? []).filter((hit) => !hit.approximate && AUTO_PRICE_SOURCE.test(hit.source)).map((hit) => [Number(hit.id), hit]));
       const changes: string[] = [];
       const changedIndexes: number[] = [];
       const nextLines = estimateLines.map((line, index) => {
@@ -3087,6 +3126,7 @@ export default function EstimateBuilder({
       if (error) setMessage(`Modification non enregistrée : ${error.message}`);
     }
     setEditingLine(null);
+    setBlockQtyDraft(null);
     await persistEstimateTotal(nextLines);
     await syncProjectAfterChange("Ligne modifiée");
   }
@@ -3274,7 +3314,7 @@ export default function EstimateBuilder({
                 <button type="button" className="estimateSecondaryAction" disabled={freeBusy} onClick={() => void searchAllDaoPrices("direct")}>{`3. Chercher ${missingDirectCount} ligne(s) sans composition sur internet (crédits IA)`}</button>
               )}
               {libraryPricedCount > 0 && !priceSearchStatus?.running && (
-                <button type="button" className="estimateSecondaryAction" disabled={freeBusy} onClick={() => void refreshLibraryPrices()}>{`Recalculer les ${libraryPricedCount} prix de la bibliothèque (gratuit)`}</button>
+                <button type="button" className="estimateSecondaryAction" disabled={freeBusy} onClick={() => void refreshLibraryPrices()}>{`Recalculer les ${libraryPricedCount} prix automatiques (bibliothèque et compositions, gratuit)`}</button>
               )}
               {priceSearchStatus?.running && (
                 <button type="button" className="estimateSecondaryAction" onClick={() => { stopSearchRef.current = true; }}>Arrêter</button>
@@ -3651,13 +3691,15 @@ export default function EstimateBuilder({
                   {daoColumns.map((column) => (
                     <td key={column.order} style={{ border: "1px solid #d1d5db", padding: 10 }}>
                       {column.name === columnName(daoColumns, ["Désignation", "Designation"])
-                        ? item[column.name]
+                        ? (Number(item.__daoMultiplier) > 1 && !/[×x]\s*\d/i.test(String(item[column.name] ?? ""))
+                          ? `${String(item[column.name] ?? "")} × ${Number(item.__daoMultiplier)}`
+                          : item[column.name])
                         : column.name === columnName(daoColumns, TOTAL_KEYS)
-                          ? `${sectionSubtotal(estimateLines, index).toLocaleString("fr-FR")} Ar`
+                          ? `${sectionSubtotal(estimateLines, index, !(Number(item.__daoMultiplier) > 1)).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} Ar`
                           : ""}
                     </td>
                   ))}
-                  {externalMarginPreview && <><td style={{ border: "1px solid #d1d5db", padding: 10 }} /><td style={{ border: "1px solid #d1d5db", padding: 10 }}>{sectionSubtotal(estimateLines, index) * externalMarginFactor > 0 ? `${(sectionSubtotal(estimateLines, index) * externalMarginFactor).toLocaleString("fr-FR")} Ar` : "0 Ar"}</td></>}
+                  {externalMarginPreview && <><td style={{ border: "1px solid #d1d5db", padding: 10 }} /><td style={{ border: "1px solid #d1d5db", padding: 10 }}>{(() => { const externalSubtotal = sectionSubtotal(estimateLines, index, !(Number(item.__daoMultiplier) > 1), externalPreviewLineTotal); return externalSubtotal > 0 ? `${externalSubtotal.toLocaleString("fr-FR", { maximumFractionDigits: 2 })} Ar` : "0 Ar"; })()}</td></>}
                   <td style={{ border: "1px solid #d1d5db", padding: 10 }} />
                 </tr>
               ) : (
@@ -3691,9 +3733,21 @@ export default function EstimateBuilder({
                             ? "decimal"
                             : undefined
                         }
-                        value={String(item[column.name] ?? "")}
+                        value={column.name === columnName(daoColumns, QUANTITY_KEYS) && lineBlockMultiplier(item) > 1
+                          ? (blockQtyDraft?.index === index ? blockQtyDraft.text : String(perUnitQuantity(item)))
+                          : String(item[column.name] ?? "")}
                         onClick={(event) => event.stopPropagation()}
-                        onChange={(event) => updateLineValue(index, column.name, event.target.value)}
+                        onChange={(event) => {
+                          if (column.name === columnName(daoColumns, QUANTITY_KEYS) && lineBlockMultiplier(item) > 1) {
+                            // Ouvrage répété : on saisit la quantité d'UN ouvrage, l'application la multiplie.
+                            const text = event.target.value;
+                            setBlockQtyDraft({ index, text });
+                            const typed = Number(text.replace(",", "."));
+                            updateLineValue(index, column.name, String(Number.isFinite(typed) ? Math.round(typed * lineBlockMultiplier(item) * 1000) / 1000 : 0));
+                          } else {
+                            updateLineValue(index, column.name, event.target.value);
+                          }
+                        }}
                         className="w-full border p-1"
                       />
                     ) : column.name === columnName(daoColumns, UNIT_PRICE_KEYS) && item.__priceStatus === "manual_required" ? (
@@ -3706,7 +3760,7 @@ export default function EstimateBuilder({
                         </div>
                       </div>
                     ) : column.name === columnName(daoColumns, TOTAL_KEYS) ? (
-                      lineTotal(item).toLocaleString("fr-FR")
+                      (lineTotal(item) / lineBlockMultiplier(item)).toLocaleString("fr-FR", { maximumFractionDigits: 2 })
                     ) : column.name === columnName(daoColumns, ["Désignation", "Designation"]) &&
                         (equivalentOptions(item).length > 0 || item.__recommendedEquivalent) ? (
                       <div>
@@ -3718,6 +3772,8 @@ export default function EstimateBuilder({
                           <div className="print:hidden" data-internal-only="true" style={{ color: "#b91c1c", fontSize: 12 }}>Validation technique obligatoire</div>
                         )}
                       </div>
+                    ) : column.name === columnName(daoColumns, QUANTITY_KEYS) && lineBlockMultiplier(item) > 1 ? (
+                      perUnitQuantity(item).toLocaleString("fr-FR", { maximumFractionDigits: 3 })
                     ) : (
                       item[column.name]
                     )}
@@ -3730,7 +3786,7 @@ export default function EstimateBuilder({
                 ))}
                 {externalMarginPreview && <>
                   <td className="border p-2" data-label="PU externe">{item.__internalOnly === true ? "—" : `${externalPreviewUnitPrice(item).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} Ar`}</td>
-                  <td className="border p-2" data-label="Montant externe HT">{item.__internalOnly === true ? "—" : `${externalPreviewLineTotal(item).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} Ar`}</td>
+                  <td className="border p-2" data-label="Montant externe HT">{item.__internalOnly === true ? "—" : `${(externalPreviewLineTotal(item) / lineBlockMultiplier(item)).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} Ar`}</td>
                 </>}
                 <td className="border p-2" data-label="Actions">
                   {selectedLine === index && (

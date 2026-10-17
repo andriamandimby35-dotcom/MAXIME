@@ -41,16 +41,32 @@ function priceInUnit(row: PriceRow, targetUnit: string, isCement: boolean) {
 
 export type ComponentPrice = { unitPrice: number; matched: string } | null;
 
-/** Prix du matériau dans la bibliothèque : parmi les correspondances, le moins cher. */
+/**
+ * Écarte les prix visiblement faux parmi des fiches équivalentes : une fiche « Moellon » à 600 Ar le m³ à côté de fiches à 70 000-85 000
+ * ne doit jamais devenir « le moins cher ». Avec 3 prix ou plus, un prix inférieur à 40 % de la médiane est écarté ; avec 2 prix,
+ * un prix inférieur à 5 % du plus haut. Sans aberration, rien n'est écarté.
+ */
+export function withoutLowPriceOutliers<T>(items: T[], valueOf: (item: T) => number): T[] {
+  const values = items.map(valueOf).filter((value) => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
+  if (values.length < 2) return items;
+  const reference = values.length >= 3 ? values[Math.floor(values.length / 2)] : values[values.length - 1];
+  const floor = values.length >= 3 ? reference * 0.4 : reference * 0.05;
+  const kept = items.filter((item) => valueOf(item) >= floor);
+  return kept.length > 0 ? kept : items;
+}
+
+/** Prix du matériau dans la bibliothèque : parmi les correspondances (hors prix aberrants), le moins cher. */
 export function bestComponentPrice(library: PriceRow[], component: CompositionComponent): ComponentPrice {
   const targetUnit = canonicalUnit(component.unit);
   const isCement = component.match.all.includes("ciment");
-  let best: { price: number; row: PriceRow } | null = null;
+  const candidates: Array<{ price: number; row: PriceRow }> = [];
   for (const row of library) {
     if (!matches(row, component.match)) continue;
     const price = priceInUnit(row, targetUnit, isCement);
-    if (price !== null && (!best || price < best.price)) best = { price, row };
+    if (price !== null) candidates.push({ price, row });
   }
+  const sane = withoutLowPriceOutliers(candidates, (candidate) => candidate.price);
+  const best = sane.reduce<{ price: number; row: PriceRow } | null>((low, candidate) => (!low || candidate.price < low.price ? candidate : low), null);
   return best ? { unitPrice: best.price, matched: String(best.row.designation ?? "") } : null;
 }
 

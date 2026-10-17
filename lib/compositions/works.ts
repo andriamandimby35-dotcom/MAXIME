@@ -103,6 +103,10 @@ function mortarSurface(title: string, defaultThickness: number): Rule["build"] {
         { designation: "Ciment pour mortier", search: "Ciment", unit: "kg", quantity: round(dosage * volume), note: `${dosage} kg de ciment par m³ de mortier.`, match: CEMENT },
         { designation: "Sable pour mortier", search: "Sable", unit: "m3", quantity: round(volume), note: "1 m³ de sable par m³ de mortier.", match: SAND },
         { designation: "Eau", search: "Eau", unit: "L", quantity: round(dosage * volume * 0.5, 2), note: "Environ 0,5 L d'eau par kg de ciment.", optional: true, match: WATER },
+        // Enduit ou chape « étanche » / « hydrofuge » : 1 L d'adjuvant hydrofuge par sac de 50 kg de ciment (sinon il coûterait moins cher qu'un enduit ordinaire).
+        ...(/etanch|hydrofug|impermea/.test(ascii(designation))
+          ? [{ designation: "Adjuvant hydrofuge pour mortier", search: "Adjuvant hydrofuge", unit: "L", quantity: round(dosage * volume / 50, 3), note: "Environ 1 L d'hydrofuge par sac de 50 kg de ciment.", optional: true, match: { all: ["hydrofuge"], exclude: ["peinture", "enduit"] } as MatchSpec }]
+          : []),
       ],
     };
   };

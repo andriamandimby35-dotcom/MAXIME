@@ -44,7 +44,17 @@ export function priceValue(price:any) {
 // deviner : un vrai prix déjà enregistré reste préférable à un prix IA
 // inventé, même si le produit exact n'est pas garanti.
 export function cheapestOf(prices:any[]) {
-  return prices.reduce((best, price) => (priceValue(price) < priceValue(best) ? price : best));
+  // Un prix visiblement faux (ex. « Moellon » à 600 Ar/m³ à côté de fiches à 70 000+) ne doit jamais être « le moins cher » :
+  // avec 3 prix ou plus on écarte ceux sous 40 % de la médiane, avec 2 prix ceux sous 5 % du plus haut.
+  const values = prices.map(priceValue).filter((value) => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
+  let pool = prices;
+  if (values.length >= 2) {
+    const reference = values.length >= 3 ? values[Math.floor(values.length / 2)] : values[values.length - 1];
+    const floor = values.length >= 3 ? reference * 0.4 : reference * 0.05;
+    const kept = prices.filter((price) => priceValue(price) >= floor);
+    if (kept.length > 0) pool = kept;
+  }
+  return pool.reduce((best, price) => (priceValue(price) < priceValue(best) ? price : best));
 }
 
 
