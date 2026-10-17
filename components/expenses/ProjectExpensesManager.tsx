@@ -95,6 +95,20 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   assignments?: ConductorAssignment[];
 }) {
   const supabase = useState(() => createClient())[0];
+  // La commission n'existe que si le devis l'a prévue (case cochée dans la synthèse du devis interne) : sinon, aucun choix « Commission » ici.
+  const [commissionPlan, setCommissionPlan] = useState({ applied: false, percent: 0 });
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data: link } = await supabase.from("projects").select("source_estimate_id,source_tender_id").eq("id", project.id).maybeSingle();
+      if (!link) return;
+      const base = supabase.from("estimates").select("commission_applied,commission_percent");
+      const result = link.source_estimate_id ? await base.eq("id", link.source_estimate_id).limit(1) : link.source_tender_id ? await base.eq("source_tender_id", link.source_tender_id).limit(1) : null;
+      const row = result && !result.error ? result.data?.[0] : null;
+      if (!cancelled && row) setCommissionPlan({ applied: row.commission_applied === true, percent: Number(row.commission_percent) || 0 });
+    })();
+    return () => { cancelled = true; };
+  }, [project.id, supabase]);
   // Le conducteur (works_manager) a les mêmes droits que l'administrateur sur
   // la Dépense de son chantier (taux, paiements, acomptes, dépense imprévue,
   // export…), sauf la suppression d'une ligne du compte dépense générale,
@@ -598,6 +612,8 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   const categoryTotals: Record<RecapCategory, number> = { materiaux: 0, transport: 0, salaire: 0, autre: 0, commission: 0 };
   for (const row of recapRows) categoryTotals[row.category] += row.amount;
   const categoryLabels: Record<RecapCategory, string> = { materiaux: "Matériaux", transport: "Transport", salaire: "Salaire", autre: "Autre", commission: "Commission (non facturée)" };
+  // Pas de ligne « Commission » si le devis n'en prévoit pas et qu'aucune n'a été payée.
+  const visibleCategories = (Object.keys(categoryLabels) as RecapCategory[]).filter((category) => category !== "commission" || commissionPlan.applied || categoryTotals.commission > 0);
 
   // ----- Résumé dépense : vrai PDF (voir lib/expenses/general-expense-pdf.ts) -----
   // Remplace l'ancienne impression de la page (window.print), qui donnait des
@@ -605,7 +621,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   // en haut et en bas de chaque feuille.
   function buildGeneralExportData(alloc: AllocationResult | null): ExpensePdfData {
     const generatedLabel = exportGeneratedAt ? new Intl.DateTimeFormat("fr-FR", { dateStyle: "long", timeStyle: "short" }).format(new Date(exportGeneratedAt)) : "";
-    const categorySectionRows = (Object.keys(categoryLabels) as RecapCategory[]).map((category) => ({ label: `Sous-total ${categoryLabels[category]}`, value: money(categoryTotals[category]) }));
+    const categorySectionRows = visibleCategories.map((category) => ({ label: `Sous-total ${categoryLabels[category]}`, value: money(categoryTotals[category]) }));
     if (outsideClosureTotal > 0) categorySectionRows.push({ label: "Sous-total dépense hors clôture", value: money(outsideClosureTotal) });
     return {
       title: `Résumé dépense — ${project.name}`,
@@ -946,13 +962,15 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
 
       {canManage && <section className="projectSiteCard">
         <div className="projectCardHead"><div><p className="projectEyebrow">IMPRÉVU</p><h2>Dépenses imprévues</h2></div></div>
-        <p className="projectHint">Cadeaux ou toute dépense hors matériau/salaire. Pour une commission de marché public (payée avant, après ou par acomptes), choisis la catégorie « Commission » : elle ne va jamais dans la facture ni le devis externe. Envoyée directement au compte dépense générale après confirmation.</p>
+        <p className="projectHint">Cadeaux ou toute dépense hors matériau/salaire. {commissionPlan.applied ? "Pour la commission de marché public prévue au devis (payée avant, après ou par acomptes), choisis la catégorie « Commission » : elle ne va jamais dans la facture ni le devis externe. " : ""}Envoyée directement au compte dépense générale après confirmation.</p>
         {canManage && (addingMisc ? <>
           <div className="projectMaterialForm">
-            <select aria-label="Catégorie de la dépense" value={miscDraft.category} onChange={(event) => setMiscDraft((draft) => ({ ...draft, category: event.target.value }))}>
-              <option value="autre">Dépense imprévue</option>
-              <option value="commission">Commission (marché public)</option>
-            </select>
+            {commissionPlan.applied && (
+              <select aria-label="Catégorie de la dépense" value={miscDraft.category} onChange={(event) => setMiscDraft((draft) => ({ ...draft, category: event.target.value }))}>
+                <option value="autre">Dépense imprévue</option>
+                <option value="commission">{`Commission (marché public${commissionPlan.percent > 0 ? ` — ${commissionPlan.percent.toLocaleString("fr-FR", { maximumFractionDigits: 3 })} % prévu au devis` : ""})`}</option>
+              </select>
+            )}
             <input placeholder="Nom du bénéficiaire ou organisme" value={miscDraft.recipient} onChange={(event) => setMiscDraft((draft) => ({ ...draft, recipient: event.target.value }))} />
             <input type="number" min="0" step="any" placeholder="Montant (Ar)" value={miscDraft.amount} onChange={(event) => setMiscDraft((draft) => ({ ...draft, amount: event.target.value }))} />
             <input placeholder="Note (facultatif)" value={miscDraft.note} onChange={(event) => setMiscDraft((draft) => ({ ...draft, note: event.target.value }))} />
@@ -982,7 +1000,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
         </span>
       </div>) : <p className="projectEmptyText">Aucune dépense enregistrée pour l’instant.</p>}</div>
       <div className="projectStockSummaryList" style={{ marginTop: "10px" }}>
-        {(Object.keys(categoryLabels) as RecapCategory[]).map((category) => <div key={category}>
+        {visibleCategories.map((category) => <div key={category}>
           <span className="chipName">Sous-total {categoryLabels[category]}</span>
           <span className="chipQty">{money(categoryTotals[category])}</span>
         </div>)}
@@ -1196,7 +1214,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
 
         <h3 style={{ marginTop: "16px" }}>Sous-totaux par catégorie</h3>
         <div className="projectStockSummaryList">
-          {(Object.keys(categoryLabels) as RecapCategory[]).map((category) => <div key={category}>
+          {visibleCategories.map((category) => <div key={category}>
             <span className="chipName">Sous-total {categoryLabels[category]}</span>
             <span className="chipQty">{money(categoryTotals[category])}</span>
           </div>)}
