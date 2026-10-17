@@ -113,6 +113,15 @@ export function manualWorkFor(designation: string, unit: string): ManualWork | n
     return { kind: "earth", outputPerDay: 5, keepPrice: false, basis: "Remblai à la main avec la terre du chantier (étalé et compacté par couches) : un ouvrier fait 5 m³ par jour." };
   }
 
+  // Fouille comptée au m² (ex. « fouille pour fondation en terrain meuble », en m²) : on ramène le rendement en m³ à la surface,
+  // avec la profondeur écrite dans la désignation, sinon 0,8 m (fondation courante).
+  if (/\b(fouilles?|excavations?)\b/.test(t) && u === "m2" && !WITH_MATERIAL.test(t) && !/\bremblais?\b/.test(t)) {
+    const depth = depthFromText(designation) ?? 0.8;
+    const cubic = digOutputPerDay(depth, widthFromText(designation), rocky);
+    const output = Math.round((cubic / depth) * 100) / 100;
+    return { kind: "earth", outputPerDay: output, keepPrice: false, basis: `Fouille à la main comptée au m² (profondeur ${depth} m${depthFromText(designation) === null ? " retenue, non précisée" : ""}${rocky ? ", terrain rocheux" : ", terre pure"}) : un ouvrier creuse ${cubic} m³ par jour, soit ${output} m² par jour.` };
+  }
+
   // Fouille / excavation / tranchée / rigole / terrassement manuel : en m³.
   if (/\b(fouilles?|excavations?|tranchees?|rigoles?|terrassements?|puits|puisards?)\b/.test(t) && u === "m3" && !WITH_MATERIAL.test(t) && !/\bremblais?\b/.test(t)) {
     const depth = depthFromText(designation);

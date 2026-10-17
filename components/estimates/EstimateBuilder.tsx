@@ -2974,6 +2974,64 @@ export default function EstimateBuilder({
     } finally { document.body.style.cursor = previousCursor; setFreeBusy(false); }
   }
 
+  // Lignes dont le prix a été repris AUTOMATIQUEMENT de la bibliothèque (étiquette « Bibliothèque : … »).
+  const libraryPricedIndexes = () => estimateLines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && line.__laborOnly !== true
+      && numberFrom(line, UNIT_PRICE_KEYS) > 0 && /^Biblioth[eè]que :/.test(String(line.__priceProvenance ?? "")));
+  const libraryPricedCount = libraryPricedIndexes().length;
+
+  // Quand la bibliothèque change (nouveaux prix, nouveau tarif fournisseur), les devis déjà calculés gardent l'ancien prix.
+  // Ce bouton recalcule (gratuit) les lignes dont le prix venait de la bibliothèque, après confirmation.
+  async function refreshLibraryPrices() {
+    if (freeBusy) return;
+    const targets = libraryPricedIndexes();
+    if (targets.length === 0) { setMessage("Aucune ligne n'a de prix repris de la bibliothèque."); return; }
+    if (!window.confirm(`${targets.length} ligne(s) ont un prix repris de la bibliothèque. Les recalculer avec les prix actuels de la bibliothèque ? (gratuit, aucun crédit IA). Un prix que tu as modifié à la main sur une de ces lignes serait remplacé.`)) return;
+    const designationKey = columnName(daoColumns, ["Désignation", "Designation"]);
+    const unitKey = columnName(daoColumns, ["Unité", "Unite", "unite"]);
+    const quantityKey = columnName(daoColumns, QUANTITY_KEYS);
+    const unitPriceKey = columnName(daoColumns, UNIT_PRICE_KEYS);
+    const totalKey = columnName(daoColumns, TOTAL_KEYS);
+    void designationKey; void quantityKey;
+    setFreeBusy(true);
+    const previousCursor = document.body.style.cursor;
+    document.body.style.cursor = "wait";
+    try {
+      const response = await fetch("/api/library/free-prices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: targets.map(({ line, index }) => ({ id: String(index), designation: designationWithParentLine(index), unit: String(line[unitKey] ?? ""), quantity: numberFrom(line, QUANTITY_KEYS) || 1 })) }),
+      });
+      const result = await response.json().catch(() => ({})) as { error?: string; results?: Array<{ id: string; price: number; source: string; approximate?: boolean }> };
+      if (!response.ok) { setMessage(result.error ?? "Recalcul impossible."); return; }
+      const hits = new Map((result.results ?? []).filter((hit) => !hit.approximate && /^Biblioth[eè]que :/.test(hit.source)).map((hit) => [Number(hit.id), hit]));
+      const changes: string[] = [];
+      const changedIndexes: number[] = [];
+      const nextLines = estimateLines.map((line, index) => {
+        const hit = hits.get(index);
+        if (!hit || !targets.some((target) => target.index === index)) return line;
+        const oldPrice = numberFrom(line, UNIT_PRICE_KEYS);
+        if (Math.abs(oldPrice - hit.price) < 0.5 && String(line.__priceProvenance ?? "") === hit.source) return line;
+        if (Math.abs(oldPrice - hit.price) >= 0.5 && changes.length < 4) changes.push(`${Math.round(oldPrice).toLocaleString("fr-FR")} → ${Math.round(hit.price).toLocaleString("fr-FR")} Ar`);
+        changedIndexes.push(index);
+        return { ...line, [unitPriceKey]: hit.price, [totalKey]: numberFrom(line, QUANTITY_KEYS) * hit.price, __priceStatus: "manual_enterprise", __priceProvenance: hit.source };
+      });
+      if (changedIndexes.length === 0) { setMessage("Les prix de ces lignes sont déjà à jour avec la bibliothèque."); return; }
+      setEstimateLines(nextLines);
+      if (estimateId) {
+        const supabase = createClient();
+        await Promise.all(changedIndexes.map(async (index) => {
+          const lineId = nextLines[index]?.[LINE_ID_KEY];
+          if (lineId) await supabase.from("estimate_lines").update({ data: linePayload(nextLines[index]) }).eq("id", lineId);
+        }));
+      }
+      await persistEstimateTotal(nextLines);
+      setMessage(`${changedIndexes.length} prix recalculés depuis la bibliothèque${changes.length ? ` (par exemple : ${changes.join(" ; ")})` : ""}. Vérifie le tableau puis régénère les PDF.`);
+      await syncProjectAfterChange("Prix recalculés");
+    } finally { document.body.style.cursor = previousCursor; setFreeBusy(false); }
+  }
+
   // Après un ajout, une modification ou une suppression de ligne : si le chantier de ce devis existe, il suit le devis
   // (lignes + planning), puis la dernière facture non payée reprend les nouveaux prix. Les dépenses se recalculent seules.
   // Plusieurs modifications de suite = UNE seule mise à jour du chantier (planning, dépenses, facture) après 6 secondes calmes :
@@ -3214,6 +3272,9 @@ export default function EstimateBuilder({
               )}
               {freeCalcDone && missingDirectCount > 0 && !priceSearchStatus?.running && (
                 <button type="button" className="estimateSecondaryAction" disabled={freeBusy} onClick={() => void searchAllDaoPrices("direct")}>{`3. Chercher ${missingDirectCount} ligne(s) sans composition sur internet (crédits IA)`}</button>
+              )}
+              {libraryPricedCount > 0 && !priceSearchStatus?.running && (
+                <button type="button" className="estimateSecondaryAction" disabled={freeBusy} onClick={() => void refreshLibraryPrices()}>{`Recalculer les ${libraryPricedCount} prix de la bibliothèque (gratuit)`}</button>
               )}
               {priceSearchStatus?.running && (
                 <button type="button" className="estimateSecondaryAction" onClick={() => { stopSearchRef.current = true; }}>Arrêter</button>
