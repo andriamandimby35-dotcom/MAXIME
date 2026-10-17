@@ -1,5 +1,6 @@
 import { canonicalUnit } from "@/lib/material-normalization";
 import { priceSearchableText } from "@/lib/price-engine/search-price";
+import { canonicalMaterialKey } from "@/lib/material-normalization";
 import { compositionFor, type CompositionComponent, type MatchSpec } from "@/lib/compositions/works";
 
 type PriceRow = Record<string, unknown>;
@@ -15,6 +16,11 @@ const savedPrice = (row: PriceRow) =>
 function matches(row: PriceRow, spec: MatchSpec) {
   const text = priceSearchableText(row);
   const tokens = text.split(" ");
+  // Le matériau doit être le NOM de la fiche : « Mortier bâtard 5 kg » (qui cite « ciment » dans ses caractéristiques) n'est pas du
+  // ciment, ni « Maçonnerie de brique » du sable. Seuls les autres critères (dimension, dosage…) peuvent venir des caractéristiques.
+  const ownTokens = canonicalMaterialKey(String(row.designation ?? "")).split(" ");
+  const nouns = spec.any && spec.any.length > 0 ? spec.any : spec.all.slice(0, 1);
+  if (nouns.length > 0 && !nouns.some((word) => ownTokens.some((token) => token === word || token.startsWith(word)))) return false;
   // Un nombre (épaisseur 15) doit être le début exact d'un mot (« 15 », « 15cm », « 15x20x40 », pas « 150 »).
   const has = (word: string) => /\d/.test(word)
     ? tokens.some((token) => new RegExp(`^${word}(?!\\d)`).test(token))
@@ -32,7 +38,11 @@ function priceInUnit(row: PriceRow, targetUnit: string, isCement: boolean) {
   const rowUnit = canonicalUnit(String(row.unite ?? ""));
   if (rowUnit === targetUnit) return price;
   if (targetUnit === "kg") {
-    if (isCement && (rowUnit.includes("sac") || rowUnit.includes("bag"))) return price / 50;
+    // Sac de ciment : 50 kg sauf si la fiche annonce un autre poids (« sac de 25 kg »).
+    const stated = String(row.designation ?? "").match(/(\d+(?:[.,]\d+)?)\s*kg\b/i);
+    const bagKg = stated ? Number(stated[1].replace(",", ".")) : 50;
+    const soldAsBag = rowUnit.includes("sac") || rowUnit.includes("bag") || (["u", "unite", "piece"].includes(rowUnit) && /\bsac\b/i.test(String(row.designation ?? "")) && Boolean(stated));
+    if (isCement && soldAsBag) return price / (bagKg > 0 ? bagKg : 50);
     if (rowUnit === "t") return price / 1000;
   }
   if (targetUnit === "l" && rowUnit === "m3") return price / 1000;

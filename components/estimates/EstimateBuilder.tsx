@@ -3017,6 +3017,7 @@ export default function EstimateBuilder({
   const libraryPricedIndexes = () => estimateLines
     .map((line, index) => ({ line, index }))
     .filter(({ line }) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && line.__laborOnly !== true
+      && !isInternalLaborLine(line) // les salaires ont leur propre bouton (« Enregistrer et calculer les salaires »)
       && numberFrom(line, UNIT_PRICE_KEYS) > 0 && AUTO_PRICE_SOURCE.test(String(line.__priceProvenance ?? "")));
   const libraryPricedCount = libraryPricedIndexes().length;
 
