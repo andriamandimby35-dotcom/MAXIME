@@ -193,7 +193,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
   async function copyMissingList() {
     const detailById = new Map((calc?.details ?? []).map((detail) => [detail.id, detail]));
     const list = rows
-      .filter((row) => !row.is_internal && !(num(row.unit_price) > 0) && !isLaborLine(String(row.designation ?? "")))
+      .filter((row) => !row.is_internal && !(num(row.unit_price) > 0) && !isLaborLine(String(row.designation ?? ""), String(row.unit ?? "")))
       .map((row) => {
         const detail = detailById.get(row.id);
         const reason = detail && detail.status === "sans composition" && detail.title ? ` | POURQUOI : ${detail.title}` : "";
@@ -657,7 +657,7 @@ export function ImportedDevisDetail({ project, lines, isAdmin }: { project: Proj
                 const external = num(row.external_unit_price);
                 const amount = quantity * (view === "internal" ? internal : external);
                 grandTotal += amount;
-                const labor = internal <= 0 && isLaborLine(row.designation);
+                const labor = internal <= 0 && isLaborLine(row.designation, row.unit);
                 const missing = view === "internal" ? internal <= 0 && !labor : external <= 0;
                 return (
                   <FragmentRows key={row.id} header={header} subheader={subheader} colSpan={6}>

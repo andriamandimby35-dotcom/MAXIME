@@ -99,8 +99,15 @@ export async function lookupLibraryPrices(supabase: SupabaseClient, organization
       const purchaseQty = positive(found.quantite_par_unite_achat);
       const purchasePrice = positive(found.prix_unite_achat);
       let price = savedPrice(found);
-      if (purchaseQty && purchasePrice && item.quantity > 0) price = (Math.ceil(item.quantity / purchaseQty) * purchasePrice) / item.quantity;
-      if (price) { hits.push({ id: item.id, price: Math.round(price * 100) / 100, source: "bibliothèque", matched: String(found.designation ?? "") }); continue; }
+      let matched = String(found.designation ?? "");
+      if (purchaseQty && purchasePrice && item.quantity > 0) {
+        const packs = Math.ceil(item.quantity / purchaseQty);
+        price = (packs * purchasePrice) / item.quantity;
+        const fmt = (value: number) => Math.round(value * 100) / 100;
+        // Explication affichée dans « Détail du prix » : pièces entières achetées, prix de la pièce, puis prix ramené à l'unité du devis.
+        matched += ` (achat de ${packs} pièce(s) de ${purchaseQty} ${String(item.unit || "").trim() || "unité(s)"} à ${purchasePrice.toLocaleString("fr-FR")} Ar = ${(packs * purchasePrice).toLocaleString("fr-FR")} Ar pour ${item.quantity.toLocaleString("fr-FR")} ${String(item.unit || "").trim()}, soit ${fmt(price).toLocaleString("fr-FR")} Ar par ${String(item.unit || "").trim() || "unité"})`;
+      }
+      if (price) { hits.push({ id: item.id, price: Math.round(price * 100) / 100, source: "bibliothèque", matched }); continue; }
     }
     const sharedMatches = shared.filter((row) => String(row.designation_key ?? "") === key && sameUnit(row) && positive(row.prix_unitaire));
     if (sharedMatches.length > 0) {

@@ -6,6 +6,7 @@ import { createOrSyncProjectFromEstimate } from "@/lib/projects/create-project-f
 import { syncProjectTasks } from "@/lib/devis/sync-project-tasks";
 import { createServerClient } from "@/lib/supabase/server";
 import { computeExternalUnitPrices, targetBeforeTax } from "@/lib/estimates/external-pricing";
+import { externalOverride } from "@/lib/compositions/manual-work";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -139,7 +140,8 @@ async function generateOfficialPdfResponse(
   const pricedLines = lines.filter((line) => rowType(line) === "item");
   const pricedInputs = pricedLines.map((line) => ({
     quantity: numberFrom(line, ["Quantité", "QuantitÃ©", "QuantitÃƒÂ©", "Quantite", "quantite"]),
-    baseUnitPrice: numberFrom(line, ["Prix unitaire", "prix_unitaire"]),
+    // Travaux manuels (fouille, remblai à la main, installation de chantier…) : 0 en interne, mais un prix de base propre pour le client.
+    baseUnitPrice: externalOverride(line) || numberFrom(line, ["Prix unitaire", "prix_unitaire"]),
   }));
   const pricedBase = pricedInputs.reduce((sum, item) => sum + item.quantity * item.baseUnitPrice, 0);
   const targetTtc = estimate.pricing_mode === "target_total" ? Number(estimate.target_client_total) || 0 : 0;
@@ -187,11 +189,12 @@ async function generateOfficialPdfResponse(
     }
     const quantity = numberFrom(line, ["Quantité", "QuantitÃ©", "QuantitÃƒÂ©", "Quantite", "quantite"]);
     const baseUnitPrice = numberFrom(line, ["Prix unitaire", "prix_unitaire"]);
+    const externalBaseUnitPrice = externalOverride(line) || baseUnitPrice;
     // Le devis interne garde les coûts réels. La marge choisie s'applique à
     // tous les postes du devis externe, y compris aux prix composés ; le
     // détail de leurs matériaux demeure lui enregistré au coût réel.
     const unitPrice = mode === "external"
-      ? (externalPriceByLine.get(line) ?? Math.round(baseUnitPrice * (1 + effectiveMarginPercent / 100)))
+      ? (externalPriceByLine.get(line) ?? Math.round(externalBaseUnitPrice * (1 + effectiveMarginPercent / 100)))
       : baseUnitPrice;
     const storedTotal = numberFrom(line, ["Total", "total"]);
     const total = mode === "external" ? quantity * unitPrice : (storedTotal || quantity * unitPrice);

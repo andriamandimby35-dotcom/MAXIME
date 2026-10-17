@@ -6,7 +6,7 @@ import { isLaborLine } from "@/lib/compositions/labor";
 // - external_unit_price  = prix EXTERNE (celui du client, utilisé pour la facture).
 // Marge = total externe ÷ total interne − 1, sur les lignes qui ont les deux prix.
 
-export type DevisItem = { designation?: string | null; quantity?: number | string | null; unit_price?: number | string | null; external_unit_price?: number | string | null; is_internal?: boolean | null };
+export type DevisItem = { designation?: string | null; unit?: string | null; quantity?: number | string | null; unit_price?: number | string | null; external_unit_price?: number | string | null; is_internal?: boolean | null };
 
 const num = (value: unknown) => Number(value) || 0;
 
@@ -36,7 +36,7 @@ export function summarizeDevis(items: DevisItem[]): DevisSummary {
     const internal = num(item.unit_price);
     const external = num(item.external_unit_price);
     if (internal > 0) internalTotal += quantity * internal;
-    else if (isLaborLine(item.designation)) laborLines += 1;
+    else if (isLaborLine(item.designation, item.unit)) laborLines += 1;
     else missingInternal += 1;
     if (external > 0) externalTotal += quantity * external; else missingExternal += 1;
     if (internal > 0 && external > 0) {

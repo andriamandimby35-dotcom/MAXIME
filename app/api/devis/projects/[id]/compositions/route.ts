@@ -45,8 +45,8 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
   const allTexts = rows.map((row) => String(row.designation ?? ""));
   const searchTextById = new Map(rows.map((row, position) => [String(row.id), designationWithParent(allTexts, position)]));
   const todo = rows.filter((row) => !(Number(row.unit_price) > 0));
-  const laborLines = todo.filter((row) => isLaborLine(String(row.designation ?? ""))).length;
-  const missing = todo.filter((row) => !isLaborLine(String(row.designation ?? "")));
+  const laborLines = todo.filter((row) => isLaborLine(String(row.designation ?? ""), String(row.unit ?? ""))).length;
+  const missing = todo.filter((row) => !isLaborLine(String(row.designation ?? ""), String(row.unit ?? "")));
 
   const library = await loadPriceLibrary(supabase, auth.organizationId);
   const known = await lookupLibraryPrices(supabase, auth.organizationId, missing.map((row) => ({

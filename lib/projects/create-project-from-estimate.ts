@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { daoTasksFromAnalysis } from "@/lib/projects/dao-tasks";
 import { computeExternalUnitPrices, targetBeforeTax } from "@/lib/estimates/external-pricing";
+import { externalOverride } from "@/lib/compositions/manual-work";
 
 // Le chantier devient indépendant du DAO dès sa création : la localisation,
 // le planning et le bordereau de prix sont copiés une seule fois depuis le
@@ -131,7 +132,7 @@ export async function createOrSyncProjectFromEstimate(
   // Même calcul que le PDF du devis externe (arrondi à 100 Ar, total exact en
   // mode « montant total fixé ») pour que la facture reprenne les mêmes prix.
   const eligible = orderedLines.filter((line) => !isSectionOrSubtotal(line) && !isInternal(line) && line.__excludedByChoice !== true && line.__disabledInternal !== true);
-  const eligibleInputs = eligible.map((line) => ({ quantity: numberFrom(line, ["Quantité", "Quantite"]), baseUnitPrice: numberFrom(line, ["Prix unitaire"]) }));
+  const eligibleInputs = eligible.map((line) => ({ quantity: numberFrom(line, ["Quantité", "Quantite"]), baseUnitPrice: externalOverride(line) || numberFrom(line, ["Prix unitaire"]) }));
   const eligibleBase = eligibleInputs.reduce((sum, item) => sum + item.quantity * item.baseUnitPrice, 0);
   const targetTtc = estimate.pricing_mode === "target_total" ? Number(estimate.target_client_total) || 0 : 0;
   const exactBeforeTax = targetTtc > 0 && eligibleBase > 0 ? targetBeforeTax(targetTtc) : null;
@@ -167,7 +168,7 @@ export async function createOrSyncProjectFromEstimate(
       // figé ici plutôt que recalculé plus tard : sert de référence stable
       // pour la facturation, même si la marge du devis change ensuite.
       // Sans objet pour une ligne interne (jamais montrée au client).
-      external_unit_price: lineIsInternal ? null : (externalPriceByLine.get(line) ?? Math.round(unitPrice * (1 + marginPercent / 100) * 100) / 100),
+      external_unit_price: lineIsInternal ? null : (externalPriceByLine.get(line) ?? Math.round((externalOverride(line) || unitPrice) * (1 + marginPercent / 100) * 100) / 100),
       total: total || null,
       is_internal: lineIsInternal,
       // created_at croissant : garde l'ordre du devis à la relecture.

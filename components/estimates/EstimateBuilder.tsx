@@ -7,6 +7,7 @@ import { createClient } from "@/lib/supabase/client";
 import OfficialPdfButton from "@/components/estimates/OfficialPdfButton";
 import { LibraryPicker } from "@/components/estimates/LibraryPicker";
 import { compositeInputsFor } from "@/lib/compositions/works";
+import { externalOverride, manualExternalBasePrice, manualPriceExplanation, manualWorkFor } from "@/lib/compositions/manual-work";
 import { designationWithParent, stripLineReference } from "@/lib/prices/synonyms";
 import { estimateMaterialWeights } from "@/lib/devis/internal-costs";
 import type { TransportWeights } from "@/lib/dao/transport-weights";
@@ -98,6 +99,12 @@ function lineTotal(line: EstimateLineData) {
   const storedTotal = numberFrom(line, TOTAL_KEYS);
   if (storedTotal !== 0) return storedTotal;
   return numberFrom(line, QUANTITY_KEYS) * numberFrom(line, UNIT_PRICE_KEYS);
+}
+
+/** Montant de base d'une ligne pour le devis EXTERNE (avant marge) : travaux manuels = prix externe propre, sinon le coût interne. */
+function externalBaseTotal(line: EstimateLineData) {
+  const override = externalOverride(line);
+  return override > 0 ? numberFrom(line, QUANTITY_KEYS) * override : lineTotal(line);
 }
 
 function daoRowType(line: EstimateLineData) {
@@ -1258,7 +1265,7 @@ export default function EstimateBuilder({
   const financialSummary = useMemo(() => {
     const active = estimateLines.filter((line) => daoRowType(line) === "item" && line.__disabledInternal !== true && line.__excludedByChoice !== true);
     const internalCost = active.reduce((sum, line) => sum + lineTotal(line), 0);
-    const externalBase = active.filter((line) => line.__internalOnly !== true).reduce((sum, line) => sum + lineTotal(line), 0);
+    const externalBase = active.filter((line) => line.__internalOnly !== true).reduce((sum, line) => sum + externalBaseTotal(line), 0);
     const requestedClientTotal = Math.max(0, Number(targetClientTotal) || 0);
     const targetMarginPercent = externalBase > 0 && requestedClientTotal > 0
       ? ((requestedClientTotal / 1.08) / externalBase - 1) * 100
@@ -1273,10 +1280,10 @@ export default function EstimateBuilder({
   const externalMarginFactor = 1 + financialSummary.appliedMarginPercent / 100;
   const externalPreviewUnitPrice = (line: EstimateLineData) => line.__internalOnly === true
     ? 0
-    : numberFrom(line, UNIT_PRICE_KEYS) * externalMarginFactor;
+    : (externalOverride(line) || numberFrom(line, UNIT_PRICE_KEYS)) * externalMarginFactor;
   const externalPreviewLineTotal = (line: EstimateLineData) => line.__internalOnly === true
     ? 0
-    : lineTotal(line) * externalMarginFactor;
+    : externalBaseTotal(line) * externalMarginFactor;
   const marginClass = financialSummary.appliedMarginPercent < 0 ? "negative" : financialSummary.appliedMarginPercent > 0 ? "positive" : "neutral";
 
   // Le bouton applique vraiment le réglage choisi (marge % OU montant total attendu)
@@ -1498,6 +1505,16 @@ export default function EstimateBuilder({
   const internalCostRows = estimateLines
     .map((line, index) => ({ line, index }))
     .filter(({ line, index }) => line.__internalOnly === true && daoRowType(line) === "item" && line.__disabledInternal !== true && (isInternalLaborLine(line) || index === transportLineIndex));
+
+  // Salaire d'une journée d'ouvrier (ligne « Ouvriers et aides » du devis interne) : base du prix externe des travaux manuels.
+  const manualDayRate = (() => {
+    const designationKey = columnName(daoColumns, ["Désignation", "Designation"]);
+    for (const { line } of internalCostRows) {
+      const price = numberFrom(line, UNIT_PRICE_KEYS);
+      if (price > 0 && /ouvrier/i.test(String(line[designationKey] ?? ""))) return price;
+    }
+    return 15000;
+  })();
 
   async function rememberInternalPrice(designation: string, unit: string, price: number) {
     // Le salaire ou le prix de transport saisi ici est gardé dans la bibliothèque (retrouvé dans les prochains devis).
@@ -2285,6 +2302,15 @@ export default function EstimateBuilder({
   async function openCompositePriceDetail(index: number) {
     const line = estimateLines[index];
     if (!line) return;
+    if (line.__laborOnly === true) {
+      setMessage(String(line.__laborBasis ?? "Main-d'œuvre : 0 en interne (salaires déjà payés)."));
+      return;
+    }
+    // Matériau acheté par pièce entière (rouleau de 50 m, barre…) : le détail est le calcul des pièces, pas une composition.
+    if (!String(line.__manualCompositeJson ?? line.__manualPriceInputsJson ?? "").trim().startsWith("[{") && String(line.__priceProvenance ?? "").includes("(achat de ")) {
+      setMessage(String(line.__priceProvenance));
+      return;
+    }
     let components: Array<{
       designation: string;
       unit: string;
@@ -2811,7 +2837,7 @@ export default function EstimateBuilder({
   }
   // Ligne sans prix à remplir (salaires et transport compris). Les « éléments manquants utiles aux travaux » proposés par l'application
   // (camion, base-vie, petit matériel…) sont des suggestions sans prix : tant qu'elles sont masquées, elles ne comptent pas comme manquantes.
-  const needsPriceAny = (line: EstimateLineData) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0 && !isGroupHeader(line);
+  const needsPriceAny = (line: EstimateLineData) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true && numberFrom(line, UNIT_PRICE_KEYS) <= 0 && line.__laborOnly !== true && !isGroupHeader(line);
   const isHiddenSuggestion = (line: EstimateLineData) => line.__internalOnly === true && !isInternalLaborLine(line)
     && !normalizedLabel(String(line[columnName(daoColumns, ["Désignation", "Designation"])] ?? "")).includes("transportapprovisionnement") && !showEmptyInternal;
   const needsPrice = (line: EstimateLineData) => needsPriceAny(line) && !isHiddenSuggestion(line);
@@ -2821,6 +2847,35 @@ export default function EstimateBuilder({
     const text = stripLineReference(String(line[columnName(daoColumns, ["Désignation", "Designation"])] ?? ""));
     return Boolean(compositeInputsFor(text, String(line[columnName(daoColumns, ["Unité", "Unite", "unite"])] ?? "")));
   };
+  // Travaux manuels (fouille, déblai, remblai à la main, décapage…) et installation / repli de chantier : 0 en interne
+  // (salaires déjà payés), prix externe propre à la ligne. Retourne les lignes à convertir (index → nouvelle ligne).
+  function manualLabourChanges(): Map<number, EstimateLineData> {
+    const unitKey = columnName(daoColumns, ["Unité", "Unite", "unite"]);
+    const unitPriceKey = columnName(daoColumns, UNIT_PRICE_KEYS);
+    const totalKey = columnName(daoColumns, TOTAL_KEYS);
+    const out = new Map<number, EstimateLineData>();
+    estimateLines.forEach((line, index) => {
+      if (daoRowType(line) !== "item" || line.__internalOnly === true || line.__disabledInternal === true || line.__excludedByChoice === true) return;
+      if (line.__laborOnly !== undefined || isGroupHeader(line)) return;
+      const unit = String(line[unitKey] ?? "");
+      const work = manualWorkFor(designationWithParentLine(index), unit);
+      if (!work) return;
+      const external = work.keepPrice ? numberFrom(line, UNIT_PRICE_KEYS) : manualExternalBasePrice(work, manualDayRate);
+      if (!(external > 0)) return;
+      out.set(index, {
+        ...line,
+        [unitPriceKey]: 0,
+        [totalKey]: 0,
+        __laborOnly: true,
+        __externalBasePrice: external,
+        __priceStatus: "labor",
+        __priceProvenance: `Main-d'œuvre : 0 en interne (salaires déjà payés). Prix externe de base : ${external.toLocaleString("fr-FR")} Ar par ${unit || "unité"}`,
+        __laborBasis: manualPriceExplanation(work, manualDayRate, unit, external),
+      } as EstimateLineData);
+    });
+    return out;
+  }
+  const manualPendingCount = manualLabourChanges().size;
   const missingPriceCount = estimateLines.filter(needsPrice).length;
   const missingCompositionCount = estimateLines.filter((line) => needsPrice(line) && hasComposition(line)).length;
   const missingDirectCount = missingPriceCount - missingCompositionCount;
@@ -2859,14 +2914,34 @@ export default function EstimateBuilder({
     const quantityKey = columnName(daoColumns, QUANTITY_KEYS);
     const unitPriceKey = columnName(daoColumns, UNIT_PRICE_KEYS);
     const totalKey = columnName(daoColumns, TOTAL_KEYS);
+    const manualChanges = manualLabourChanges();
     const targets = estimateLines
       .map((line, index) => ({ line, index }))
-      .filter(({ line }) => needsPriceAny(line));
-    if (targets.length === 0) { setMessage("Tous les prix sont déjà remplis."); return; }
+      .filter(({ line, index }) => needsPriceAny(line) && !manualChanges.has(index));
+    if (targets.length === 0 && manualChanges.size === 0) { setMessage("Tous les prix sont déjà remplis."); return; }
     setFreeBusy(true);
     const previousCursor = document.body.style.cursor;
     document.body.style.cursor = "wait";
     try {
+      let baseLines = estimateLines;
+      if (manualChanges.size > 0) {
+        baseLines = estimateLines.map((line, index) => manualChanges.get(index) ?? line);
+        setEstimateLines(baseLines);
+        if (estimateId) {
+          const supabase = createClient();
+          await Promise.all([...manualChanges.keys()].map(async (index) => {
+            const lineId = baseLines[index]?.[LINE_ID_KEY];
+            if (lineId) await supabase.from("estimate_lines").update({ data: linePayload(baseLines[index]) }).eq("id", lineId);
+          }));
+        }
+        await persistEstimateTotal(baseLines);
+        if (targets.length === 0) {
+          setFreeCalcDone(true);
+          setMessage(`${manualChanges.size} ligne(s) de travaux manuels passées en main d'œuvre : 0 en interne (salaires), prix calculé pour le devis externe (journée d'ouvrier ${manualDayRate.toLocaleString("fr-FR")} Ar ÷ rendement par jour). Clique sur « Détail du prix » pour voir le calcul.`);
+          await syncProjectAfterChange("Travaux manuels mis à jour");
+          return;
+        }
+      }
       const response = await fetch("/api/library/free-prices", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2877,8 +2952,8 @@ export default function EstimateBuilder({
       freeMissesRef.current = new Map((result.misses ?? []).map((miss) => [Number(miss.id), miss.reason]));
       setFreeCalcDone(true);
       const hits = new Map((result.results ?? []).map((hit) => [Number(hit.id), hit]));
-      if (hits.size === 0) { setMessage(`Aucun des ${targets.length} prix manquants n'est dans la bibliothèque. Essaie « Rechercher les prix avec l'IA », ou clique sur une ligne puis « Bibliothèque ».`); return; }
-      const nextLines = estimateLines.map((line, index) => {
+      if (hits.size === 0) { setMessage(`${manualChanges.size > 0 ? `${manualChanges.size} ligne(s) de travaux manuels passées en main d'œuvre. ` : ""}Aucun des ${targets.length} prix manquants n'est dans la bibliothèque. Essaie « Rechercher les prix avec l'IA », ou clique sur une ligne puis « Bibliothèque ».`); return; }
+      const nextLines = baseLines.map((line, index) => {
         const hit = hits.get(index);
         if (!hit) return line;
         const quantity = numberFrom(line, QUANTITY_KEYS);
@@ -2894,7 +2969,7 @@ export default function EstimateBuilder({
       }
       await persistEstimateTotal(nextLines);
       const approxCount = (result.results ?? []).filter((hit) => hit.approximate).length;
-      setMessage(`${hits.size} prix remplis depuis la bibliothèque (gratuit).${approxCount > 0 ? ` ${approxCount} sont des prix de fiches voisines, marqués « À vérifier ».` : ""}${targets.length > hits.size ? ` Il reste ${targets.length - hits.size} ligne(s) absentes de la bibliothèque : clique sur « Copier la liste des lignes sans prix » et envoie-la moi, ou utilise la recherche IA.` : " Tous les prix sont remplis."}`);
+      setMessage(`${manualChanges.size > 0 ? `${manualChanges.size} ligne(s) de travaux manuels passées en main d'œuvre (0 en interne). ` : ""}${hits.size} prix remplis depuis la bibliothèque (gratuit).${approxCount > 0 ? ` ${approxCount} sont des prix de fiches voisines, marqués « À vérifier ».` : ""}${targets.length > hits.size ? ` Il reste ${targets.length - hits.size} ligne(s) absentes de la bibliothèque : clique sur « Copier la liste des lignes sans prix » et envoie-la moi, ou utilise la recherche IA.` : " Tous les prix sont remplis."}`);
       await syncProjectAfterChange("Prix remplis");
     } finally { document.body.style.cursor = previousCursor; setFreeBusy(false); }
   }
@@ -2935,6 +3010,7 @@ export default function EstimateBuilder({
     const manuallyPriced = numberFrom(currentLine, UNIT_PRICE_KEYS) > 0;
     const changedLine: EstimateLineData = manuallyPriced ? {
       ...currentLine,
+      ...(currentLine.__laborOnly === true ? { __laborOnly: false, __externalBasePrice: 0 } : {}),
       __priceStatus: "manual_enterprise",
       __equivalentOptionsJson: "[]",
       __recommendedEquivalent: "",
@@ -3130,7 +3206,7 @@ export default function EstimateBuilder({
             <p className="estimatePanelEyebrow">Prix du devis</p>
             <h3>Compléter les prix manquants</h3>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
-              {missingPriceCount > 0 && !priceSearchStatus?.running && (
+              {(missingPriceCount > 0 || manualPendingCount > 0) && !priceSearchStatus?.running && (
                 <button type="button" className="estimatePrimaryAction" disabled={freeBusy} onClick={() => void calculateFreePrices()}>{freeBusy ? "Calcul en cours…" : "1. Calculer les prix (gratuit)"}</button>
               )}
               {freeCalcDone && missingCompositionCount > 0 && !priceSearchStatus?.running && (
@@ -3626,6 +3702,8 @@ export default function EstimateBuilder({
                       )}
                       {(isInternalLaborLine(item) ||
                         isCompositeWork(item, columnName(daoColumns, ["Désignation", "Designation"])) ||
+                        item.__laborOnly === true ||
+                        String(item.__priceProvenance ?? "").includes("(achat de ") ||
                         String(item.__manualCompositeJson ?? "").length > 2 ||
                         String(item.__manualPriceInputsJson ?? "").length > 2) && (
                         <button
@@ -3639,7 +3717,7 @@ export default function EstimateBuilder({
                           Détail du prix
                         </button>
                       )}
-                      {numberFrom(item, UNIT_PRICE_KEYS) <= 0 && (
+                      {numberFrom(item, UNIT_PRICE_KEYS) <= 0 && item.__laborOnly !== true && (
                         <button
                           type="button"
                           onClick={(event) => {

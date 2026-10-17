@@ -77,7 +77,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const priceOf = (row: Row): number | null => {
     const value = Number(mode === "external" ? row.external_unit_price : row.unit_price);
     if (Number.isFinite(value) && value > 0) return value;
-    if (mode === "internal" && isLaborLine(row.designation)) return 0;
+    if (mode === "internal" && isLaborLine(row.designation, row.unit)) return 0;
     return null;
   };
   if (!items.some((row) => (priceOf(row) ?? 0) > 0)) {
