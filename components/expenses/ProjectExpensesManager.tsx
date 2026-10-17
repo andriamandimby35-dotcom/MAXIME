@@ -57,12 +57,12 @@ const TRANSPORT_LABELS: Record<string, string> = { homme: "Homme", charrette: "C
 
 function orderLabel(order: MaterialOrder) {
   if (order.expense_kind === "transport") return `Transport — ${TRANSPORT_LABELS[order.transport_mode || "autre"] || "Autre"}`;
-  if (order.expense_kind === "other") return order.recipient_name || "Autre";
+  if (order.expense_kind === "other") return order.material_key === "commission" ? `Commission — ${order.recipient_name || "marché public"}` : order.recipient_name || "Autre";
   return order.material_name;
 }
 function orderReason(order: MaterialOrder) {
   if (order.expense_kind === "transport") return "Transport";
-  if (order.expense_kind === "other") return "Autre";
+  if (order.expense_kind === "other") return order.material_key === "commission" ? "Commission" : "Autre";
   return "Achat";
 }
 function orderTotal(order: MaterialOrder) {
@@ -191,7 +191,7 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   const [viewingSalaryHistory, setViewingSalaryHistory] = useState(false);
   const [viewingSalaryDetail, setViewingSalaryDetail] = useState<SalaryPayment | null>(null);
   const [addingMisc, setAddingMisc] = useState(false);
-  const [miscDraft, setMiscDraft] = useState({ recipient: "", amount: "", note: "" });
+  const [miscDraft, setMiscDraft] = useState({ recipient: "", amount: "", note: "", category: "autre" });
   const [confirmingMisc, setConfirmingMisc] = useState(false);
   const [revealedRowKey, setRevealedRowKey] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState<{ type: "salary" | "order"; id: string; label: string } | null>(null);
@@ -571,11 +571,11 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, "fr"));
   })();
 
-  type RecapCategory = "salaire" | "materiaux" | "transport" | "autre";
+  type RecapCategory = "salaire" | "materiaux" | "transport" | "autre" | "commission";
   type RecapRow = { key: string; type: "salary" | "order"; id: string; date: string; label: string; qty: string; amount: number; category: RecapCategory; outsideClosure: boolean };
   function orderCategory(order: MaterialOrder): RecapCategory {
     if (order.expense_kind === "transport") return "transport";
-    if (order.expense_kind === "other") return "autre";
+    if (order.expense_kind === "other") return order.material_key === "commission" ? "commission" : "autre";
     return "materiaux";
   }
   // Une saisie faite hors ligne avant la clôture (par un appareil resté sans
@@ -595,9 +595,9 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
   const outsideClosureTotal = recapRows.filter((row) => row.outsideClosure).reduce((sum, row) => sum + row.amount, 0);
   // Très important pour l'administrateur : voir combien part dans chaque
   // catégorie avant le total général (matériaux, transport, salaire, autre).
-  const categoryTotals: Record<RecapCategory, number> = { materiaux: 0, transport: 0, salaire: 0, autre: 0 };
+  const categoryTotals: Record<RecapCategory, number> = { materiaux: 0, transport: 0, salaire: 0, autre: 0, commission: 0 };
   for (const row of recapRows) categoryTotals[row.category] += row.amount;
-  const categoryLabels: Record<RecapCategory, string> = { materiaux: "Matériaux", transport: "Transport", salaire: "Salaire", autre: "Autre" };
+  const categoryLabels: Record<RecapCategory, string> = { materiaux: "Matériaux", transport: "Transport", salaire: "Salaire", autre: "Autre", commission: "Commission (non facturée)" };
 
   // ----- Résumé dépense : vrai PDF (voir lib/expenses/general-expense-pdf.ts) -----
   // Remplace l'ancienne impression de la page (window.print), qui donnait des
@@ -806,8 +806,8 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     const { data, error } = await supabase.from("project_material_orders").insert({
       organization_id: project.organization_id,
       project_id: project.id,
-      material_name: "Autre",
-      material_key: "autre",
+      material_name: miscDraft.category === "commission" ? "Commission" : "Autre",
+      material_key: miscDraft.category === "commission" ? "commission" : "autre",
       unit: "U",
       quantity: 1,
       unit_price: amount,
@@ -823,9 +823,10 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
     setConfirmingMisc(false);
     if (error) { setMessage({ kind: "error", text: `Dépense non enregistrée : ${error.message}` }); return; }
     setMaterialOrders((rows) => [data as MaterialOrder, ...rows]);
-    setMiscDraft({ recipient: "", amount: "", note: "" });
+    const savedAsCommission = miscDraft.category === "commission";
+    setMiscDraft({ recipient: "", amount: "", note: "", category: "autre" });
     setAddingMisc(false);
-    setMessage({ kind: "success", text: "Dépense imprévue enregistrée dans le compte dépense générale." });
+    setMessage({ kind: "success", text: savedAsCommission ? "Commission enregistrée (jamais dans la facture ni le devis externe)." : "Dépense imprévue enregistrée dans le compte dépense générale." });
   }
 
   async function confirmDeleteRow() {
@@ -945,9 +946,13 @@ export function ProjectExpensesManager({ project, accessRole, userId, staffMembe
 
       {canManage && <section className="projectSiteCard">
         <div className="projectCardHead"><div><p className="projectEyebrow">IMPRÉVU</p><h2>Dépenses imprévues</h2></div></div>
-        <p className="projectHint">Cadeaux ou toute dépense hors matériau/salaire. Envoyée directement au compte dépense générale après confirmation.</p>
+        <p className="projectHint">Cadeaux ou toute dépense hors matériau/salaire. Pour une commission de marché public (payée avant, après ou par acomptes), choisis la catégorie « Commission » : elle ne va jamais dans la facture ni le devis externe. Envoyée directement au compte dépense générale après confirmation.</p>
         {canManage && (addingMisc ? <>
           <div className="projectMaterialForm">
+            <select aria-label="Catégorie de la dépense" value={miscDraft.category} onChange={(event) => setMiscDraft((draft) => ({ ...draft, category: event.target.value }))}>
+              <option value="autre">Dépense imprévue</option>
+              <option value="commission">Commission (marché public)</option>
+            </select>
             <input placeholder="Nom du bénéficiaire ou organisme" value={miscDraft.recipient} onChange={(event) => setMiscDraft((draft) => ({ ...draft, recipient: event.target.value }))} />
             <input type="number" min="0" step="any" placeholder="Montant (Ar)" value={miscDraft.amount} onChange={(event) => setMiscDraft((draft) => ({ ...draft, amount: event.target.value }))} />
             <input placeholder="Note (facultatif)" value={miscDraft.note} onChange={(event) => setMiscDraft((draft) => ({ ...draft, note: event.target.value }))} />

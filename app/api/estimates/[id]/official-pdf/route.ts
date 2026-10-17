@@ -272,6 +272,11 @@ async function generateOfficialPdfResponse(
       { title: "Bénéfice attendu", total: externalBeforeTax - internalCost },
       { title: "Taxe de l'État (8 %)", total: stateTax },
       { title: "Montant total à payer par le client", total: externalBeforeTax + stateTax },
+      // Commission de marché public : uniquement dans le devis INTERNE (jamais dans le devis externe ni la facture).
+      ...(estimate.commission_applied === true && Number(estimate.commission_percent) > 0 ? [
+        { title: `Commission marché public (${Number(estimate.commission_percent)} % du total client TTC, à payer après paiement)`, total: (externalBeforeTax + stateTax) * Number(estimate.commission_percent) / 100 },
+        { title: "Bénéfice attendu après commission", total: externalBeforeTax - internalCost - (externalBeforeTax + stateTax) * Number(estimate.commission_percent) / 100 },
+      ] : []),
     ] : undefined,
   });
 

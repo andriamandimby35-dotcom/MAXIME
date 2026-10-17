@@ -101,7 +101,9 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
   const [photos, setPhotos] = useState(initialPhotos);
   const [suggestions, setSuggestions] = useState(initialSuggestions);
   const [recordNotes, setRecordNotes] = useState(initialNotes);
-  const [materialOrders, setMaterialOrders] = useState(initialMaterialOrders);
+  // La commission d'un marché public est réservée à l'administrateur (devis interne et dépenses internes).
+  const isCommissionOrder = (order: { expense_kind?: string | null; material_key?: string | null }) => order.expense_kind === "other" && order.material_key === "commission";
+  const [materialOrders, setMaterialOrders] = useState(accessRole === "admin" ? initialMaterialOrders : initialMaterialOrders.filter((order) => !isCommissionOrder(order)));
   const [staffMembers, setStaffMembers] = useState(initialStaffMembers);
   const [attendance, setAttendance] = useState(initialAttendance);
   const [reportMaterialUsages, setReportMaterialUsages] = useState(initialReportMaterialUsages);
@@ -477,6 +479,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
         { event: "INSERT", schema: "public", table: "project_material_orders", filter: `project_id=eq.${selectedId}` },
         (payload) => {
           const row = payload.new as MaterialOrder;
+          if (accessRole !== "admin" && isCommissionOrder(row)) return;
           setMaterialOrders((rows) => rows.some((item) => item.id === row.id) ? rows : [row, ...rows]);
         },
       )
@@ -485,6 +488,7 @@ export function ProjectSiteManager({ organizationId, userId, accessRole = "admin
         { event: "UPDATE", schema: "public", table: "project_material_orders", filter: `project_id=eq.${selectedId}` },
         (payload) => {
           const row = payload.new as MaterialOrder;
+          if (accessRole !== "admin" && isCommissionOrder(row)) return;
           setMaterialOrders((rows) => rows.map((item) => item.id === row.id ? row : item));
         },
       )

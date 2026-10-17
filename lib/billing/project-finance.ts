@@ -26,10 +26,12 @@ export type ProjectFinance = {
   progress: number | null;
   categories: CostCategory[];
   realCost: number;
+  /** Commission de marché public déjà payée : jamais dans les coûts ni dans la facture, seulement pour le bénéfice interne. */
+  commissionPaid: number;
   pricing: Pricing;
 };
 
-type OrderRow = { project_id: string; material_name?: string | null; quantity?: number | string | null; unit_price?: number | string | null; expense_kind?: string | null; transport_mode?: string | null; recipient_name?: string | null };
+type OrderRow = { project_id: string; material_name?: string | null; material_key?: string | null; quantity?: number | string | null; unit_price?: number | string | null; expense_kind?: string | null; transport_mode?: string | null; recipient_name?: string | null };
 type SalaryRow = { project_id: string; total_amount?: number | string | null; paid_at?: string | null; period_month?: string | null };
 type PriceItemRow = { project_id: string; quantity?: number | string | null; external_unit_price?: number | string | null; unit_price?: number | string | null; total?: number | string | null; is_internal?: boolean | null };
 type SettingsRow = { id: string; contract_amount?: number | string | null; expected_margin_percent?: number | string | null; expected_margin_amount?: number | string | null };
@@ -109,7 +111,7 @@ export async function loadFinanceForProjects(
     loadSettings(supabase, organizationId, projectIds),
     supabase
       .from("project_material_orders")
-      .select("project_id,material_name,quantity,unit_price,expense_kind,transport_mode,recipient_name")
+      .select("project_id,material_name,material_key,quantity,unit_price,expense_kind,transport_mode,recipient_name")
       .in("project_id", projectIds)
       .eq("status", "paid")
       .is("deleted_at", null),
@@ -138,7 +140,14 @@ export async function loadFinanceForProjects(
   }
 
   const ordersBy = new Map<string, OrderRow[]>();
-  for (const row of (ordersResult.data ?? []) as OrderRow[]) ordersBy.set(row.project_id, [...(ordersBy.get(row.project_id) ?? []), row]);
+  const commissionBy = new Map<string, number>();
+  for (const row of (ordersResult.data ?? []) as OrderRow[]) {
+    if (row.expense_kind === "other" && row.material_key === "commission") {
+      commissionBy.set(row.project_id, (commissionBy.get(row.project_id) ?? 0) + num(row.quantity) * num(row.unit_price));
+      continue;
+    }
+    ordersBy.set(row.project_id, [...(ordersBy.get(row.project_id) ?? []), row]);
+  }
   const salariesBy = new Map<string, SalaryRow[]>();
   for (const row of (salariesResult.data ?? []) as SalaryRow[]) salariesBy.set(row.project_id, [...(salariesBy.get(row.project_id) ?? []), row]);
   const devisBy = new Map<string, number>();
@@ -162,6 +171,7 @@ export async function loadFinanceForProjects(
       progress,
       categories,
       realCost,
+      commissionPaid: commissionBy.get(projectId) ?? 0,
       pricing: computePricing({ settings, realCost, devisTotal, progress }),
     });
   }

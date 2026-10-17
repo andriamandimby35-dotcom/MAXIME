@@ -304,7 +304,8 @@ export async function loadExpenseAllocationInput(supabase: SupabaseClient, proje
   const ordersPromise = (async () => {
     for (const columns of [`${orderBase},purchased_quantity,source_order_id`, `${orderBase},purchased_quantity`, orderBase]) {
       const result = await fetchAll<OrderRow>((from, to) => supabase.from("project_material_orders").select(columns).eq("project_id", projectId).eq("status", "paid").is("deleted_at", null).order("created_at", { ascending: true }).range(from, to));
-      if (!result.error) return result.rows;
+      // La commission d'un marché public n'est ni une dépense du chantier ni refacturable : jamais dans la répartition ni dans la facture.
+      if (!result.error) return result.rows.filter((row) => !(row.expense_kind === "other" && row.material_key === "commission"));
     }
     return [] as OrderRow[];
   })();

@@ -301,7 +301,7 @@ export async function computeSituationDraft(
   // ci-dessus (ex: le parpaing d'un mur déjà facturé avec ce mur).
   const [transportOrders, otherOrders, salaryPayments] = await Promise.all([
     supabase.from("project_material_orders").select("quantity,unit_price").eq("project_id", projectId).eq("status", "paid").eq("expense_kind", "transport").is("deleted_at", null),
-    supabase.from("project_material_orders").select("quantity,unit_price").eq("project_id", projectId).eq("status", "paid").eq("expense_kind", "other").is("deleted_at", null),
+    supabase.from("project_material_orders").select("quantity,unit_price").eq("project_id", projectId).eq("status", "paid").eq("expense_kind", "other").or("material_key.is.null,material_key.neq.commission").is("deleted_at", null),
     supabase.from("project_salary_payments").select("total_amount").eq("project_id", projectId).is("deleted_at", null),
   ]);
   const sumAmount = (rows: Array<{ quantity?: number; unit_price?: number }> | null | undefined) =>

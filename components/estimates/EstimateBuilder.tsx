@@ -11,6 +11,7 @@ import { externalOverride, manualExternalBasePrice, manualPriceExplanation, manu
 import { designationWithParent, stripLineReference } from "@/lib/prices/synonyms";
 import { estimateMaterialWeights } from "@/lib/devis/internal-costs";
 import type { TransportWeights } from "@/lib/dao/transport-weights";
+import { buildPriceAlerts, type CheckLine, type DaoItem, type LibraryHit, type PriceAlert } from "@/lib/prices/price-check";
 
 type DaoColumn = {
   name: string;
@@ -31,6 +32,8 @@ type EstimateSummary = {
   status?: string;
   total?: number | string | null;
   profit_margin_percent?: number | string | null;
+  commission_applied?: boolean | null;
+  commission_percent?: number | string | null;
   pricing_mode?: string | null;
   target_client_total?: number | string | null;
   created_at?: string;
@@ -627,6 +630,12 @@ export default function EstimateBuilder({
   const [weightsBasis, setWeightsBasis] = useState<"outside" | "total">("outside");
   const weightsAskedRef = useRef(false);
   const [freeBusy, setFreeBusy] = useState(false);
+  const [priceAlerts, setPriceAlerts] = useState<PriceAlert[] | null>(null);
+  const [checkBusy, setCheckBusy] = useState(false);
+  // Commission de marché public : réservée au devis interne (synthèse). Jamais dans le devis externe ni la facture.
+  const [commissionApplied, setCommissionApplied] = useState(false);
+  const [commissionPercent, setCommissionPercent] = useState(0);
+  const [commissionStatus, setCommissionStatus] = useState("");
   const [editingLine, setEditingLine] = useState<number | null>(null);
   const [blockQtyDraft, setBlockQtyDraft] = useState<{ index: number; text: string } | null>(null);
   const [estimateId, setEstimateId] = useState<string | null>(null);
@@ -698,6 +707,8 @@ export default function EstimateBuilder({
     setDaoColumns(columns);
     setEstimateId(estimate.id);
     setProfitMarginPercent(Number(estimate.profit_margin_percent) || 0);
+    setCommissionApplied(estimate.commission_applied === true);
+    setCommissionPercent(Math.max(0, Number(estimate.commission_percent) || 0));
     // Marge OU montant total fixé : on rouvre le devis dans le mode enregistré.
     const savedTarget = Number(estimate.target_client_total) || 0;
     if (estimate.pricing_mode === "target_total" && savedTarget > 0) {
@@ -1292,8 +1303,19 @@ export default function EstimateBuilder({
     const expectedMargin = externalBase * appliedMarginPercent / 100;
     const externalBeforeTax = externalBase + expectedMargin;
     const stateTax = externalBeforeTax * 0.08;
-    return { internalCost, externalBase, appliedMarginPercent, expectedMargin, expectedProfit: externalBeforeTax - internalCost, stateTax, clientTotal: externalBeforeTax + stateTax };
-  }, [estimateLines, profitMarginPercent, externalPricingMode, targetClientTotal]);
+    const clientTotal = externalBeforeTax + stateTax;
+    // La commission se calcule sur ce que le client paie (TTC) et ne s'ajoute jamais aux coûts : elle ne sert qu'à voir le bénéfice réel.
+    const commissionAmount = commissionApplied ? clientTotal * Math.max(0, commissionPercent) / 100 : 0;
+    return { internalCost, externalBase, appliedMarginPercent, expectedMargin, expectedProfit: externalBeforeTax - internalCost, stateTax, clientTotal, commissionAmount, profitAfterCommission: externalBeforeTax - internalCost - commissionAmount };
+  }, [estimateLines, profitMarginPercent, externalPricingMode, targetClientTotal, commissionApplied, commissionPercent]);
+
+  async function saveCommission(applied: boolean, percent: number) {
+    setCommissionApplied(applied);
+    setCommissionPercent(percent);
+    if (!estimateId) return;
+    const { error } = await createClient().from("estimates").update({ commission_applied: applied, commission_percent: percent }).eq("id", estimateId);
+    setCommissionStatus(error ? `Commission non enregistrée (${error.message}). Lance d'abord le fichier SQL de la commission dans Supabase.` : "Commission enregistrée.");
+  }
 
   const externalMarginFactor = 1 + financialSummary.appliedMarginPercent / 100;
   const externalPreviewUnitPrice = (line: EstimateLineData) => line.__internalOnly === true
@@ -3072,6 +3094,164 @@ export default function EstimateBuilder({
     } finally { document.body.style.cursor = previousCursor; setFreeBusy(false); }
   }
 
+  // « Contrôler les prix » : relit tout le devis (gratuit, aucun crédit IA) et signale ce qui paraît faux. Rien n'est modifié
+  // tant que tu ne cliques pas sur « Corriger cette ligne » ou « Garder mon prix » sur une alerte.
+  async function runPriceCheck() {
+    if (checkBusy || freeBusy) return;
+    const unitKey = columnName(daoColumns, ["Unité", "Unite", "unite"]);
+    const designationKey = columnName(daoColumns, ["Désignation", "Designation"]);
+    const positionKey = columnName(daoColumns, ["N°", "N"]);
+    const unitPriceKey = columnName(daoColumns, UNIT_PRICE_KEYS);
+    const totalKey = columnName(daoColumns, TOTAL_KEYS);
+    setCheckBusy(true);
+    const previousCursor = document.body.style.cursor;
+    document.body.style.cursor = "wait";
+    try {
+      const targets = estimateLines
+        .map((line, index) => ({ line, index }))
+        .filter(({ line }) => daoRowType(line) === "item" && line.__excludedByChoice !== true && line.__disabledInternal !== true
+          && line.__laborOnly !== true && !isInternalLaborLine(line) && !isGroupHeader(line));
+      const hits = new Map<number, LibraryHit>();
+      if (targets.length > 0) {
+        const response = await fetch("/api/library/free-prices", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items: targets.map(({ line, index }) => ({ id: String(index), designation: designationWithParentLine(index), unit: String(line[unitKey] ?? ""), quantity: numberFrom(line, QUANTITY_KEYS) || 1 })) }),
+        });
+        const result = await response.json().catch(() => ({})) as { error?: string; results?: Array<{ id: string; price: number; source: string; approximate?: boolean }> };
+        if (!response.ok) { setMessage(result.error ?? "Contrôle impossible."); return; }
+        for (const hit of result.results ?? []) if (hit.price > 0) hits.set(Number(hit.id), { price: hit.price, source: hit.source, approximate: hit.approximate });
+      }
+
+      // Postes du DAO (pour repérer une ligne oubliée ou une quantité différente). Lecture légère : seulement la liste des postes.
+      let dao: DaoItem[] | null = null;
+      if (tenderIdForWeights) {
+        const supabase = createClient();
+        let rawItems: unknown = null;
+        const light = await supabase.from("tenders").select("work_items:ai_analysis->work_items").eq("id", tenderIdForWeights).single();
+        if (!light.error && light.data) rawItems = (light.data as unknown as { work_items?: unknown }).work_items;
+        if (!Array.isArray(rawItems)) {
+          const full = await supabase.from("tenders").select("ai_analysis").eq("id", tenderIdForWeights).single();
+          let analysis: unknown = full.data?.ai_analysis;
+          if (typeof analysis === "string") { try { analysis = JSON.parse(analysis); } catch { analysis = null; } }
+          const record = analysis as { work_items?: unknown; lots?: unknown } | null;
+          rawItems = record?.work_items ?? record?.lots ?? null;
+        }
+        if (Array.isArray(rawItems)) {
+          dao = (rawItems as TenderWorkItem[])
+            .filter((item) => (item.row_type ?? "item") === "item" && !item.internal_only && String(item.designation ?? "").trim())
+            .map((item) => {
+              const rawQuantity = item.quantity ?? item.quantite;
+              const parsed = typeof rawQuantity === "number" ? rawQuantity : Number(String(rawQuantity ?? "").replace(/\s/g, "").replace(",", "."));
+              return {
+                section: String(item.section_title ?? ""),
+                code: String(item.code ?? ""),
+                designation: String(item.designation ?? ""),
+                unit: String(item.unit ?? item.unite ?? ""),
+                quantity: Number.isFinite(parsed) && String(rawQuantity ?? "") !== "" ? parsed : null,
+              };
+            });
+        }
+      }
+
+      const checkLines: CheckLine[] = estimateLines
+        .map((line, index) => ({ line, index }))
+        .filter(({ line }) => daoRowType(line) === "item")
+        .map(({ line, index }) => {
+          const provenance = String(line.__priceProvenance ?? "");
+          const multiplier = Number(line.__daoMultiplier);
+          return {
+            index,
+            position: Number(line[positionKey]) || index + 1,
+            designation: String(line[designationKey] ?? ""),
+            unit: String(line[unitKey] ?? ""),
+            quantity: numberFrom(line, QUANTITY_KEYS),
+            price: numberFrom(line, UNIT_PRICE_KEYS),
+            total: Number(line[totalKey]) || 0,
+            provenance,
+            status: String(line.__priceStatus ?? ""),
+            code: String(line.__daoCode ?? ""),
+            section: String(line.__daoSectionTitle ?? ""),
+            multiplier: multiplier > 1 ? multiplier : 1,
+            auto: AUTO_PRICE_SOURCE.test(provenance),
+            internal: line.__internalOnly === true,
+            salary: isInternalLaborLine(line),
+            laborOnly: line.__laborOnly === true,
+            excluded: line.__excludedByChoice === true || line.__disabledInternal === true,
+            groupHeader: isGroupHeader(line),
+            ack: String(line.__checkAck ?? "").split(";;").filter(Boolean),
+          };
+        });
+      void unitPriceKey;
+      const alerts = buildPriceAlerts({ lines: checkLines, hits, dao });
+      setPriceAlerts(alerts);
+      const errors = alerts.filter((alert) => alert.level === "error").length;
+      setMessage(alerts.length === 0
+        ? `Contrôle terminé : aucune anomalie sur ${checkLines.length} ligne(s)${dao ? " (comparé aussi au DAO)" : ""}.`
+        : `Contrôle terminé : ${alerts.length} point(s) à regarder${errors ? ` dont ${errors} important(s)` : ""}. Rien n'a été modifié.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? `Contrôle impossible : ${error.message}` : "Contrôle impossible.");
+    } finally { document.body.style.cursor = previousCursor; setCheckBusy(false); }
+  }
+
+  async function saveCheckedLines(nextLines: EstimateLineData[], changedIndexes: number[], syncText: string) {
+    setEstimateLines(nextLines);
+    if (estimateId) {
+      const supabase = createClient();
+      await Promise.all(changedIndexes.map(async (index) => {
+        const lineId = nextLines[index]?.[LINE_ID_KEY];
+        if (lineId) await supabase.from("estimate_lines").update({ data: linePayload(nextLines[index]) }).eq("id", lineId);
+      }));
+    }
+    await persistEstimateTotal(nextLines);
+    await syncProjectAfterChange(syncText);
+  }
+
+  async function applyAlertFix(alert: PriceAlert) {
+    if (alert.index == null || !alert.fix || checkBusy) return;
+    const line = estimateLines[alert.index];
+    if (!line) return;
+    const unitPriceKey = columnName(daoColumns, UNIT_PRICE_KEYS);
+    const totalKey = columnName(daoColumns, TOTAL_KEYS);
+    const { price, source, totalOnly } = alert.fix;
+    const updated: EstimateLineData = {
+      ...line,
+      [unitPriceKey]: price,
+      [totalKey]: numberFrom(line, QUANTITY_KEYS) * price,
+      ...(totalOnly ? {} : { __priceStatus: "manual_enterprise", __priceProvenance: source }),
+    };
+    const nextLines = estimateLines.map((current, index) => (index === alert.index ? updated : current));
+    setCheckBusy(true);
+    try {
+      await saveCheckedLines(nextLines, [alert.index], "Prix corrigé");
+      setPriceAlerts((current) => (current ?? []).filter((item) => item.key !== alert.key));
+      setMessage(`Ligne corrigée : ${Math.round(price).toLocaleString("fr-FR")} Ar. Pense à régénérer les PDF.`);
+    } finally { setCheckBusy(false); }
+  }
+
+  // « Garder mon prix » : l'alerte ne revient plus tant que le prix et la quantité de la ligne ne changent pas.
+  async function keepAlertPrice(alert: PriceAlert) {
+    if (alert.index != null) {
+      const line = estimateLines[alert.index];
+      if (line) {
+        const known = String(line.__checkAck ?? "").split(";;").filter(Boolean);
+        const nextLines = estimateLines.map((current, index) => (index === alert.index ? { ...current, __checkAck: [...known.filter((item) => item !== alert.signature), alert.signature].join(";;") } : current));
+        setEstimateLines(nextLines);
+        if (estimateId) {
+          const lineId = nextLines[alert.index]?.[LINE_ID_KEY];
+          if (lineId) await createClient().from("estimate_lines").update({ data: linePayload(nextLines[alert.index]) }).eq("id", lineId);
+        }
+      }
+    }
+    setPriceAlerts((current) => (current ?? []).filter((item) => item.key !== alert.key));
+  }
+
+  function showAlertLine(index: number) {
+    setLibraryLine(null);
+    setSelectedLine(index);
+    window.setTimeout(() => document.getElementById(`estimate-line-${index}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 60);
+  }
+
   // Après un ajout, une modification ou une suppression de ligne : si le chantier de ce devis existe, il suit le devis
   // (lignes + planning), puis la dernière facture non payée reprend les nouveaux prix. Les dépenses se recalculent seules.
   // Plusieurs modifications de suite = UNE seule mise à jour du chantier (planning, dépenses, facture) après 6 secondes calmes :
@@ -3242,7 +3422,27 @@ export default function EstimateBuilder({
                 <div><span>Bénéfice attendu</span><strong>{financialSummary.expectedProfit.toLocaleString("fr-FR")} Ar</strong></div>
                 <div><span>Taxe de l&apos;État (8 %)</span><strong>{financialSummary.stateTax.toLocaleString("fr-FR")} Ar</strong></div>
                 <div className="estimateClientTotal"><span>Total à payer par le client</span><strong>{financialSummary.clientTotal.toLocaleString("fr-FR")} Ar</strong></div>
+                {commissionApplied && <div><span>{`Commission marché public (${commissionPercent.toLocaleString("fr-FR", { maximumFractionDigits: 3 })} % du total client)`}</span><strong>{financialSummary.commissionAmount.toLocaleString("fr-FR", { maximumFractionDigits: 0 })} Ar</strong></div>}
+                {commissionApplied && <div><span>Bénéfice attendu après commission</span><strong>{financialSummary.profitAfterCommission.toLocaleString("fr-FR", { maximumFractionDigits: 0 })} Ar</strong></div>}
               </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 10 }}>
+                <label style={{ display: "flex", gap: 6, alignItems: "center", fontWeight: 700, fontSize: ".85rem" }}>
+                  <input type="checkbox" checked={commissionApplied} onChange={(event) => void saveCommission(event.target.checked, commissionPercent)} />
+                  Marché public : appliquer une commission
+                </label>
+                {commissionApplied && (
+                  <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: ".85rem" }}>
+                    Taux (%)
+                    <input type="number" min="0" max="100" step="any" value={commissionPercent} style={{ width: 90 }}
+                      onChange={(event) => setCommissionPercent(Math.max(0, Number(event.target.value) || 0))}
+                      onBlur={() => void saveCommission(true, commissionPercent)} />
+                  </label>
+                )}
+              </div>
+              <p className="estimatePanelDescription" style={{ fontSize: ".78rem", marginTop: 6 }}>
+                La commission est à payer après le paiement du client, calculée sur le total TTC qu&apos;il paie (0 % possible). Elle n&apos;apparaît que dans cette synthèse et le devis interne, jamais dans le devis externe ni la facture. Elle ne s&apos;ajoute pas aux coûts : quand tu la paies, enregistre-la dans les dépenses imprévues (catégorie « Commission »).
+              </p>
+              {commissionStatus && <p className="estimatePanelDescription" style={{ fontSize: ".78rem" }}>{commissionStatus}</p>}
               {missingPriceCount > 0 && <p style={{ fontSize: ".78rem", color: "#666", marginTop: 8 }}>À compléter : {missingPriceCount} prix interne(s).</p>}
               <div className="estimatePdfCards" style={{ marginTop: 12, gridTemplateColumns: "1fr" }}>
                 <div className="estimatePdfCard"><strong>Devis interne</strong><span>Coûts réels et informations internes</span><OfficialPdfButton estimateId={estimateId} mode="internal" /></div>
@@ -3317,6 +3517,9 @@ export default function EstimateBuilder({
               {libraryPricedCount > 0 && !priceSearchStatus?.running && (
                 <button type="button" className="estimateSecondaryAction" disabled={freeBusy} onClick={() => void refreshLibraryPrices()}>{`Recalculer les ${libraryPricedCount} prix automatiques (bibliothèque et compositions, gratuit)`}</button>
               )}
+              {!priceSearchStatus?.running && estimateLines.some((line) => daoRowType(line) === "item") && (
+                <button type="button" className="estimateSecondaryAction" disabled={freeBusy || checkBusy} onClick={() => void runPriceCheck()}>{checkBusy ? "Contrôle en cours…" : "Contrôler les prix (gratuit)"}</button>
+              )}
               {priceSearchStatus?.running && (
                 <button type="button" className="estimateSecondaryAction" onClick={() => { stopSearchRef.current = true; }}>Arrêter</button>
               )}
@@ -3326,6 +3529,32 @@ export default function EstimateBuilder({
               {missingPriceCount === 0 && !priceSearchStatus?.running && <span style={{ color: "#1f7a46", fontWeight: 700 }}>Prix internes complets</span>}
               {!addLineOpen && <button type="button" className="estimateSecondaryAction" onClick={() => setAddLineOpen(true)}>+ Ajouter une ligne</button>}
             </div>
+            {priceAlerts && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
+                  <strong style={{ fontSize: ".9rem" }}>{priceAlerts.length === 0 ? "Aucune anomalie trouvée." : `${priceAlerts.length} point(s) à regarder`}</strong>
+                  <button type="button" className="estimateSecondaryAction" onClick={() => setPriceAlerts(null)}>Fermer</button>
+                </div>
+                {priceAlerts.map((alert) => {
+                  const color = alert.level === "error" ? "#b91c1c" : alert.level === "warn" ? "#d97706" : "#2563eb";
+                  const alertLine = alert.index != null ? estimateLines[alert.index] : null;
+                  const designationKey = columnName(daoColumns, ["Désignation", "Designation"]);
+                  const positionKey = columnName(daoColumns, ["N°", "N"]);
+                  return (
+                    <div key={alert.key} style={{ border: "1px solid #e5e7eb", borderLeft: `4px solid ${color}`, borderRadius: 8, padding: "8px 10px", marginBottom: 8, background: "#fff" }}>
+                      <div style={{ fontWeight: 700, fontSize: ".85rem", color }}>{alert.title}</div>
+                      {alertLine && <div style={{ fontSize: ".82rem", marginTop: 2, overflowWrap: "anywhere" }}>{`Ligne ${String(alertLine[positionKey] ?? "") || (alert.index ?? 0) + 1} — ${String(alertLine[designationKey] ?? "").slice(0, 110)}`}</div>}
+                      <div style={{ fontSize: ".8rem", color: "#444", marginTop: 2, overflowWrap: "anywhere" }}>{alert.detail}</div>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+                        {alert.fix && alert.index != null && <button type="button" className="estimatePrimaryAction" disabled={checkBusy} onClick={() => void applyAlertFix(alert)}>{alert.fix.totalOnly ? "Recalculer le total" : `Corriger : ${Math.round(alert.fix.price).toLocaleString("fr-FR")} Ar`}</button>}
+                        {alert.index != null && <button type="button" className="estimateSecondaryAction" onClick={() => showAlertLine(alert.index as number)}>Voir la ligne</button>}
+                        <button type="button" className="estimateSecondaryAction" disabled={checkBusy} onClick={() => void keepAlertPrice(alert)}>{alert.index != null ? "Garder mon prix" : "Ignorer"}</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
             {missingPriceCount > 0 && <p style={{ margin: "8px 0 0", fontSize: ".78rem", color: "#666" }}>{missingPriceCount} ligne(s) sans prix. Le calcul gratuit reprend les prix de la bibliothèque et des compositions, sans crédit IA. Pour une ligne précise, clique dessus puis « Bibliothèque ».</p>}
             {!estimateId ? <p className="estimatePanelDescription mt-3">Les prix trouvés restent dans ce brouillon puis sont enregistrés au moment de créer le devis.</p> : null}
             {addLineOpen && (
@@ -3706,6 +3935,7 @@ export default function EstimateBuilder({
               ) : (
               <Fragment key={index}>
               <tr
+                id={`estimate-line-${index}`}
                 onClick={() => setSelectedLine((current) => { setLibraryLine(null); return current === index ? null : index; })}
                 className="cursor-pointer"
                 style={numberFrom(item, UNIT_PRICE_KEYS) <= 0 && !isGroupHeader(item) ? { background: "#fff7ed" } : undefined}
